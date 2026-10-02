@@ -1,0 +1,42 @@
+[package]
+name = "project-boards"
+version = "0.1.0-dev"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "A herdr plugin for viewing and managing GitHub Projects boards"
+repository = "https://github.com/tviles/project-boards"
+
+[features]
+live = []
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+reqwest = { version = "0.13", features = ["json"] }
+graphql_client = "0.16"
+futures = "0.3"
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+unicode-width = "0.2"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+[dev-dependencies]
+insta = "1"
+wiremock = "0.6"
+tempfile = "3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
