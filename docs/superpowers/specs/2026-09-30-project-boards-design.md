@@ -315,7 +315,7 @@ Removing an item from the project, closing an issue or pull request, saving a vi
 - The token is taken from `GH_TOKEN`, then `GITHUB_TOKEN`, then `gh auth token`.
 - With no token, the pane shows a setup screen with the exact fix. `project-boards doctor` runs the same checks.
 - Missing scopes are detected from the `X-OAuth-Scopes` response header or an `INSUFFICIENT_SCOPES` error, and the fix is shown as a command: `gh auth refresh -s project` (plus `repo` for private repositories).
-- The documentation covers fine-grained tokens, including that organisation projects need the organisation-level Projects permission.
+- GitHub does not let fine-grained tokens read boards owned by a user account; those need a classic token or the `gh` login. The not-found error, the doctor and the documentation say so. Fine-grained tokens work for organisation boards that grant them the organisation's Projects permission.
 
 ### Permissions
 
@@ -404,7 +404,7 @@ Test-driven, with at least 80% line coverage measured by `cargo-llvm-cov`.
 
 - A public test project and repository under `tviles` (`tviles/project-boards-testbed`), created and seeded by a script with every field type, all three item types, iterations, and several views (table, board, board with swimlanes).
 - `PB_RECORD=1 cargo test --features live` runs against the testbed and writes fixtures to `tests/fixtures/`. Plain `cargo test` replays them offline.
-- The live suite exercises every operation in section 6 end to end. It runs manually, and in CI on release tags only, with a fine-grained token stored as a repository secret and limited to the testbed repository and project.
+- The live suite exercises every operation in section 6 end to end. It runs locally before each release, not in CI: the testbed is user-owned, and only a classic token (too broad to store as a CI secret) can reach it.
 - Cases that cannot be produced on demand, such as redacted items and unknown field types, use hand-written fixtures marked as such.
 
 ## 10. Verify before building (phase 0)
