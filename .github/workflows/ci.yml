@@ -18,3 +18,5 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all-targets
+      - run: sh scripts/check-version.sh
+      - run: sh scripts/test-install.sh

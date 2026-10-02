@@ -1,0 +1,55 @@
+# herdr plugin manifest — https://herdr.dev/docs/plugins/
+# Install: herdr plugin install tviles/project-boards
+# Develop: cargo build --release && herdr plugin link .
+
+id = "tviles.project-boards"
+name = "Project Boards"
+version = "0.1.0-dev"
+min_herdr_version = "0.9.0"
+platforms = ["linux", "macos"]
+description = "View and manage GitHub Projects boards as a table or kanban board."
+
+[[build]]
+command = ["sh", "scripts/install.sh"]
+
+[[panes]]
+id = "board"
+title = "board"
+placement = "tab"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/herdr/launch.sh\" pane"]
+
+[[actions]]
+id = "open"
+title = "Project Boards: open board"
+contexts = ["workspace", "pane"]
+command = ["sh", "herdr/launch.sh", "open"]
+
+[[actions]]
+id = "open-picker"
+title = "Project Boards: pick a board"
+contexts = ["workspace", "pane"]
+command = ["sh", "herdr/launch.sh", "open", "--picker"]
+
+[[actions]]
+id = "open-overlay"
+title = "Project Boards: open board as overlay"
+contexts = ["workspace", "pane"]
+command = ["sh", "herdr/launch.sh", "open", "--placement", "overlay"]
+
+[[actions]]
+id = "open-split"
+title = "Project Boards: open board in a split"
+contexts = ["pane"]
+command = ["sh", "herdr/launch.sh", "open", "--placement", "split"]
+
+[[actions]]
+id = "open-zoomed"
+title = "Project Boards: open board zoomed"
+contexts = ["pane"]
+command = ["sh", "herdr/launch.sh", "open", "--placement", "zoomed"]
+
+[[actions]]
+id = "doctor"
+title = "Project Boards: run doctor"
+contexts = ["workspace", "pane"]
+command = ["sh", "herdr/launch.sh", "doctor", "--notify"]
