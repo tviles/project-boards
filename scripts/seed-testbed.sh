@@ -88,7 +88,9 @@ urls+=("$pr_url")
 existing=$(gh project list --owner "$OWNER" --limit 100 --format json --jq ".projects[] | select(.title == \"$TITLE\") | \"\\(.number) \\(.id)\"" | head -n 1)
 if [ -n "$existing" ]; then
   read -r number project_id <<<"$existing"
+  reused=1
 else
+  reused=0
   owner_id=$(gh api user --jq .node_id)
   read -r number project_id < <(gh api graphql \
     -f query='mutation($o:ID!,$t:String!){createProjectV2(input:{ownerId:$o,title:$t}){projectV2{id number}}}' \
@@ -139,6 +141,24 @@ for u in "${urls[@]}"; do
   ids+=("$(gh api graphql -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
     -f p="$project_id" -f c="$content_id" --jq .data.addProjectV2ItemById.item.id)")
 done
+# ProjectV2.items lags fresh writes (index delay), so on a reused project wait until the
+# items just added are visible; otherwise the draft lookup below could miss existing drafts
+# and create duplicates. The archived closed issue is not counted by totalCount, hence the -1.
+if [ "$reused" = 1 ]; then
+  want=$((${#ids[@]} - 1))
+  waited=0
+  while :; do
+    have=$(gh api graphql -f query='query($p:ID!){node(id:$p){... on ProjectV2{items(first:100){totalCount}}}}' \
+      -f p="$project_id" --jq .data.node.items.totalCount)
+    [ "$have" -ge "$want" ] && break
+    if [ "$waited" -ge 120 ]; then
+      echo "project items not indexed yet; wait a minute and re-run" >&2
+      exit 1
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
+fi
 DRAFTS_QUERY='query($p:ID!){node(id:$p){... on ProjectV2{items(first:100){nodes{id content{__typename ... on DraftIssue{title}}}}}}}'
 draft() { # title body -> item id of the draft with that title, creating it if none
   local id
