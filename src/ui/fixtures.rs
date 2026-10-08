@@ -198,17 +198,28 @@ pub fn snapshot() -> BoardSnapshot {
 }
 
 /// Renders with `draw` into a `w`x`h` test terminal and returns the screen as text.
+/// A wide character occupies two cells, and ratatui's buffer holds a blank symbol in the
+/// trailing cell. That cell is skipped here so the text reads as drawn ("🚀 hi", not
+/// "🚀  hi"), which is what UI tests should assert.
 pub fn render_to_string(w: u16, h: u16, draw: impl FnOnce(&mut Frame)) -> String {
+    use unicode_width::UnicodeWidthStr;
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
     terminal.draw(draw).unwrap();
     let buf = terminal.backend().buffer().clone();
     (0..h)
         .map(|y| {
-            (0..w)
-                .map(|x| buf[(x, y)].symbol().to_string())
-                .collect::<String>()
-                .trim_end()
-                .to_string()
+            let mut line = String::new();
+            let mut skip = 0;
+            for x in 0..w {
+                if skip > 0 {
+                    skip -= 1;
+                    continue;
+                }
+                let symbol = buf[(x, y)].symbol();
+                skip = symbol.width().saturating_sub(1);
+                line.push_str(symbol);
+            }
+            line.trim_end().to_string()
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -220,4 +231,18 @@ pub fn key(c: char) -> KeyEvent {
 
 pub fn code(c: KeyCode) -> KeyEvent {
     KeyEvent::new(c, KeyModifiers::NONE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::widgets::Paragraph;
+
+    #[test]
+    fn render_to_string_keeps_wide_characters_once() {
+        let out = render_to_string(10, 2, |f| {
+            f.render_widget(Paragraph::new("🚀 hi\n中文"), f.area())
+        });
+        assert_eq!(out, "🚀 hi\n中文");
+    }
 }

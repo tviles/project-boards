@@ -253,6 +253,14 @@ impl Keymap {
             match KeySpec::parse(key) {
                 Ok(spec) => {
                     map.bindings.retain(|(_, a)| *a != action);
+                    if let Some(old) = map.bindings.iter().find(|(k, _)| *k == spec).map(|b| b.1) {
+                        map.bindings.retain(|(k, _)| *k != spec);
+                        warnings.push(format!(
+                            "[keys] {name}: {} was bound to {}; it now triggers {name}",
+                            spec.label(),
+                            old.name()
+                        ));
+                    }
                     map.bindings.push((spec, action));
                 }
                 Err(e) => warnings.push(format!("[keys] {name}: {e}")),
@@ -342,6 +350,35 @@ mod tests {
             "a bad override leaves the default"
         );
         assert_eq!(warnings.len(), 2);
+    }
+
+    #[test]
+    fn override_stealing_a_default_key_takes_effect_with_a_warning() {
+        let mut o = BTreeMap::new();
+        o.insert("help".to_string(), "k".to_string());
+        let (km, warnings) = Keymap::with_overrides(&o);
+        assert_eq!(
+            km.action(&ev(KeyCode::Char('k'), KeyModifiers::NONE)),
+            Some(Action::Help)
+        );
+        assert_eq!(
+            km.action(&ev(KeyCode::Up, KeyModifiers::NONE)),
+            Some(Action::Up)
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+    }
+
+    #[test]
+    fn esc_goes_back_and_q_quits() {
+        let km = Keymap::defaults();
+        assert_eq!(
+            km.action(&ev(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(Action::Back)
+        );
+        assert_eq!(
+            km.action(&ev(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Some(Action::Quit)
+        );
     }
 
     #[test]
