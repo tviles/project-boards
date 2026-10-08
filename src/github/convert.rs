@@ -134,6 +134,119 @@ pub fn project_from_wire(v: &Value, board: &BoardRef) -> Result<Project, GithubE
     })
 }
 
+fn logins(v: &Value, key: &str) -> Vec<String> {
+    nodes(v, key)
+        .into_iter()
+        .filter_map(|n| {
+            n["login"]
+                .as_str()
+                .or_else(|| n["slug"].as_str())
+                .map(String::from)
+        })
+        .collect()
+}
+
+pub fn value_from_wire(v: &Value) -> Option<(FieldId, FieldValue)> {
+    let field = FieldId::new(v["field"]["id"].as_str()?);
+    let value = match typename(v) {
+        "ProjectV2ItemFieldTextValue" => FieldValue::Text(v["text"].as_str()?.to_string()),
+        "ProjectV2ItemFieldNumberValue" => FieldValue::Number(v["number"].as_f64()?),
+        "ProjectV2ItemFieldDateValue" => FieldValue::Date(v["date"].as_str()?.to_string()),
+        "ProjectV2ItemFieldSingleSelectValue" => FieldValue::SingleSelect {
+            option_id: OptionId::new(v["optionId"].as_str()?),
+            name: str_of(&v["name"]),
+        },
+        "ProjectV2ItemFieldMultiSelectValue" => {
+            let opts = v["options"].as_array()?;
+            FieldValue::MultiSelect {
+                option_ids: opts
+                    .iter()
+                    .map(|o| OptionId::new(str_of(&o["id"])))
+                    .collect(),
+                names: opts.iter().map(|o| str_of(&o["name"])).collect(),
+            }
+        }
+        "ProjectV2ItemFieldIterationValue" => FieldValue::Iteration {
+            iteration_id: IterationId::new(v["iterationId"].as_str()?),
+            title: str_of(&v["title"]),
+            start_date: str_of(&v["startDate"]),
+        },
+        "ProjectV2ItemFieldLabelValue" => FieldValue::Labels(
+            nodes(v, "labels")
+                .into_iter()
+                .map(|l| Label {
+                    name: str_of(&l["name"]),
+                    color: str_of(&l["color"]),
+                })
+                .collect(),
+        ),
+        "ProjectV2ItemFieldUserValue" => FieldValue::Users(logins(v, "users")),
+        "ProjectV2ItemFieldReviewerValue" => FieldValue::Reviewers(logins(v, "reviewers")),
+        "ProjectV2ItemFieldMilestoneValue" => {
+            FieldValue::Milestone(v["milestone"]["title"].as_str()?.to_string())
+        }
+        "ProjectV2ItemFieldRepositoryValue" => {
+            FieldValue::Repository(v["repository"]["nameWithOwner"].as_str()?.to_string())
+        }
+        "ProjectV2ItemFieldPullRequestValue" => FieldValue::PullRequests(
+            nodes(v, "pullRequests")
+                .into_iter()
+                .filter_map(|p| p["number"].as_u64().map(|n| n as u32))
+                .collect(),
+        ),
+        _ => return None,
+    };
+    Some((field, value))
+}
+
+fn content_from_wire(c: &Value) -> ItemContent {
+    if c.is_null() {
+        return ItemContent::Redacted;
+    }
+    let reference = || ContentRef {
+        repo: str_of(&c["repository"]["nameWithOwner"]),
+        number: c["number"].as_u64().unwrap_or(0) as u32,
+        url: str_of(&c["url"]),
+    };
+    match typename(c) {
+        "Issue" => ItemContent::Issue {
+            reference: reference(),
+            title: str_of(&c["title"]),
+            state: ContentState::from_api(c["state"].as_str().unwrap_or("")),
+        },
+        "PullRequest" => ItemContent::PullRequest {
+            reference: reference(),
+            title: str_of(&c["title"]),
+            state: ContentState::from_api(c["state"].as_str().unwrap_or("")),
+            is_draft: c["isDraft"].as_bool().unwrap_or(false),
+        },
+        "DraftIssue" => ItemContent::Draft {
+            title: str_of(&c["title"]),
+        },
+        other => ItemContent::Unknown {
+            type_name: other.to_string(),
+        },
+    }
+}
+
+/// Decodes an `ItemFields` object. `None` for null or non-item nodes.
+pub fn item_from_wire(v: &Value) -> Option<Item> {
+    let id = v["id"].as_str()?;
+    if v.get("fieldValues").is_none() && v.get("content").is_none() {
+        return None;
+    }
+    Some(Item {
+        id: ItemId::new(id),
+        content: content_from_wire(&v["content"]),
+        archived: v["isArchived"].as_bool().unwrap_or(false),
+        updated_at: str_of(&v["updatedAt"]),
+        values: nodes(v, "fieldValues")
+            .into_iter()
+            .filter_map(value_from_wire)
+            .collect(),
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -251,5 +364,95 @@ pub(crate) mod tests {
             project_from_wire(&v, &board()),
             Err(GithubError::Decode(_))
         ));
+    }
+
+    pub fn item_json() -> serde_json::Value {
+        json!({
+            "id": "PVTI_1", "type": "ISSUE", "isArchived": false, "updatedAt": "2026-10-01T10:00:00Z",
+            "content": {"__typename": "Issue", "number": 12, "title": "Crash 🚀", "url": "https://github.com/tviles/t/issues/12",
+                        "state": "OPEN", "repository": {"nameWithOwner": "tviles/t"}},
+            "fieldValues": {"nodes": [
+                {"__typename": "ProjectV2ItemFieldTextValue", "text": "Crash 🚀", "field": {"id": "F_title"}},
+                {"__typename": "ProjectV2ItemFieldSingleSelectValue", "optionId": "o_todo", "name": "Todo", "field": {"id": "F_status"}},
+                {"__typename": "ProjectV2ItemFieldMultiSelectValue", "options": [{"id": "m_api", "name": "api"}], "field": {"id": "F_areas"}},
+                {"__typename": "ProjectV2ItemFieldIterationValue", "iterationId": "it2", "title": "Sprint 2", "startDate": "2026-10-15", "field": {"id": "F_sprint"}},
+                {"__typename": "ProjectV2ItemFieldNumberValue", "number": 3.0, "field": {"id": "F_size"}},
+                {"__typename": "ProjectV2ItemFieldUserValue", "users": {"nodes": [{"login": "tviles"}]}, "field": {"id": "F_assignees"}},
+                {"__typename": "ProjectV2ItemFieldLabelValue", "labels": {"nodes": [{"name": "bug", "color": "d73a4a"}]}, "field": {"id": "F_labels"}},
+                {"__typename": "ProjectV2ItemIssueFieldValue"},
+                {"__typename": "ProjectV2ItemFieldFromTheFuture", "field": {"id": "F_future"}}
+            ]}
+        })
+    }
+
+    #[test]
+    fn decodes_issue_items_and_their_values() {
+        let item = item_from_wire(&item_json()).unwrap();
+        assert_eq!(item.title(), "Crash 🚀");
+        assert_eq!(item.number(), Some(12));
+        assert_eq!(item.assignees(), ["tviles"]);
+        assert_eq!(item.label_names(), ["bug"]);
+        assert_eq!(
+            item.value(&FieldId::new("F_status")),
+            Some(&FieldValue::SingleSelect {
+                option_id: OptionId::new("o_todo"),
+                name: "Todo".into()
+            })
+        );
+        assert_eq!(
+            item.value(&FieldId::new("F_size")),
+            Some(&FieldValue::Number(3.0))
+        );
+        assert!(
+            matches!(item.value(&FieldId::new("F_sprint")), Some(FieldValue::Iteration { title, .. }) if title == "Sprint 2")
+        );
+    }
+
+    #[test]
+    fn values_of_unknown_types_are_dropped() {
+        let item = item_from_wire(&item_json()).unwrap();
+        assert!(item.value(&FieldId::new("F_future")).is_none());
+        assert_eq!(item.values.len(), 7);
+    }
+
+    #[test]
+    fn null_content_is_redacted_and_unknown_content_is_kept() {
+        let mut v = item_json();
+        v["content"] = serde_json::Value::Null;
+        assert_eq!(item_from_wire(&v).unwrap().content, ItemContent::Redacted);
+        v["content"] = json!({"__typename": "Discussion"});
+        assert_eq!(
+            item_from_wire(&v).unwrap().content,
+            ItemContent::Unknown {
+                type_name: "Discussion".into()
+            }
+        );
+    }
+
+    #[test]
+    fn drafts_and_pull_requests_decode() {
+        let mut v = item_json();
+        v["content"] = json!({"__typename": "DraftIssue", "title": "Idea"});
+        assert_eq!(
+            item_from_wire(&v).unwrap().content,
+            ItemContent::Draft {
+                title: "Idea".into()
+            }
+        );
+        v["content"] = json!({"__typename": "PullRequest", "number": 4, "title": "PR", "url": "u", "state": "MERGED", "isDraft": false,
+                              "repository": {"nameWithOwner": "tviles/t"}});
+        assert!(matches!(
+            item_from_wire(&v).unwrap().content,
+            ItemContent::PullRequest {
+                state: ContentState::Merged,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn non_item_nodes_are_skipped() {
+        assert!(item_from_wire(&serde_json::Value::Null).is_none());
+        assert!(item_from_wire(&json!({"__typename": "Issue"})).is_none());
     }
 }

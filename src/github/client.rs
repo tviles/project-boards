@@ -83,6 +83,77 @@ impl Github {
     }
 }
 
+/// One page of a connection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Page<T> {
+    pub nodes: Vec<T>,
+    pub total: usize,
+    /// Cursor for the next page, `None` on the last page.
+    pub next: Option<String>,
+}
+
+fn page_meta(conn: &serde_json::Value) -> (usize, Option<String>) {
+    let total = conn["totalCount"].as_u64().unwrap_or(0) as usize;
+    let next = (conn["pageInfo"]["hasNextPage"].as_bool() == Some(true))
+        .then(|| conn["pageInfo"]["endCursor"].as_str().map(String::from))
+        .flatten();
+    (total, next)
+}
+
+impl Github {
+    pub async fn fetch_items_page(
+        &self,
+        project: &ProjectId,
+        query: &str,
+        after: Option<String>,
+    ) -> Result<Page<Item>, GithubError> {
+        let body = queries::ItemsPage::build_query(queries::items_page::Variables {
+            id: project.0.clone(),
+            after,
+            query: query.to_string(),
+        });
+        let data = self.run(GraphqlRequest::from_body(body)).await?.data;
+        let (total, next) = page_meta(&data["node"]["items"]);
+        let nodes = convert::nodes(&data["node"], "items")
+            .into_iter()
+            .filter_map(convert::item_from_wire)
+            .collect();
+        Ok(Page { nodes, total, next })
+    }
+
+    pub async fn fetch_view_ids_page(
+        &self,
+        project: &ProjectId,
+        query: &str,
+        after: Option<String>,
+    ) -> Result<Page<ItemId>, GithubError> {
+        let body = queries::ViewItemIds::build_query(queries::view_item_ids::Variables {
+            id: project.0.clone(),
+            after,
+            query: query.to_string(),
+        });
+        let data = self.run(GraphqlRequest::from_body(body)).await?.data;
+        let (total, next) = page_meta(&data["node"]["items"]);
+        let nodes = convert::nodes(&data["node"], "items")
+            .into_iter()
+            .filter_map(|n| n["id"].as_str().map(ItemId::new))
+            .collect();
+        Ok(Page { nodes, total, next })
+    }
+
+    /// Loads items by id. Pass at most 100 ids; ids that no longer exist are skipped.
+    pub async fn hydrate_items(&self, ids: &[ItemId]) -> Result<Vec<Item>, GithubError> {
+        let body = queries::HydrateItems::build_query(queries::hydrate_items::Variables {
+            ids: ids.iter().map(|i| i.0.clone()).collect(),
+        });
+        let data = self.run(GraphqlRequest::from_body(body)).await?.data;
+        Ok(data["nodes"]
+            .as_array()
+            .map(|a| a.iter().filter_map(convert::item_from_wire).collect())
+            .unwrap_or_default())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +224,58 @@ mod tests {
         let v = g.viewer().await.unwrap();
         assert_eq!(v.login, "tviles");
         assert_eq!(g.rate().remaining, Some(42));
+    }
+
+    use crate::github::convert::tests::item_json;
+
+    #[tokio::test]
+    async fn items_page_decodes_nodes_total_and_cursor() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push(
+            "ItemsPage",
+            json!({"node": {"items": {"totalCount": 250,
+            "pageInfo": {"hasNextPage": true, "endCursor": "c1"}, "nodes": [item_json(), null]}}}),
+        );
+        let page = gh(t.clone())
+            .fetch_items_page(&ProjectId::new("PVT_1"), "label:bug", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            (page.nodes.len(), page.total, page.next.as_deref()),
+            (1, 250, Some("c1"))
+        );
+        let req = &t.requests()[0];
+        assert_eq!(
+            (
+                req.variables["id"].as_str(),
+                req.variables["query"].as_str()
+            ),
+            (Some("PVT_1"), Some("label:bug"))
+        );
+    }
+
+    #[tokio::test]
+    async fn last_page_has_no_cursor() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push("ViewItemIds", json!({"node": {"items": {"totalCount": 2,
+            "pageInfo": {"hasNextPage": false, "endCursor": "c9"}, "nodes": [{"id": "a"}, {"id": "b"}]}}}));
+        let page = gh(t)
+            .fetch_view_ids_page(&ProjectId::new("P"), "", Some("c8".into()))
+            .await
+            .unwrap();
+        assert_eq!(page.nodes, vec![ItemId::new("a"), ItemId::new("b")]);
+        assert_eq!(page.next, None);
+    }
+
+    #[tokio::test]
+    async fn hydrate_skips_nulls() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push("HydrateItems", json!({"nodes": [item_json(), null]}));
+        let items = gh(t.clone())
+            .hydrate_items(&[ItemId::new("PVTI_1"), ItemId::new("gone")])
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(t.requests()[0].variables["ids"], json!(["PVTI_1", "gone"]));
     }
 }
