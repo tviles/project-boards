@@ -199,24 +199,27 @@ pub fn snapshot() -> BoardSnapshot {
 
 /// Renders with `draw` into a `w`x`h` test terminal and returns the screen as text.
 /// A wide character occupies two cells, and ratatui's buffer holds a blank symbol in the
-/// trailing cell. That cell is skipped here so the text reads as drawn ("🚀 hi", not
-/// "🚀  hi"), which is what UI tests should assert.
+/// trailing cell. That cell is skipped here, only when it is blank, so the text reads as
+/// drawn ("🚀 hi", not "🚀  hi"). A non-blank trailing cell is a real overlap and is printed.
 pub fn render_to_string(w: u16, h: u16, draw: impl FnOnce(&mut Frame)) -> String {
     use unicode_width::UnicodeWidthStr;
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
-    terminal.draw(draw).unwrap();
-    let buf = terminal.backend().buffer().clone();
+    // The completed frame's buffer, not the backend's: the backend only receives the diff,
+    // which drops any cell that follows a wide glyph.
+    let buf = terminal.draw(draw).unwrap().buffer.clone();
     (0..h)
         .map(|y| {
             let mut line = String::new();
             let mut skip = 0;
             for x in 0..w {
+                let symbol = buf[(x, y)].symbol();
                 if skip > 0 {
                     skip -= 1;
-                    continue;
+                    if symbol == " " {
+                        continue;
+                    }
                 }
-                let symbol = buf[(x, y)].symbol();
-                skip = symbol.width().saturating_sub(1);
+                skip = skip.max(symbol.width().saturating_sub(1));
                 line.push_str(symbol);
             }
             line.trim_end().to_string()
@@ -244,5 +247,15 @@ mod tests {
             f.render_widget(Paragraph::new("🚀 hi\n中文"), f.area())
         });
         assert_eq!(out, "🚀 hi\n中文");
+    }
+
+    #[test]
+    fn render_to_string_prints_a_real_overlap_after_a_wide_glyph() {
+        let out = render_to_string(6, 1, |f| {
+            let buf = f.buffer_mut();
+            buf[(0, 0)].set_symbol("🚀");
+            buf[(1, 0)].set_symbol("X");
+        });
+        assert_eq!(out, "🚀X");
     }
 }
