@@ -11,3 +11,4 @@ pub mod model;
 pub mod state;
 pub mod store;
 pub mod sync;
+pub mod ui;
