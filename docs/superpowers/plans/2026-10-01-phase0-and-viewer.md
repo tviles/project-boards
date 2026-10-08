@@ -779,9 +779,16 @@ A tag `v*` builds and publishes. A manual run with `dry_run` builds all four tar
 
 ```yaml
 name: release
+# Three triggers: 1. push a tag (v*) to publish, 2. PR workflow_dispatch with dry_run to test the build,
+# 3. pull_request on release.yml or Cargo files to run the build matrix automatically (for merge preview).
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -10727,8 +10734,7 @@ The live suite does not run in CI (decision 9). Run it locally with your `gh` lo
 Run: `cargo test --features live --test live`
 Expected: all live tests PASS. If the testbed was reseeded or GitHub changed its responses, re-record with `PB_RECORD=1 cargo test --features live --test live`, check `git diff tests/fixtures`, commit the new fixtures, and push.
 
-Run: `gh workflow run release.yml -f dry_run=true && gh run watch`
-Expected: all four build jobs pass.
+Expected: the release build runs automatically on the PR when release.yml or Cargo files change, and the four build jobs pass. After the PR merges to main, `gh workflow run release.yml -f dry_run=true && gh run watch` works too for testing builds on-demand.
 
 - [ ] **Step 6: Release 0.1.0 (ask first)**
 

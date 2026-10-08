@@ -1,7 +1,14 @@
 name: release
+# Three triggers: 1. push a tag (v*) to publish, 2. PR workflow_dispatch with dry_run to test the build,
+# 3. pull_request on release.yml or Cargo files to run the build matrix automatically (for merge preview).
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
   workflow_dispatch:
     inputs:
       dry_run:
