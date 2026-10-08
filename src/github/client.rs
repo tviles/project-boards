@@ -100,6 +100,21 @@ fn page_meta(conn: &serde_json::Value) -> (usize, Option<String>) {
     (total, next)
 }
 
+fn items_conn<'a>(
+    data: &'a serde_json::Value,
+    id: &ProjectId,
+) -> Result<&'a serde_json::Value, GithubError> {
+    let conn = &data["node"]["items"];
+    if conn.is_object() {
+        Ok(conn)
+    } else {
+        Err(GithubError::Decode(format!(
+            "project {} not found or not visible to this token",
+            id.0
+        )))
+    }
+}
+
 impl Github {
     pub async fn fetch_items_page(
         &self,
@@ -113,7 +128,7 @@ impl Github {
             query: query.to_string(),
         });
         let data = self.run(GraphqlRequest::from_body(body)).await?.data;
-        let (total, next) = page_meta(&data["node"]["items"]);
+        let (total, next) = page_meta(items_conn(&data, project)?);
         let nodes = convert::nodes(&data["node"], "items")
             .into_iter()
             .filter_map(convert::item_from_wire)
@@ -133,7 +148,7 @@ impl Github {
             query: query.to_string(),
         });
         let data = self.run(GraphqlRequest::from_body(body)).await?.data;
-        let (total, next) = page_meta(&data["node"]["items"]);
+        let (total, next) = page_meta(items_conn(&data, project)?);
         let nodes = convert::nodes(&data["node"], "items")
             .into_iter()
             .filter_map(|n| n["id"].as_str().map(ItemId::new))
@@ -147,10 +162,10 @@ impl Github {
             ids: ids.iter().map(|i| i.0.clone()).collect(),
         });
         let data = self.run(GraphqlRequest::from_body(body)).await?.data;
-        Ok(data["nodes"]
+        let nodes = data["nodes"]
             .as_array()
-            .map(|a| a.iter().filter_map(convert::item_from_wire).collect())
-            .unwrap_or_default())
+            .ok_or_else(|| GithubError::Decode("hydrate response has no nodes array".into()))?;
+        Ok(nodes.iter().filter_map(convert::item_from_wire).collect())
     }
 }
 
@@ -277,5 +292,30 @@ mod tests {
             .unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(t.requests()[0].variables["ids"], json!(["PVTI_1", "gone"]));
+    }
+
+    #[tokio::test]
+    async fn missing_project_node_is_a_decode_error_not_an_empty_page() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push("ItemsPage", json!({"node": null}));
+        t.push("ViewItemIds", json!({"node": null}));
+        let g = gh(t);
+        let p = ProjectId::new("PVT_x");
+        assert!(matches!(
+            g.fetch_items_page(&p, "", None).await,
+            Err(GithubError::Decode(_))
+        ));
+        assert!(matches!(
+            g.fetch_view_ids_page(&p, "", None).await,
+            Err(GithubError::Decode(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn hydrate_without_nodes_array_is_a_decode_error() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push("HydrateItems", json!({"nodes": null}));
+        let r = gh(t).hydrate_items(&[ItemId::new("a")]).await;
+        assert!(matches!(r, Err(GithubError::Decode(_))), "{r:?}");
     }
 }

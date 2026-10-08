@@ -455,4 +455,14 @@ pub(crate) mod tests {
         assert!(item_from_wire(&serde_json::Value::Null).is_none());
         assert!(item_from_wire(&json!({"__typename": "Issue"})).is_none());
     }
+
+    #[test]
+    fn extra_typename_keys_on_value_fields_are_ignored() {
+        let v = json!({"__typename": "ProjectV2ItemFieldTextValue", "text": "x",
+                       "field": {"__typename": "ProjectV2Field", "id": "F_title"}});
+        assert_eq!(
+            value_from_wire(&v),
+            Some((FieldId::new("F_title"), FieldValue::Text("x".into())))
+        );
+    }
 }
