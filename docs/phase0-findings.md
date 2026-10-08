@@ -2,13 +2,13 @@
 
 | # | Question | Answer | Consequence |
 |---|---|---|---|
-| 0 | Index lag after a write | A new draft stayed invisible for more than 73 s in all three item-list forms (`query: ""`, no `query`, `orderBy` POSITION) | Changes made by others appear a minute or more late. Input to the 0.2 plan: mutation responses must update the confirmed layer directly, and confirmed edits must outrank stale poll results for several minutes. 0.1 is read-only: no code change |
-| 1 | `updated:>=` in `items(query:)` | Date only: `updated:>=<datetime>` returns 0; `updated:>=<date>` works | INCREMENTAL_MODE = Date |
-| 2 | Web filter syntax parity | Every check matches except `is:issue` (server 12, client 10: it also counts draft issues) | Documented; evaluated client-side in a later milestone |
-| 3 | View filter round trip; group-by/sort writable | Filter round trip exact. `UpdateProjectV2ViewInput` has no group field (awk check printed `0`); group-by/sort read-back was empty but inconclusive, because the manual view settings had not been applied | Local overrides as designed. Re-check read-back when fixtures are recorded in Task 10, after the settings are applied |
+| 0 | Index lag after a write | A new draft stayed invisible for more than 73 s in all three item-list forms (`query: ""`, no `query`, `orderBy` POSITION). This is a lower bound, measured once, by adding a draft with our own token | Changes made by others appear a minute or more late. Input to the 0.2 plan: mutation responses must update the confirmed layer directly, and confirmed edits must outrank stale poll results for several minutes. 0.1 is read-only: no code change |
+| 1 | `updated:>=` in `items(query:)` | `updated:>=<datetime>` returns 0 (solid). `updated:>=<date>` returns items (all 13), but this is not yet shown to exclude older ones: every item was probably updated on the pivot day, so it cannot be told apart from the date filter being ignored | INCREMENTAL_MODE = Date (decision kept). To be re-verified once the testbed has items updated on different days, e.g. at Task 10 fixture recording |
+| 2 | Web filter syntax parity | Every check matches except `is:issue` (server 12, client 10). Inferred, not tested: it also counts draft issues (10 issues + 2 drafts = 12) | Documented; evaluated client-side in a later milestone |
+| 3 | View filter round trip; group-by/sort writable | Filter write persists and reads back exactly across runs: the Probe view already held `label:bug -status:Done` at the start of run 2 (written by run 1) and run 2's views query read it back exactly. Within run 2 the write was idempotent, so its response comparison alone proves little. `UpdateProjectV2ViewInput` has no group field (awk check printed `0`); group-by/sort read-back was empty but inconclusive, because the manual view settings had not been applied | Local overrides as designed. Re-check read-back when fixtures are recorded in Task 10, after the settings are applied |
 | 4 | Mouse drag reaches a tab pane | Yes (tab log: 11 Down, 129 Drag, 11 Up). Not exercised in the overlay (no clicks there) | Drag in 0.4 as designed |
 | 5 | Focus events reach plugin panes | Yes (FocusGained/FocusLost in both logs) | FOCUS_EVENTS_EXPECTED = yes |
-| 6 | Esc in overlay | Reaches the plugin (4 Esc key events in the overlay log). The overlay looked like a second tab to Tyler | Documented in README |
+| 6 | Esc in overlay | Reaches the plugin (4 Esc key events in the overlay log). The overlay looked like a second tab to Tyler | Documented in README, but the overlay placement semantics are not independently confirmed: Tyler saw the overlay as "a second tab", and the overlay log's Resize(144, 46) is 2 cells smaller each way than the tab log's Resize(146, 48), which suggests it was a real overlay. Re-check Esc in the overlay during 0.1 manual testing |
 | 7 | Oldest herdr with everything used | 0.7.0 (docs and source reading, not run on 0.7.0). Ruling: keep `min_herdr_version = "0.9.0"` (focus-event fix landed in 0.9.1) | manifest unchanged |
 | 8 | Pane closes when its process exits | Left open: after q the screen cleared and the pane stayed | The pane must close itself (Task 25 as planned); README wording |
 
@@ -27,7 +27,7 @@ Tyler's observations (probe-observations.md): the overlay opened looking like a 
 
 ## API probes (2026-10-06 run 2)
 
-## 0. Index lag
+### 0. Index lag
 
 - t+0s [0 query:""]: 13 items, new id present: false
 - t+0s [0b no query]: 13 items, new id present: false
@@ -77,14 +77,14 @@ Probe item deleted.
 
 All items: 13
 
-## 1. Incremental filter
+### 1. Incremental filter
 
 Pivot 2026-10-06T16:12:06Z; items updated at or after it: 7
 
 - `updated:>=2026-10-06T16:12:06Z` → 0 items (datetime exact: false)
 - `updated:>=2026-10-06` → 13 items (datetime exact: false)
 
-## 2. Filter syntax
+### 2. Filter syntax
 
 - `label:bug` → server 1 / expected 1 ✓
 - `-label:bug` → server 12 / expected 12 ✓
@@ -96,7 +96,7 @@ Pivot 2026-10-06T16:12:06Z; items updated at or after it: 7
 - `is:issue` → server 12 / expected 10 ✗
 - `is:draft` → server 2 / expected 2 ✓
 
-## 3. Views
+### 3. Views
 
 - "View 1" ("TABLE_LAYOUT"): filter Null, groupBy [], columnBy [], sortBy []
 - "Board" ("BOARD_LAYOUT"): filter Null, groupBy [], columnBy [{"name":"Status"}], sortBy []

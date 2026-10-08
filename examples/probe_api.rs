@@ -132,7 +132,10 @@ async fn probe_index_lag(t: &HttpTransport, project_id: &str) {
         match first_seen[n] {
             Some(0) => println!("- [{label}] visible immediately"),
             Some(s) => println!("- [{label}] first visible after about {s}s"),
-            None => println!("- [{label}] NOT visible within 60s"),
+            None => println!(
+                "- [{label}] NOT visible after {}s",
+                start.elapsed().as_secs()
+            ),
         }
     }
     let del = r#"mutation D($p: ID!, $i: ID!) { deleteProjectV2Item(input: {projectId: $p, itemId: $i}) { deletedItemId } }"#;
@@ -294,7 +297,6 @@ async fn main() {
         Err(e) => println!("\nFilter write error: {e}"),
     }
     println!(
-        "\nGroup-by and sort are not in UpdateProjectV2ViewInput in schema {}; confirm by checking the schema copy for `groupBy` inside that input.",
-        env!("CARGO_PKG_VERSION")
+        "\nGroup-by and sort are not in UpdateProjectV2ViewInput; confirm by checking the schema copy for `groupBy` inside that input."
     );
 }
