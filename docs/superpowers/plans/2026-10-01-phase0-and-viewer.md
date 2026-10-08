@@ -5837,7 +5837,7 @@ pub enum IncrementalMode {
 }
 
 /// Set from phase 0 finding 1 (docs/phase0-findings.md).
-pub const INCREMENTAL_MODE: IncrementalMode = IncrementalMode::DateTime;
+pub const INCREMENTAL_MODE: IncrementalMode = IncrementalMode::Date;
 
 pub fn incremental_query(mode: IncrementalMode, since: &str) -> Option<String> {
     match mode {
@@ -5895,7 +5895,7 @@ Expected: 2 tests PASS.
 
 - [ ] **Step 3: Apply phase 0 finding 1**
 
-Set `INCREMENTAL_MODE` in `src/sync/mod.rs` to the value recorded in `docs/phase0-findings.md` (`DateTime`, `Date` or `Unsupported`).
+Set `INCREMENTAL_MODE` in `src/sync/mod.rs` to the value recorded in `docs/phase0-findings.md` (`DateTime`, `Date` or `Unsupported`). Phase 0 recorded `Date`, so the constant in Step 2's code is already `IncrementalMode::Date`.
 
 - [ ] **Step 4: Write the failing syncer tests (bottom of `src/sync/syncer.rs`)**
 
