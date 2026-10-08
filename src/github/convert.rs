@@ -247,6 +247,21 @@ pub fn item_from_wire(v: &Value) -> Option<Item> {
     })
 }
 
+/// Decodes a `ProjectSummaryFields` object.
+pub fn summary_from_wire(v: &Value) -> Option<ProjectSummary> {
+    let owner = v["owner"]["login"].as_str()?;
+    let number = v["number"].as_u64()? as u32;
+    Some(ProjectSummary {
+        id: ProjectId::new(v["id"].as_str()?),
+        board: BoardRef {
+            owner: owner.to_string(),
+            number,
+        },
+        title: str_of(&v["title"]),
+        closed: v["closed"].as_bool().unwrap_or(false),
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

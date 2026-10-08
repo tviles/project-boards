@@ -167,6 +167,40 @@ impl Github {
             .ok_or_else(|| GithubError::Decode("hydrate response has no nodes array".into()))?;
         Ok(nodes.iter().filter_map(convert::item_from_wire).collect())
     }
+
+    pub async fn list_repo_projects(
+        &self,
+        repo: &RepoSlug,
+    ) -> Result<Vec<ProjectSummary>, GithubError> {
+        let body = queries::RepoProjects::build_query(queries::repo_projects::Variables {
+            owner: repo.owner.clone(),
+            name: repo.name.clone(),
+        });
+        let data = self.run(GraphqlRequest::from_body(body)).await?.data;
+        Ok(convert::nodes(&data["repository"], "projectsV2")
+            .into_iter()
+            .filter_map(convert::summary_from_wire)
+            .collect())
+    }
+
+    /// The viewer's own boards, then each organisation's.
+    pub async fn list_viewer_projects(&self) -> Result<Vec<ProjectSummary>, GithubError> {
+        let body = queries::ViewerProjects::build_query(queries::viewer_projects::Variables);
+        let data = self.run(GraphqlRequest::from_body(body)).await?.data;
+        let viewer = &data["viewer"];
+        let mut out: Vec<ProjectSummary> = convert::nodes(viewer, "projectsV2")
+            .into_iter()
+            .filter_map(convert::summary_from_wire)
+            .collect();
+        for org in convert::nodes(viewer, "organizations") {
+            out.extend(
+                convert::nodes(org, "projectsV2")
+                    .into_iter()
+                    .filter_map(convert::summary_from_wire),
+            );
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -317,5 +351,48 @@ mod tests {
         t.push("HydrateItems", json!({"nodes": null}));
         let r = gh(t).hydrate_items(&[ItemId::new("a")]).await;
         assert!(matches!(r, Err(GithubError::Decode(_))), "{r:?}");
+    }
+
+    fn summary_json(owner: &str, number: u32, closed: bool) -> serde_json::Value {
+        json!({"id": format!("PVT_{number}"), "number": number, "title": format!("Board {number}"), "closed": closed,
+               "owner": {"__typename": "User", "login": owner}})
+    }
+
+    #[tokio::test]
+    async fn lists_repo_projects() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push(
+            "RepoProjects",
+            json!({"repository": {"projectsV2": {"nodes": [summary_json("tviles", 3, false)]}}}),
+        );
+        let list = gh(t.clone())
+            .list_repo_projects(&"tviles/app".parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(list[0].board.to_string(), "tviles/3");
+        assert_eq!(t.requests()[0].variables["name"], "app");
+    }
+
+    #[tokio::test]
+    async fn lists_viewer_and_org_projects() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push(
+            "ViewerProjects",
+            json!({"viewer": {"login": "tviles",
+                "projectsV2": {"nodes": [summary_json("tviles", 1, false)]},
+                "organizations": {"nodes": [{"login": "acme", "projectsV2": {"nodes": [summary_json("acme", 7, true)]}}]}}}),
+        );
+        let list = gh(t).list_viewer_projects().await.unwrap();
+        let boards: Vec<_> = list
+            .iter()
+            .map(|p| (p.board.to_string(), p.closed))
+            .collect();
+        assert_eq!(
+            boards,
+            [
+                ("tviles/1".to_string(), false),
+                ("acme/7".to_string(), true)
+            ]
+        );
     }
 }
