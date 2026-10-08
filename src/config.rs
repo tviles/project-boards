@@ -50,8 +50,17 @@ fn clamp<T: PartialOrd + Copy + Display>(
 /// Loads `config.toml` from `dir`. Missing file: defaults. Unparseable file: defaults and a
 /// warning. Out-of-range numbers are clamped with a warning. Never fails.
 pub fn load_config(dir: &Path) -> (Config, Vec<String>) {
-    let Ok(text) = std::fs::read_to_string(dir.join("config.toml")) else {
-        return (Config::default(), Vec::new());
+    let text = match std::fs::read_to_string(dir.join("config.toml")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (Config::default(), Vec::new());
+        }
+        Err(e) => {
+            return (
+                Config::default(),
+                vec![format!("config.toml ignored: could not read it ({e})")],
+            );
+        }
     };
     let mut warnings = Vec::new();
     let mut config = match toml::from_str::<Config>(&text) {
@@ -130,6 +139,16 @@ mod tests {
         assert_eq!(c.placement, Placement::Overlay);
         assert_eq!(c.keys["next_view"], "]");
         assert_eq!(c.max_items, 2000);
+    }
+
+    #[test]
+    fn unreadable_config_warns_and_gives_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("config.toml")).unwrap();
+        let (c, w) = load_config(dir.path());
+        assert_eq!(c, Config::default());
+        assert_eq!(w.len(), 1);
+        assert!(w[0].starts_with("config.toml ignored"));
     }
 
     #[test]
