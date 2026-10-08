@@ -5,6 +5,7 @@ pub mod convert;
 pub mod error;
 pub mod fixture;
 pub mod queries;
+pub mod record;
 pub mod token;
 pub mod transport;
 
