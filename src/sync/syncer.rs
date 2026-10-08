@@ -92,6 +92,8 @@ impl Syncer {
                 Err(e) => return self.fail(SyncTask::FullLoad, e),
             }
         };
+        let truncated = truncated || items.len() > self.max_items;
+        items.truncate(self.max_items);
         self.send(SyncEvent::ItemsComplete {
             items,
             fetched_at: started,
@@ -120,7 +122,14 @@ impl Syncer {
                     items.extend(page.nodes);
                     match page.next {
                         Some(cursor) if items.len() < self.max_items => after = Some(cursor),
-                        _ => break,
+                        Some(_) => {
+                            tracing::info!(
+                                "incremental poll exceeded max_items; running a full load"
+                            );
+                            self.full_load(project).await;
+                            return true;
+                        }
+                        None => break,
                     }
                 }
                 Err(e) => {
@@ -422,5 +431,28 @@ mod tests {
                 .await
         );
         assert!(t.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn incremental_over_the_cap_falls_back_to_a_full_load() {
+        let (t, s, mut rx) = setup(2);
+        t.push("ItemsPage", page(&["a", "b"], 5, Some("c1")));
+        t.push("ItemsPage", page(&["a", "b"], 2, None));
+        assert!(
+            s.incremental(&ProjectId::new("P"), "2026-10-01T00:00:00Z")
+                .await
+        );
+        let events = drain(&mut rx);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, SyncEvent::ItemsComplete { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SyncEvent::ItemsUpdated { .. }))
+        );
+        assert_eq!(t.requests()[1].variables["query"], "");
     }
 }
