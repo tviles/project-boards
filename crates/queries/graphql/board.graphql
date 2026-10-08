@@ -1,0 +1,160 @@
+# Every query project-boards sends. graphql_client validates each operation against
+# schema.graphql (next to this file) at compile time.
+
+fragment FieldRef on ProjectV2FieldConfiguration {
+  __typename
+  ... on ProjectV2Field { id }
+  ... on ProjectV2SingleSelectField { id }
+  ... on ProjectV2MultiSelectField { id }
+  ... on ProjectV2IterationField { id }
+}
+
+fragment FieldConfig on ProjectV2FieldConfiguration {
+  __typename
+  ... on ProjectV2Field { id name dataType }
+  ... on ProjectV2SingleSelectField { id name dataType options { id name color } }
+  ... on ProjectV2MultiSelectField { id name dataType multiSelectOptions { id name color } }
+  ... on ProjectV2IterationField {
+    id name dataType
+    configuration {
+      iterations { id title startDate duration }
+      completedIterations { id title startDate duration }
+    }
+  }
+}
+
+fragment ProjectSchemaFields on ProjectV2 {
+  id number title url viewerCanUpdate
+  owner { __typename ... on User { login } ... on Organization { login } }
+  fields(first: 100) { nodes { ...FieldConfig } }
+  views(first: 50) {
+    nodes {
+      id number name layout filter
+      visibleFields(first: 50) { nodes { ...FieldRef } }
+      groupByFields(first: 5) { nodes { ...FieldRef } }
+      verticalGroupByFields(first: 5) { nodes { ...FieldRef } }
+      sortByFields(first: 5) { nodes { direction field { ...FieldRef } } }
+    }
+  }
+}
+
+fragment ItemFields on ProjectV2Item {
+  id type isArchived updatedAt
+  content {
+    __typename
+    ... on Issue { number title url state repository { nameWithOwner } }
+    ... on PullRequest { number title url state isDraft repository { nameWithOwner } }
+    ... on DraftIssue { title }
+  }
+  fieldValues(first: 50) {
+    nodes {
+      __typename
+      ... on ProjectV2ItemFieldTextValue { text field { ...FieldRef } }
+      ... on ProjectV2ItemFieldNumberValue { number field { ...FieldRef } }
+      ... on ProjectV2ItemFieldDateValue { date field { ...FieldRef } }
+      ... on ProjectV2ItemFieldSingleSelectValue { optionId name field { ...FieldRef } }
+      ... on ProjectV2ItemFieldMultiSelectValue { options { id name } field { ...FieldRef } }
+      ... on ProjectV2ItemFieldIterationValue { iterationId title startDate field { ...FieldRef } }
+      ... on ProjectV2ItemFieldLabelValue { labels(first: 20) { nodes { name color } } field { ...FieldRef } }
+      ... on ProjectV2ItemFieldUserValue { users(first: 10) { nodes { login } } field { ...FieldRef } }
+      ... on ProjectV2ItemFieldMilestoneValue { milestone { title } field { ...FieldRef } }
+      ... on ProjectV2ItemFieldRepositoryValue { repository { nameWithOwner } field { ...FieldRef } }
+      ... on ProjectV2ItemFieldPullRequestValue { pullRequests(first: 10) { nodes { number } } field { ...FieldRef } }
+      ... on ProjectV2ItemFieldReviewerValue {
+        reviewers(first: 10) { nodes { __typename ... on User { login } ... on Team { slug } } }
+        field { ...FieldRef }
+      }
+    }
+  }
+}
+
+fragment ProjectSummaryFields on ProjectV2 {
+  id number title closed
+  owner { __typename ... on User { login } ... on Organization { login } }
+}
+
+query ResolveProject($owner: String!, $number: Int!) {
+  user(login: $owner) { projectV2(number: $number) { ...ProjectSchemaFields } }
+  organization(login: $owner) { projectV2(number: $number) { ...ProjectSchemaFields } }
+}
+
+query ProjectSchema($id: ID!) {
+  node(id: $id) { __typename ... on ProjectV2 { ...ProjectSchemaFields } }
+}
+
+query ItemsPage($id: ID!, $after: String, $query: String!) {
+  node(id: $id) {
+    __typename
+    ... on ProjectV2 {
+      items(first: 100, after: $after, query: $query) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes { ...ItemFields }
+      }
+    }
+  }
+}
+
+query ViewItemIds($id: ID!, $after: String, $query: String!) {
+  node(id: $id) {
+    __typename
+    ... on ProjectV2 {
+      items(first: 100, after: $after, query: $query) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes { id }
+      }
+    }
+  }
+}
+
+query HydrateItems($ids: [ID!]!) {
+  nodes(ids: $ids) { __typename ... on ProjectV2Item { ...ItemFields } }
+}
+
+query ItemDetail($id: ID!, $before: String) {
+  node(id: $id) {
+    __typename
+    ... on ProjectV2Item {
+      content {
+        __typename
+        ... on Issue {
+          body
+          issueType { name }
+          parent { number title state }
+          subIssues(first: 50) { nodes { number title state } }
+          closedByPullRequestsReferences(first: 10) { nodes { number title state } }
+          comments(last: 20, before: $before) {
+            totalCount
+            pageInfo { hasPreviousPage startCursor }
+            nodes { author { __typename login } createdAt body }
+          }
+        }
+        ... on PullRequest {
+          body
+          closingIssuesReferences(first: 10) { nodes { number title state } }
+          comments(last: 20, before: $before) {
+            totalCount
+            pageInfo { hasPreviousPage startCursor }
+            nodes { author { __typename login } createdAt body }
+          }
+        }
+        ... on DraftIssue { body }
+      }
+    }
+  }
+}
+
+query RepoProjects($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) { projectsV2(first: 50) { nodes { ...ProjectSummaryFields } } }
+}
+
+query ViewerProjects {
+  viewer {
+    login
+    projectsV2(first: 100) { nodes { ...ProjectSummaryFields } }
+    organizations(first: 100) { nodes { login projectsV2(first: 100) { nodes { ...ProjectSummaryFields } } } }
+  }
+}
+
+query Viewer { viewer { login } }

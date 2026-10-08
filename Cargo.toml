@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/queries"]
+
 [package]
 name = "project-boards"
 version = "0.1.0-dev"
@@ -20,6 +23,7 @@ toml = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 reqwest = { version = "0.13", features = ["json"] }
 graphql_client = "0.16"
+project-boards-queries = { path = "crates/queries" }
 futures = "0.3"
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
