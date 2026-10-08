@@ -89,6 +89,12 @@ impl Scheduler {
         }
     }
 
+    fn blocked(&self, now: Instant) -> bool {
+        self.in_flight || self.paused_until.is_some_and(|until| now < until)
+    }
+
+    /// Records a focus change. Returns `Some` when regaining focus should refresh now and
+    /// nothing is in flight or paused; the caller must then call `started()`.
     pub fn on_focus(&mut self, focused: bool, now: Instant) -> Option<PollKind> {
         let was = self.focus_events && self.focused;
         self.focus_events = true;
@@ -96,17 +102,20 @@ impl Scheduler {
         if focused {
             self.last_input = now;
         }
-        (focused && !was && !self.in_flight).then(|| self.due_kind(now))
+        (focused && !was && !self.blocked(now)).then(|| self.due_kind(now))
     }
 
+    /// Records user input. Returns `Some` for the first key after idling (no focus events)
+    /// when not in flight or paused; the caller must then call `started()`.
     pub fn on_input(&mut self, now: Instant) -> Option<PollKind> {
         let was_active = self.active(now);
         self.last_input = now;
-        (!self.focus_events && !was_active && !self.in_flight).then(|| self.due_kind(now))
+        (!self.focus_events && !was_active && !self.blocked(now)).then(|| self.due_kind(now))
     }
 
+    /// Returns `Some` when a poll is due; the caller must then call `started()`.
     pub fn tick(&mut self, now: Instant) -> Option<PollKind> {
-        if self.in_flight || self.paused_until.is_some_and(|until| now < until) {
+        if self.blocked(now) {
             return None;
         }
         if self.active(now)
@@ -130,12 +139,14 @@ impl Scheduler {
         self.in_flight = false;
     }
 
+    /// Stretches the interval 4x while the rate-limit budget is low. Never returns a poll.
     pub fn set_low_budget(&mut self, low: bool) {
         self.low_budget = low;
     }
 
+    /// Suppresses all polls until `until`; never shortens an active pause.
     pub fn pause_until(&mut self, until: Instant) {
-        self.paused_until = Some(until);
+        self.paused_until = Some(self.paused_until.map_or(until, |p| p.max(until)));
     }
 }
 
@@ -233,6 +244,34 @@ mod tests {
         sch.started(PollKind::Incremental, t0 + s(632));
         sch.finished();
         assert_ne!(sch.tick(t0 + s(1300)), Some(PollKind::Full));
+    }
+
+    #[test]
+    fn pause_blocks_immediate_refreshes_but_keeps_bookkeeping() {
+        let t0 = Instant::now();
+        let mut sch = Scheduler::new(cfg(), t0);
+        sch.on_focus(true, t0);
+        sch.pause_until(t0 + s(100));
+        assert_eq!(sch.on_focus(false, t0 + s(10)), None);
+        assert_eq!(sch.on_focus(true, t0 + s(20)), None);
+        assert!(sch.active(t0 + s(21)));
+
+        let mut sch = Scheduler::new(cfg(), t0);
+        let idle = t0 + s(301);
+        sch.pause_until(idle + s(100));
+        assert_eq!(sch.on_input(idle + s(10)), None);
+        assert!(sch.active(idle + s(11)), "input bookkeeping still updated");
+        assert_eq!(sch.tick(idle + s(101)), Some(PollKind::Incremental));
+    }
+
+    #[test]
+    fn pause_never_shortens() {
+        let t0 = Instant::now();
+        let mut sch = Scheduler::new(cfg(), t0);
+        sch.pause_until(t0 + s(100));
+        sch.pause_until(t0 + s(50));
+        assert_eq!(sch.tick(t0 + s(60)), None);
+        assert_eq!(sch.tick(t0 + s(101)), Some(PollKind::Incremental));
     }
 
     #[test]
