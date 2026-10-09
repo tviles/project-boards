@@ -3952,7 +3952,7 @@ git commit -m "Add record mode, the live suite and recorded testbed fixtures"
   - `fsutil::write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()>`.
   - `store::ViewList { ids: Vec<ItemId>, total: usize, truncated: bool }`.
   - `store::BoardSnapshot { version, project, items: BTreeMap<ItemId, Item>, order: Vec<ItemId>, views: BTreeMap<ViewId, ViewList>, fetched_at: Option<String> }` with `new(Project)`, `set_project(Project)`, `upsert_items(Vec<Item>)`, `replace_items(Vec<Item>)`, `set_view_ids(ViewId, ViewList)`, `all_items() -> Vec<&Item>`, `view_items(&ViewId) -> Option<Vec<&Item>>`, `missing_ids(&ViewId) -> Vec<ItemId>`.
-  - `store::{Store, StoreUpdate, MemoryStore}`: `trait Store: Send { fn snapshot(&self) -> Option<&BoardSnapshot>; fn apply(&mut self, update: StoreUpdate); }`; `StoreUpdate::{Replace(BoardSnapshot), Project(Project), UpsertItems(Vec<Item>), ReplaceItems(Vec<Item>), ViewIds { view: ViewId, list: ViewList }, FetchedAt(String)}`; `MemoryStore::new(Option<BoardSnapshot>)`.
+  - `store::{Store, StoreUpdate, MemoryStore}`: `trait Store: Send { fn snapshot(&self) -> Option<&BoardSnapshot>; fn apply(&mut self, update: StoreUpdate); }`; `StoreUpdate::{Replace(BoardSnapshot), Project(Project), UpsertItems(Vec<Item>), ReplaceItems(Vec<Item>), ViewIds { view: ViewId, list: ViewList }, ClearViewIds(ViewId), FetchedAt(String)}`; `MemoryStore::new(Option<BoardSnapshot>)`.
   - `store::cache::{CACHE_VERSION, cache_path(&Path, &BoardRef) -> PathBuf, load_cache(&Path) -> Option<BoardSnapshot>, save_cache(&Path, &BoardSnapshot) -> std::io::Result<()>}`.
 
 - [ ] **Step 1: Write `src/fsutil.rs` with its test**
@@ -4159,6 +4159,7 @@ pub enum StoreUpdate {
     UpsertItems(Vec<Item>),
     ReplaceItems(Vec<Item>),
     ViewIds { view: ViewId, list: ViewList },
+    ClearViewIds(ViewId),
     FetchedAt(String),
 }
 
@@ -5784,7 +5785,7 @@ git commit -m "Add the focus-aware poll scheduler with idle fallback"
 - Produces:
   - `sync::{IncrementalMode::{DateTime, Date, Unsupported}, INCREMENTAL_MODE, incremental_query(IncrementalMode, since: &str) -> Option<String>, SyncTask, SyncEvent, store_update(&SyncEvent) -> Option<StoreUpdate>}`.
   - `SyncTask::{Resolve, FullLoad, Incremental, ViewIds(ViewId), Hydrate, Detail(ItemId), Projects}`.
-  - `SyncEvent::{Project(Project), ItemsPage { items, loaded, total }, ItemsComplete { items, fetched_at, total, truncated }, ItemsUpdated { items, fetched_at }, ViewIds { view, list }, Hydrated(Vec<Item>), RepoProjects(Vec<ProjectSummary>), Projects(Vec<ProjectSummary>), Rate(RateInfo), Failed { task, error }}`. (Task 21 adds `Detail`.)
+  - `SyncEvent::{Project(Project), ItemsPage { items, loaded, total }, ItemsComplete { items, fetched_at, total, truncated }, ItemsUpdated { items, fetched_at }, ViewIds { view, filter, list }, Hydrated(Vec<Item>), RepoProjects(Vec<ProjectSummary>), Projects(Vec<ProjectSummary>), Rate(RateInfo), Failed { task, error }}`. (Task 21 adds `Detail`.)
   - `sync::syncer::Syncer` with `new(Arc<Github>, mpsc::UnboundedSender<SyncEvent>, max_items: usize, IncrementalMode)` and async `resolve(&BoardRef) -> Option<Project>`, `refresh_project(&Project)`, `full_load(&ProjectId)`, `incremental(&ProjectId, since: &str) -> bool`, `view_ids(&ProjectId, &ViewId, filter: &str, known: &HashSet<ItemId>, hydrate: bool)`, `repo_projects(&RepoSlug)`, `projects(linked: Option<&RepoSlug>)`.
 
 - [ ] **Step 1: Write the failing tests for the pure parts (in `src/sync/mod.rs`)**
@@ -5873,7 +5874,7 @@ pub enum SyncEvent {
     /// The whole item set, sent only when every page arrived.
     ItemsComplete { items: Vec<Item>, fetched_at: String, total: usize, truncated: bool },
     ItemsUpdated { items: Vec<Item>, fetched_at: String },
-    ViewIds { view: ViewId, list: ViewList },
+    ViewIds { view: ViewId, filter: String, list: ViewList },
     Hydrated(Vec<Item>),
     /// The boards linked to the pane's repository, for the startup decision.
     RepoProjects(Vec<ProjectSummary>),
@@ -5889,7 +5890,7 @@ pub fn store_update(event: &SyncEvent) -> Option<StoreUpdate> {
         SyncEvent::ItemsPage { items, .. } | SyncEvent::Hydrated(items) => Some(StoreUpdate::UpsertItems(items.clone())),
         SyncEvent::ItemsComplete { items, .. } => Some(StoreUpdate::ReplaceItems(items.clone())),
         SyncEvent::ItemsUpdated { items, .. } => Some(StoreUpdate::UpsertItems(items.clone())),
-        SyncEvent::ViewIds { view, list } => Some(StoreUpdate::ViewIds { view: view.clone(), list: list.clone() }),
+        SyncEvent::ViewIds { view, list, .. } => Some(StoreUpdate::ViewIds { view: view.clone(), list: list.clone() }),
         SyncEvent::RepoProjects(_) | SyncEvent::Projects(_) | SyncEvent::Rate(_) | SyncEvent::Failed { .. } => None,
     }
 }
@@ -6161,7 +6162,7 @@ impl Syncer {
         };
         ids.truncate(self.max_items);
         let missing: Vec<ItemId> = ids.iter().filter(|id| !known.contains(*id)).cloned().collect();
-        self.send(SyncEvent::ViewIds { view: view.clone(), list: ViewList { ids, total, truncated } });
+        self.send(SyncEvent::ViewIds { view: view.clone(), filter: filter.to_string(), list: ViewList { ids, total, truncated } });
         if !hydrate {
             return;
         }
@@ -8497,7 +8498,7 @@ mod tests {
         let cmds = a.handle_key(code(KeyCode::Enter));
         assert_eq!(cmds, vec![Command::FetchViewIds { view: ViewId::new("V_table"), filter: "label:bug".into() }]);
         assert_eq!(a.effective_filter(), "label:bug");
-        a.on_sync(SyncEvent::ViewIds { view: ViewId::new("V_table"), list: ViewList { ids: vec![ItemId::new("a")], total: 1, truncated: false } });
+        a.on_sync(SyncEvent::ViewIds { view: ViewId::new("V_table"), filter: "label:bug".into(), list: ViewList { ids: vec![ItemId::new("a")], total: 1, truncated: false } });
         assert_eq!(a.view_items().unwrap().len(), 1);
     }
 
@@ -8567,7 +8568,7 @@ mod tests {
         let mut a = app();
         a.select_view(&ViewId::new("V_bugs"));
         let list = ViewList { ids: vec![ItemId::new("a")], total: 1, truncated: false };
-        a.on_sync(SyncEvent::ViewIds { view: ViewId::new("V_bugs"), list });
+        a.on_sync(SyncEvent::ViewIds { view: ViewId::new("V_bugs"), filter: "label:bug".into(), list });
         let fetch = Command::FetchViewIds { view: ViewId::new("V_bugs"), filter: "label:bug".into() };
         a.handle_key(code(KeyCode::Tab));
         assert!(a.handle_key(code(KeyCode::BackTab)).contains(&fetch), "a cached list is still revalidated");

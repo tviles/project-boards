@@ -62,6 +62,8 @@ pub enum SyncEvent {
     },
     ViewIds {
         view: ViewId,
+        /// The filter this list answers; stale answers are dropped by the App.
+        filter: String,
         list: ViewList,
     },
     Hydrated(Vec<Item>),
@@ -89,7 +91,7 @@ pub fn store_update(event: &SyncEvent) -> Option<StoreUpdate> {
         }
         SyncEvent::ItemsComplete { items, .. } => Some(StoreUpdate::ReplaceItems(items.clone())),
         SyncEvent::ItemsUpdated { items, .. } => Some(StoreUpdate::UpsertItems(items.clone())),
-        SyncEvent::ViewIds { view, list } => Some(StoreUpdate::ViewIds {
+        SyncEvent::ViewIds { view, list, .. } => Some(StoreUpdate::ViewIds {
             view: view.clone(),
             list: list.clone(),
         }),

@@ -13,7 +13,12 @@ pub enum StoreUpdate {
     Project(Project),
     UpsertItems(Vec<Item>),
     ReplaceItems(Vec<Item>),
-    ViewIds { view: ViewId, list: ViewList },
+    ViewIds {
+        view: ViewId,
+        list: ViewList,
+    },
+    /// Drops a view's cached id list (its filter changed).
+    ClearViewIds(ViewId),
     FetchedAt(String),
 }
 
@@ -47,6 +52,9 @@ impl Store for MemoryStore {
             (StoreUpdate::UpsertItems(items), Some(s)) => s.upsert_items(items),
             (StoreUpdate::ReplaceItems(items), Some(s)) => s.replace_items(items),
             (StoreUpdate::ViewIds { view, list }, Some(s)) => s.set_view_ids(view, list),
+            (StoreUpdate::ClearViewIds(view), Some(s)) => {
+                s.views.remove(&view);
+            }
             (StoreUpdate::FetchedAt(t), Some(s)) => s.fetched_at = Some(t),
             (other, None) => {
                 tracing::warn!(?other, "store update before the project was known; ignored")
@@ -69,5 +77,35 @@ mod tests {
         store.apply(StoreUpdate::Project(project()));
         store.apply(StoreUpdate::UpsertItems(vec![issue("a", 1, "A")]));
         assert_eq!(store.snapshot().unwrap().all_items().len(), 1);
+    }
+
+    #[test]
+    fn clear_view_ids_drops_that_list() {
+        let mut store =
+            MemoryStore::new(Some(crate::store::snapshot::BoardSnapshot::new(project())));
+        let list = ViewList {
+            ids: vec![],
+            total: 0,
+            truncated: false,
+        };
+        store.apply(StoreUpdate::ViewIds {
+            view: ViewId::new("V"),
+            list,
+        });
+        assert!(
+            store
+                .snapshot()
+                .unwrap()
+                .views
+                .contains_key(&ViewId::new("V"))
+        );
+        store.apply(StoreUpdate::ClearViewIds(ViewId::new("V")));
+        assert!(
+            !store
+                .snapshot()
+                .unwrap()
+                .views
+                .contains_key(&ViewId::new("V"))
+        );
     }
 }

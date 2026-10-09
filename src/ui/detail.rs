@@ -19,6 +19,8 @@ pub struct DetailState {
     pub target: Option<usize>,
     /// The last useful scroll offset; the chrome sets it from the doc before rendering.
     pub max_scroll: usize,
+    /// An older-comments request is in flight; stops `P` duplicating a page.
+    pub loading_older: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +44,7 @@ impl DetailState {
             scroll: 0,
             target: None,
             max_scroll: usize::MAX,
+            loading_older: false,
         }
     }
 
@@ -57,6 +60,9 @@ impl DetailState {
             _ => self.detail = Some(detail),
         }
         self.error = None;
+        if older {
+            self.loading_older = false;
+        }
     }
 
     pub fn handle(&mut self, action: Option<Action>, targets: usize) -> DetailOutcome {
@@ -90,7 +96,11 @@ impl DetailState {
             }
             Some(Action::ToggleRaw) => self.raw = !self.raw,
             Some(Action::LoadOlder) => {
+                if self.loading_older {
+                    return DetailOutcome::None;
+                }
                 if let Some(cursor) = self.detail.as_ref().and_then(|d| d.older_cursor.clone()) {
+                    self.loading_older = true;
                     return DetailOutcome::LoadOlder(cursor);
                 }
             }
@@ -458,6 +468,26 @@ mod tests {
         assert!(s.raw);
         assert_eq!(s.handle(Some(Action::Back), 2), DetailOutcome::Close);
         assert_eq!(s.handle(Some(Action::Quit), 2), DetailOutcome::Quit);
+    }
+
+    #[test]
+    fn older_comments_load_once_until_they_arrive() {
+        let mut s = loaded();
+        s.detail.as_mut().unwrap().older_cursor = Some("cur".into());
+        assert_eq!(
+            s.handle(Some(Action::LoadOlder), 0),
+            DetailOutcome::LoadOlder("cur".into())
+        );
+        assert_eq!(s.handle(Some(Action::LoadOlder), 0), DetailOutcome::None);
+        let more = ItemDetail {
+            older_cursor: Some("cur2".into()),
+            ..Default::default()
+        };
+        s.set_detail(more, true);
+        assert_eq!(
+            s.handle(Some(Action::LoadOlder), 0),
+            DetailOutcome::LoadOlder("cur2".into())
+        );
     }
 
     #[test]

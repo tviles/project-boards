@@ -184,6 +184,7 @@ impl Syncer {
             .collect();
         self.send(SyncEvent::ViewIds {
             view: view.clone(),
+            filter: filter.to_string(),
             list: ViewList {
                 ids,
                 total,
@@ -371,7 +372,7 @@ mod tests {
         .await;
         let events = drain(&mut rx);
         assert!(
-            matches!(&events[0], SyncEvent::ViewIds { list, .. } if list.ids.len() == 2 && !list.truncated)
+            matches!(&events[0], SyncEvent::ViewIds { filter, list, .. } if filter == "label:bug" && list.ids.len() == 2 && !list.truncated)
         );
         assert!(matches!(&events[1], SyncEvent::Hydrated(items) if items[0].id.as_str() == "new"));
         assert_eq!(t.requests()[1].variables["ids"], json!(["new"]));

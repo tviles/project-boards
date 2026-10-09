@@ -72,6 +72,8 @@ pub struct App {
     pub quit: bool,
     /// The current view, by id, so views reordered on GitHub never move you to another one.
     current: Option<ViewId>,
+    /// The selected item, so polls, re-sorts and search never move the cursor to another one.
+    selected_id: Option<ItemId>,
     search: String,
     layout_toggle: HashMap<ViewId, Layout>,
     filter_override: HashMap<ViewId, String>,
@@ -125,6 +127,7 @@ impl App {
             collapsed: HashSet::new(),
             quit: false,
             current: None,
+            selected_id: None,
             search: String::new(),
             layout_toggle: HashMap::new(),
             filter_override: HashMap::new(),
@@ -278,6 +281,33 @@ impl App {
         self.board_sel.index = self.board_sel.index.min(len.saturating_sub(1));
     }
 
+    /// Remembers the item under the cursor.
+    fn sync_selected_id(&mut self) {
+        self.selected_id = self.selected_item().map(|i| i.id.clone());
+    }
+
+    /// Re-finds the remembered item after the data or rows changed; clamps when it is gone.
+    fn restore_selection(&mut self) {
+        if let Some(id) = self.selected_id.clone() {
+            let row = self
+                .table_rows()
+                .iter()
+                .position(|r| matches!(r, Row::Item(i) if i.id == id));
+            let cell = self
+                .board_columns()
+                .iter()
+                .enumerate()
+                .find_map(|(c, col)| col.items().iter().position(|i| i.id == id).map(|i| (c, i)));
+            if let Some(row) = row {
+                self.table_selected = row;
+            }
+            if let Some((column, index)) = cell {
+                self.board_sel = BoardSelection { column, index };
+            }
+        }
+        self.clamp_selection();
+    }
+
     fn switch_view(&mut self, forward: bool) -> Vec<Command> {
         let Some(project) = self.project() else {
             return Vec::new();
@@ -299,6 +329,7 @@ impl App {
         self.current = Some(id.clone());
         self.table_selected = 0;
         self.board_sel = BoardSelection::default();
+        self.sync_selected_id();
         let mut cmds = vec![Command::SaveLastView(id)];
         // The cached list shows at once; a fresh one replaces it (spec section 5, "Views").
         cmds.extend(self.revalidate_view());
@@ -337,19 +368,28 @@ impl App {
     }
 
     fn toggle_group(&mut self) {
-        let mut key = None;
-        for row in self.table_rows().iter().take(self.table_selected + 1).rev() {
+        let mut header = None;
+        for (i, row) in self
+            .table_rows()
+            .iter()
+            .enumerate()
+            .take(self.table_selected + 1)
+            .rev()
+        {
             if let Row::Group { key: k, .. } = row {
-                key = Some(collapse_key(k));
+                header = Some((i, collapse_key(k)));
                 break;
             }
         }
-        if let Some(k) = key {
+        if let Some((index, k)) = header {
             if !self.collapsed.remove(&k) {
                 self.collapsed.insert(k);
+                // The rows under the header vanish: land on the header, not another group.
+                self.table_selected = index;
             }
         }
-        self.clamp_selection();
+        self.sync_selected_id();
+        self.restore_selection();
     }
 
     fn open_detail(&mut self, item: ItemId) -> Vec<Command> {
@@ -419,6 +459,7 @@ impl App {
         let action = self.keymap.action(&key);
         match self.mode {
             Mode::Search => {
+                self.sync_selected_id();
                 match self.handle_text_input(&key) {
                     Some(true) => {
                         self.search = std::mem::take(&mut self.input);
@@ -431,7 +472,7 @@ impl App {
                     }
                     Some(false) => {}
                 }
-                self.clamp_selection();
+                self.restore_selection();
                 Vec::new()
             }
             Mode::Filter => match self.handle_text_input(&key) {
@@ -441,19 +482,21 @@ impl App {
                     let Some(view) = self.current_view().cloned() else {
                         return Vec::new();
                     };
+                    let before = self.effective_filter();
                     if filter == view.filter {
                         self.filter_override.remove(&view.id);
                     } else {
                         self.filter_override.insert(view.id.clone(), filter.clone());
                     }
-                    if let Some(s) = self.snapshot().cloned() {
-                        // A changed filter invalidates the cached list.
-                        let mut s = s;
-                        s.views.remove(&view.id);
-                        self.store.apply(StoreUpdate::Replace(s));
+                    if filter == before {
+                        // Nothing changed: keep the cached list and the cursor.
+                        return self.revalidate_view().into_iter().collect();
                     }
+                    // A changed filter invalidates the cached list.
+                    self.store.apply(StoreUpdate::ClearViewIds(view.id.clone()));
                     self.table_selected = 0;
                     self.board_sel = BoardSelection::default();
+                    self.sync_selected_id();
                     if filter.is_empty() {
                         Vec::new()
                     } else {
@@ -480,7 +523,8 @@ impl App {
             }
             Mode::Setup => match key.code {
                 KeyCode::Char('r') => vec![Command::Retry],
-                KeyCode::Char('q') | KeyCode::Esc => {
+                // Esc never quits; the keymap's Quit does.
+                _ if action == Some(Action::Quit) => {
                     self.quit = true;
                     vec![Command::Quit]
                 }
@@ -526,6 +570,7 @@ impl App {
                     | Action::Bottom),
                 ) => {
                     self.move_selection(a);
+                    self.sync_selected_id();
                     Vec::new()
                 }
                 Some(Action::NextView) => self.switch_view(true),
@@ -537,8 +582,9 @@ impl App {
                         } else {
                             Layout::Board
                         };
+                        self.sync_selected_id();
                         self.layout_toggle.insert(view.id, next);
-                        self.clamp_selection();
+                        self.restore_selection();
                     }
                     Vec::new()
                 }
@@ -587,7 +633,8 @@ impl App {
                 Some(Action::Back) => {
                     self.search.clear();
                     self.status.error = None;
-                    self.clamp_selection();
+                    self.sync_selected_id();
+                    self.restore_selection();
                     Vec::new()
                 }
                 Some(Action::PickBoard) => vec![Command::ShowPicker],
@@ -606,7 +653,28 @@ impl App {
         Vec::new()
     }
 
+    /// The filter a view currently applies, looked up by id.
+    fn filter_of(&self, id: &ViewId) -> Option<String> {
+        let view = self.project()?.views.iter().find(|v| &v.id == id)?;
+        Some(
+            self.filter_override
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| view.filter.clone()),
+        )
+    }
+
     pub fn on_sync(&mut self, event: SyncEvent) -> Vec<Command> {
+        // A late answer for a filter that has since changed must not replace the list.
+        if let SyncEvent::ViewIds { view, filter, .. } = &event {
+            if self
+                .filter_of(view)
+                .is_some_and(|current| &current != filter)
+            {
+                return Vec::new();
+            }
+        }
+        self.sync_selected_id();
         if let Some(update) = store_update(&event) {
             self.store.apply(update);
         }
@@ -654,11 +722,15 @@ impl App {
             SyncEvent::Projects(list) => self.show_projects(list),
             SyncEvent::Rate(rate) => self.status.rate_low = rate.is_low(),
             SyncEvent::Failed { task, error } => {
+                if matches!(task, SyncTask::FullLoad | SyncTask::Resolve) {
+                    self.status.loading = None;
+                }
                 if let Some(message) = setup_message(&error) {
                     self.setup = Some(message);
                     self.mode = Mode::Setup;
                 } else if let (SyncTask::Detail(id), Some(state)) = (&task, self.detail.as_mut()) {
                     if &state.item == id {
+                        state.loading_older = false;
                         state.error = Some(format!("{}: {error}", task_words(&task)));
                     }
                 } else {
@@ -667,7 +739,7 @@ impl App {
             }
             SyncEvent::ViewIds { .. } | SyncEvent::Hydrated(_) | SyncEvent::RepoProjects(_) => {}
         }
-        self.clamp_selection();
+        self.restore_selection();
         cmds
     }
 
@@ -792,6 +864,7 @@ mod tests {
         assert_eq!(a.effective_filter(), "label:bug");
         a.on_sync(SyncEvent::ViewIds {
             view: ViewId::new("V_table"),
+            filter: "label:bug".into(),
             list: ViewList {
                 ids: vec![ItemId::new("a")],
                 total: 1,
@@ -937,6 +1010,7 @@ mod tests {
         };
         a.on_sync(SyncEvent::ViewIds {
             view: ViewId::new("V_bugs"),
+            filter: "label:bug".into(),
             list,
         });
         let fetch = Command::FetchViewIds {
@@ -993,5 +1067,161 @@ mod tests {
         a.handle_key(code(KeyCode::Esc));
         assert_eq!(a.handle_key(key('q')), vec![Command::Quit]);
         assert!(a.quit);
+    }
+
+    #[test]
+    fn esc_on_the_setup_screen_does_not_quit() {
+        let mut a = app();
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::FullLoad,
+            error: GithubError::NoToken,
+        });
+        assert!(a.handle_key(code(KeyCode::Esc)).is_empty());
+        assert!(!a.quit);
+        assert_eq!(a.handle_key(key('q')), vec![Command::Quit]);
+        assert!(a.quit);
+    }
+
+    #[test]
+    fn failed_full_loads_clear_the_loading_indicator() {
+        let mut a = app();
+        a.on_sync(SyncEvent::ItemsPage {
+            items: vec![],
+            loaded: 1,
+            total: 9,
+        });
+        assert!(a.status.loading.is_some());
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::FullLoad,
+            error: GithubError::Network("offline".into()),
+        });
+        assert!(a.status.loading.is_none());
+        assert!(a.status.error.is_some());
+    }
+
+    #[test]
+    fn late_view_ids_for_an_old_filter_are_dropped() {
+        let mut a = app();
+        let list = |id: &str| ViewList {
+            ids: vec![ItemId::new(id)],
+            total: 1,
+            truncated: false,
+        };
+        let table = ViewId::new("V_table");
+        a.handle_key(key('f'));
+        for c in "label:bug".chars() {
+            a.handle_key(key(c));
+        }
+        a.handle_key(code(KeyCode::Enter));
+        a.handle_key(key('f'));
+        for _ in 0.."label:bug".len() {
+            a.handle_key(code(KeyCode::Backspace));
+        }
+        for c in "label:x".chars() {
+            a.handle_key(key(c));
+        }
+        a.handle_key(code(KeyCode::Enter));
+        a.on_sync(SyncEvent::ViewIds {
+            view: table.clone(),
+            filter: "label:x".into(),
+            list: list("b"),
+        });
+        a.on_sync(SyncEvent::ViewIds {
+            view: table,
+            filter: "label:bug".into(),
+            list: list("a"),
+        });
+        let ids: Vec<_> = a
+            .view_items()
+            .unwrap()
+            .iter()
+            .map(|i| i.id.0.clone())
+            .collect();
+        assert_eq!(ids, vec!["b"]);
+    }
+
+    #[test]
+    fn an_unchanged_filter_keeps_the_cached_list() {
+        let mut a = app();
+        a.select_view(&ViewId::new("V_bugs"));
+        let list = ViewList {
+            ids: vec![ItemId::new("a")],
+            total: 1,
+            truncated: false,
+        };
+        a.on_sync(SyncEvent::ViewIds {
+            view: ViewId::new("V_bugs"),
+            filter: "label:bug".into(),
+            list,
+        });
+        a.handle_key(key('f'));
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(a.view_items().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_detail_failure_allows_loading_older_comments_again() {
+        let mut a = app();
+        a.handle_key(code(KeyCode::Enter));
+        let detail = ItemDetail {
+            older_cursor: Some("c".into()),
+            ..Default::default()
+        };
+        a.on_sync(SyncEvent::Detail {
+            item: ItemId::new("a"),
+            detail,
+            older: false,
+        });
+        let older = Command::LoadDetail {
+            item: ItemId::new("a"),
+            before: Some("c".into()),
+        };
+        assert_eq!(a.handle_key(key('P')), vec![older.clone()]);
+        assert!(a.handle_key(key('P')).is_empty(), "already loading");
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::Detail(ItemId::new("a")),
+            error: GithubError::Network("offline".into()),
+        });
+        assert_eq!(a.handle_key(key('P')), vec![older]);
+    }
+
+    #[test]
+    fn background_loads_keep_the_same_item_selected() {
+        let mut a = app();
+        a.handle_key(key('j'));
+        a.handle_key(key('j'));
+        assert_eq!(selected_id(&a), "c");
+        let mut all = crate::ui::fixtures::items();
+        all.push(crate::model::item::tests::issue("0", 50, "Earlier"));
+        a.on_sync(SyncEvent::ItemsComplete {
+            items: all,
+            fetched_at: "t".into(),
+            total: 6,
+            truncated: false,
+        });
+        assert_eq!(a.table_rows().len(), 6);
+        assert_eq!(
+            selected_id(&a),
+            "c",
+            "the cursor follows the item, not the index"
+        );
+    }
+
+    #[test]
+    fn collapsing_a_group_selects_its_header() {
+        let mut a = app();
+        let p = a.project().unwrap().clone();
+        let mut snap = snapshot();
+        snap.project.views[0].group_by = vec![p.fields[1].id.clone()];
+        a.store.apply(StoreUpdate::Replace(snap));
+        a.handle_key(key('j'));
+        a.handle_key(key('j'));
+        assert!(matches!(a.table_rows()[2], Row::Item(_)));
+        a.handle_key(key('z'));
+        assert_eq!(a.table_selected, 0);
+        assert!(matches!(
+            a.table_rows()[a.table_selected],
+            Row::Group { .. }
+        ));
     }
 }
