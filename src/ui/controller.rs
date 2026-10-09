@@ -1,0 +1,737 @@
+//! Every decision the board pane makes, with no terminal and no network: inputs in,
+//! effects out. The runtime shell (runtime.rs) feeds it and carries out its effects.
+
+use crate::board_choice::{AfterRepo, FirstStep, after_repo_projects, first_step};
+use crate::config::Config;
+use crate::github::GithubError;
+use crate::herdr::cli::{HerdrCli, focus_plugin_pane};
+use crate::herdr::registry::PaneRegistry;
+use crate::model::*;
+use crate::state::State;
+use crate::store::MemoryStore;
+use crate::store::cache::{cache_path, load_cache, save_cache};
+use crate::sync::scheduler::{PollConfig, PollKind, Scheduler};
+use crate::sync::{IncrementalMode, SyncEvent, SyncTask};
+use crate::ui::app::{App, Command, Mode, setup_message};
+use crate::ui::keymap::Keymap;
+use crate::ui::picker::PickerState;
+use crate::ui::theme::Theme;
+use crossterm::event::KeyEvent;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaneOptions {
+    pub state_dir: PathBuf,
+    /// `HERDR_PANE_ID`; `None` when run outside herdr.
+    pub own_pane: Option<String>,
+    pub config: Config,
+    pub warnings: Vec<String>,
+    pub repo: Option<RepoSlug>,
+    pub board: Option<BoardRef>,
+    pub picker: bool,
+}
+
+// One short-lived value per event; boxing would change the public `Input::Sync` shape.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum Input {
+    Key(KeyEvent),
+    Focus(bool),
+    Tick,
+    Sync(SyncEvent),
+}
+
+/// One unit of network work for the shell to spawn on the Syncer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SyncJob {
+    /// Resolve the board, then load every item.
+    Resolve(BoardRef),
+    /// Refresh the schema and views, then load every item.
+    Refresh(Project),
+    Incremental {
+        project: ProjectId,
+        since: String,
+    },
+    ViewIds {
+        project: ProjectId,
+        view: ViewId,
+        filter: String,
+        known: HashSet<ItemId>,
+        hydrate: bool,
+    },
+    Detail {
+        item: ItemId,
+        before: Option<String>,
+    },
+    RepoProjects(RepoSlug),
+    Projects(Option<RepoSlug>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Effect {
+    Spawn(SyncJob),
+    OpenUrl(String),
+    /// Resolve the token again and call `start` (after Retry).
+    ResolveToken,
+    Exit,
+}
+
+/// `fetched_at` minus two minutes, so a local clock running ahead of GitHub's never skips
+/// an update. Re-fetching a few items is harmless; upserts are idempotent.
+pub fn poll_since(fetched_at: &str) -> String {
+    use time::format_description::well_known::Rfc3339;
+    match time::OffsetDateTime::parse(fetched_at, &Rfc3339) {
+        Ok(t) => (t - time::Duration::minutes(2))
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| fetched_at.to_string()),
+        Err(_) => fetched_at.to_string(),
+    }
+}
+
+pub struct Controller {
+    pub app: App,
+    options: PaneOptions,
+    herdr: Arc<dyn HerdrCli>,
+    mode: IncrementalMode,
+    scheduler: Scheduler,
+    board: Option<BoardRef>,
+    full_load_in_flight: bool,
+    awaiting_repo_projects: bool,
+}
+
+impl Controller {
+    pub fn new(
+        options: PaneOptions,
+        herdr: Arc<dyn HerdrCli>,
+        mode: IncrementalMode,
+        now: Instant,
+    ) -> Self {
+        let (keymap, key_warnings) = Keymap::with_overrides(&options.config.keys);
+        let mut app = App::new(
+            Box::new(MemoryStore::new(None)),
+            keymap,
+            Theme::from_env(|k| std::env::var(k).ok()),
+        );
+        app.status.notes = options
+            .warnings
+            .iter()
+            .cloned()
+            .chain(key_warnings)
+            .collect();
+        let scheduler = Scheduler::new(PollConfig::from_config(&options.config), now);
+        Self {
+            app,
+            options,
+            herdr,
+            mode,
+            scheduler,
+            board: None,
+            full_load_in_flight: false,
+            awaiting_repo_projects: false,
+        }
+    }
+
+    pub fn board(&self) -> Option<&BoardRef> {
+        self.board.as_ref()
+    }
+
+    /// Called once the shell has tried to resolve a token, and again after Retry.
+    pub fn start(&mut self, token: Result<(), GithubError>, now: Instant) -> Vec<Effect> {
+        if let Err(e) = token {
+            self.show_setup(&e);
+            return Vec::new();
+        }
+        self.app.setup = None;
+        if self.app.mode == Mode::Setup {
+            self.app.mode = Mode::Normal;
+        }
+        let state = State::load(&self.options.state_dir);
+        let remembered = self
+            .options
+            .repo
+            .as_ref()
+            .and_then(|r| state.remembered_board(r));
+        match first_step(
+            self.options.board.clone(),
+            self.options.picker,
+            remembered,
+            self.options.repo.clone(),
+        ) {
+            FirstStep::Use(board) => self.open_board(board, now),
+            FirstStep::FetchRepoProjects(repo) => {
+                self.awaiting_repo_projects = true;
+                vec![Effect::Spawn(SyncJob::RepoProjects(repo))]
+            }
+            FirstStep::PickAll => self.show_picker(true),
+        }
+    }
+
+    fn show_setup(&mut self, error: &GithubError) {
+        self.app.setup = setup_message(error).or_else(|| Some(error.to_string()));
+        self.app.mode = Mode::Setup;
+    }
+
+    fn show_picker(&mut self, required: bool) -> Vec<Effect> {
+        self.app.picker = Some(PickerState::loading(required));
+        self.app.mode = Mode::Picker;
+        vec![Effect::Spawn(SyncJob::Projects(self.options.repo.clone()))]
+    }
+
+    /// Shows `board` in this pane, unless another live pane already shows it.
+    fn open_board(&mut self, board: BoardRef, now: Instant) -> Vec<Effect> {
+        let registry = PaneRegistry::new(&self.options.state_dir);
+        let own = self.options.own_pane.clone();
+        if let Some(other) = registry
+            .live_pane(self.herdr.as_ref(), &board)
+            .filter(|p| Some(p) != own.as_ref())
+        {
+            if let Err(e) = focus_plugin_pane(self.herdr.as_ref(), &other) {
+                tracing::warn!(error = %e, "could not focus the pane showing this board");
+            }
+            return if self.board.is_none() {
+                vec![Effect::Exit]
+            } else {
+                Vec::new()
+            };
+        }
+        self.release();
+        if let Some(own) = &own {
+            if let Err(e) = registry.register(&board, own) {
+                tracing::warn!(error = %e, "could not record this pane in the registry");
+            }
+        }
+        let dir = self.options.state_dir.clone();
+        let repo = self.options.repo.clone();
+        let state = State::update(&dir, |s| {
+            if let Some(r) = &repo {
+                s.remember_board(r, &board);
+            }
+        })
+        .unwrap_or_else(|_| State::load(&dir));
+
+        let cached = load_cache(&cache_path(&dir, &board)).filter(|c| c.project.board == board);
+        self.app.store = Box::new(MemoryStore::new(cached.clone()));
+        self.app.status.stale = cached.is_some();
+        if let Some(view) = state.last_view(&board) {
+            self.app.select_view(&view);
+        }
+        self.board = Some(board.clone());
+        self.scheduler = Scheduler::new(PollConfig::from_config(&self.options.config), now);
+        self.scheduler.started(PollKind::Full, now);
+        self.full_load_in_flight = true;
+        let job = match cached {
+            Some(snapshot) => SyncJob::Refresh(snapshot.project),
+            None => SyncJob::Resolve(board),
+        };
+        let mut effects = vec![Effect::Spawn(job)];
+        let cmds: Vec<Command> = self.app.view_needs_ids().into_iter().collect();
+        effects.extend(self.commands(cmds, now));
+        effects
+    }
+
+    /// Unregisters this pane from the board it shows. Called on board switch and on exit.
+    pub fn release(&mut self) {
+        if let (Some(board), Some(own)) = (self.board.take(), &self.options.own_pane) {
+            let _ = PaneRegistry::new(&self.options.state_dir).unregister(&board, own);
+        }
+    }
+
+    fn poll(&mut self, kind: PollKind, now: Instant) -> Vec<Effect> {
+        let Some(snapshot) = self.app.snapshot() else {
+            return Vec::new();
+        };
+        let project = snapshot.project.clone();
+        let since = snapshot.fetched_at.clone();
+        let job = match (kind, since) {
+            (PollKind::Incremental, Some(since)) if self.mode != IncrementalMode::Unsupported => {
+                SyncJob::Incremental {
+                    project: project.id.clone(),
+                    since: poll_since(&since),
+                }
+            }
+            _ => {
+                self.full_load_in_flight = true;
+                SyncJob::Refresh(project)
+            }
+        };
+        let started = if matches!(job, SyncJob::Refresh(_)) {
+            PollKind::Full
+        } else {
+            PollKind::Incremental
+        };
+        self.scheduler.started(started, now);
+        vec![Effect::Spawn(job)]
+    }
+
+    pub fn handle(&mut self, input: Input, now: Instant) -> Vec<Effect> {
+        match input {
+            Input::Key(key) => {
+                let mut effects = self
+                    .scheduler
+                    .on_input(now)
+                    .map(|k| self.poll(k, now))
+                    .unwrap_or_default();
+                let cmds = self.app.handle_key(key);
+                effects.extend(self.commands(cmds, now));
+                effects
+            }
+            Input::Focus(focused) => self
+                .scheduler
+                .on_focus(focused, now)
+                .map(|k| self.poll(k, now))
+                .unwrap_or_default(),
+            Input::Tick => self
+                .scheduler
+                .tick(now)
+                .map(|k| self.poll(k, now))
+                .unwrap_or_default(),
+            Input::Sync(event) => self.on_sync(event, now),
+        }
+    }
+
+    fn on_sync(&mut self, event: SyncEvent, now: Instant) -> Vec<Effect> {
+        match &event {
+            SyncEvent::Rate(rate) => self.scheduler.set_low_budget(rate.is_low()),
+            SyncEvent::Failed {
+                error: GithubError::RateLimited { retry_after_secs },
+                ..
+            } => {
+                self.scheduler
+                    .pause_until(now + Duration::from_secs(*retry_after_secs));
+            }
+            _ => {}
+        }
+        if matches!(
+            &event,
+            SyncEvent::ItemsComplete { .. }
+                | SyncEvent::Failed {
+                    task: SyncTask::FullLoad | SyncTask::Resolve,
+                    ..
+                }
+        ) {
+            self.full_load_in_flight = false;
+        }
+        if matches!(
+            &event,
+            SyncEvent::ItemsComplete { .. }
+                | SyncEvent::ItemsUpdated { .. }
+                | SyncEvent::Failed {
+                    task: SyncTask::FullLoad | SyncTask::Incremental | SyncTask::Resolve,
+                    ..
+                }
+        ) {
+            self.scheduler.finished();
+        }
+        let persist = matches!(
+            &event,
+            SyncEvent::ItemsComplete { .. } | SyncEvent::ItemsUpdated { .. }
+        );
+
+        if self.awaiting_repo_projects {
+            match &event {
+                SyncEvent::RepoProjects(list) => {
+                    self.awaiting_repo_projects = false;
+                    return match after_repo_projects(list.clone()) {
+                        AfterRepo::Use(board) => self.open_board(board, now),
+                        AfterRepo::Pick(list) => {
+                            self.app.picker = Some(PickerState::with(list, true));
+                            self.app.mode = Mode::Picker;
+                            Vec::new()
+                        }
+                        AfterRepo::PickAll => self.show_picker(true),
+                    };
+                }
+                SyncEvent::Failed {
+                    task: SyncTask::Projects,
+                    error,
+                } if setup_message(error).is_none() => {
+                    self.awaiting_repo_projects = false;
+                    return self.show_picker(true);
+                }
+                _ => {}
+            }
+        }
+
+        let projects_failed = matches!(
+            &event,
+            SyncEvent::Failed {
+                task: SyncTask::Projects,
+                ..
+            }
+        );
+        let cmds = self.app.on_sync(event);
+        if projects_failed {
+            // The App records the error in the status line; do not leave "Loading boards…" up.
+            if let Some(picker) = self.app.picker.as_mut() {
+                picker.loading = false;
+            }
+        }
+        if persist {
+            self.persist_cache();
+        }
+        self.commands(cmds, now)
+    }
+
+    fn persist_cache(&self) {
+        if let (Some(snapshot), Some(board)) = (self.app.snapshot(), &self.board) {
+            if let Err(e) = save_cache(&cache_path(&self.options.state_dir, board), snapshot) {
+                tracing::warn!(error = %e, "could not save the board cache");
+            }
+        }
+    }
+
+    fn commands(&mut self, cmds: Vec<Command>, now: Instant) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for cmd in cmds {
+            match cmd {
+                Command::FetchViewIds { view, filter } => {
+                    if let Some(s) = self.app.snapshot() {
+                        effects.push(Effect::Spawn(SyncJob::ViewIds {
+                            project: s.project.id.clone(),
+                            view,
+                            filter,
+                            known: s.items.keys().cloned().collect(),
+                            hydrate: !self.full_load_in_flight,
+                        }));
+                    }
+                }
+                Command::LoadDetail { item, before } => {
+                    effects.push(Effect::Spawn(SyncJob::Detail { item, before }))
+                }
+                Command::OpenUrl(url) => effects.push(Effect::OpenUrl(url)),
+                Command::Refresh => {
+                    if !self.scheduler.in_flight() {
+                        effects.extend(self.poll(PollKind::Full, now));
+                    }
+                }
+                Command::SaveLastView(view) => {
+                    if let Some(board) = self.board.clone() {
+                        let _ = State::update(&self.options.state_dir, |s| {
+                            s.set_last_view(&board, &view)
+                        });
+                    }
+                }
+                Command::PickBoard(board) => effects.extend(self.open_board(board, now)),
+                Command::ShowPicker => {
+                    let required = self.board.is_none();
+                    effects.extend(self.show_picker(required));
+                }
+                Command::Retry => effects.push(Effect::ResolveToken),
+                Command::Quit => effects.push(Effect::Exit),
+            }
+        }
+        effects
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::herdr::cli::FakeHerdr;
+    use crate::store::cache::{cache_path, save_cache};
+    use crate::ui::fixtures::{key, snapshot};
+    use serde_json::json;
+    use std::path::Path;
+
+    fn options(dir: &Path, board: Option<&str>) -> PaneOptions {
+        PaneOptions {
+            state_dir: dir.to_path_buf(),
+            own_pane: Some("me".into()),
+            config: Config::default(),
+            warnings: vec![],
+            repo: Some("tviles/app".parse().unwrap()),
+            board: board.map(|b| b.parse().unwrap()),
+            picker: false,
+        }
+    }
+
+    fn controller(dir: &Path, board: Option<&str>) -> (Controller, Arc<FakeHerdr>, Instant) {
+        let fake = Arc::new(FakeHerdr::default());
+        let t0 = Instant::now();
+        (
+            Controller::new(
+                options(dir, board),
+                fake.clone(),
+                IncrementalMode::DateTime,
+                t0,
+            ),
+            fake,
+            t0,
+        )
+    }
+
+    fn board() -> BoardRef {
+        "tviles/3".parse().unwrap()
+    }
+
+    fn summary(b: &str) -> ProjectSummary {
+        ProjectSummary {
+            id: ProjectId::new(b),
+            board: b.parse().unwrap(),
+            title: b.into(),
+            closed: false,
+        }
+    }
+
+    fn complete(fetched_at: &str) -> SyncEvent {
+        SyncEvent::ItemsComplete {
+            items: crate::ui::fixtures::items(),
+            fetched_at: fetched_at.into(),
+            total: 5,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn token_errors_show_the_setup_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        assert!(c.start(Err(GithubError::NoToken), t0).is_empty());
+        assert_eq!(c.app.mode, Mode::Setup);
+        assert_eq!(
+            c.handle(Input::Key(key('r')), t0),
+            vec![Effect::ResolveToken]
+        );
+    }
+
+    #[test]
+    fn a_board_without_cache_is_resolved_registered_and_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        assert_eq!(
+            c.start(Ok(()), t0),
+            vec![Effect::Spawn(SyncJob::Resolve(board()))]
+        );
+        assert_eq!(
+            PaneRegistry::new(dir.path()).lookup(&board()).as_deref(),
+            Some("me")
+        );
+        assert_eq!(
+            State::load(dir.path()).remembered_board(&"tviles/app".parse().unwrap()),
+            Some(board())
+        );
+    }
+
+    #[test]
+    fn a_cached_board_paints_at_once_and_refreshes() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        let effects = c.start(Ok(()), t0);
+        assert!(matches!(&effects[0], Effect::Spawn(SyncJob::Refresh(p)) if p.board == board()));
+        assert!(c.app.snapshot().is_some() && c.app.status.stale);
+    }
+
+    #[test]
+    fn a_board_open_elsewhere_is_focused_and_this_pane_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        PaneRegistry::new(dir.path())
+            .register(&board(), "other")
+            .unwrap();
+        let (mut c, fake, t0) = controller(dir.path(), Some("tviles/3"));
+        fake.respond(&["pane", "get", "other"], Ok(json!({})));
+        fake.respond(&["plugin", "pane", "focus", "other"], Ok(json!({})));
+        assert_eq!(c.start(Ok(()), t0), vec![Effect::Exit]);
+        assert!(
+            fake.calls()
+                .iter()
+                .any(|call| call.join(" ") == "plugin pane focus other")
+        );
+    }
+
+    #[test]
+    fn repo_projects_decide_the_board() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo: RepoSlug = "tviles/app".parse().unwrap();
+
+        let (mut one, _, t0) = controller(dir.path(), None);
+        assert_eq!(
+            one.start(Ok(()), t0),
+            vec![Effect::Spawn(SyncJob::RepoProjects(repo.clone()))]
+        );
+        let effects = one.handle(
+            Input::Sync(SyncEvent::RepoProjects(vec![summary("tviles/3")])),
+            t0,
+        );
+        assert_eq!(effects, vec![Effect::Spawn(SyncJob::Resolve(board()))]);
+
+        let dir2 = tempfile::tempdir().unwrap();
+        let (mut two, _, t0) = controller(dir2.path(), None);
+        two.start(Ok(()), t0);
+        two.handle(
+            Input::Sync(SyncEvent::RepoProjects(vec![
+                summary("tviles/3"),
+                summary("tviles/4"),
+            ])),
+            t0,
+        );
+        assert_eq!(two.app.mode, Mode::Picker);
+        assert_eq!(two.app.picker.as_ref().unwrap().candidates.len(), 2);
+
+        let dir3 = tempfile::tempdir().unwrap();
+        let (mut failed, _, t0) = controller(dir3.path(), None);
+        failed.start(Ok(()), t0);
+        let failure = SyncEvent::Failed {
+            task: SyncTask::Projects,
+            error: GithubError::Network("down".into()),
+        };
+        assert_eq!(
+            failed.handle(Input::Sync(failure), t0),
+            vec![Effect::Spawn(SyncJob::Projects(Some(repo)))]
+        );
+        assert_eq!(failed.app.mode, Mode::Picker);
+    }
+
+    /// Plan review Q6: no hydration while the full load is still fetching the same items.
+    #[test]
+    fn view_ids_hydrate_only_after_the_full_load() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        State::update(dir.path(), |s| {
+            s.set_last_view(&board(), &ViewId::new("V_bugs"))
+        })
+        .unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        let effects = c.start(Ok(()), t0);
+        assert!(effects.iter().any(|e| matches!(e, Effect::Spawn(SyncJob::ViewIds { hydrate: false, filter, .. }) if filter == "label:bug")));
+        let effects = c.handle(Input::Sync(complete("2026-10-01T12:00:00Z")), t0);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Spawn(SyncJob::ViewIds { hydrate: true, .. }))),
+            "revalidated after the load, now hydrating"
+        );
+        assert!(cache_path(dir.path(), &board()).exists());
+    }
+
+    #[test]
+    fn polls_incrementally_with_a_two_minute_overlap() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        c.handle(Input::Sync(complete("2026-10-01T12:00:00Z")), t0);
+        let effects = c.handle(Input::Tick, t0 + Duration::from_secs(31));
+        let expected = SyncJob::Incremental {
+            project: ProjectId::new("PVT_1"),
+            since: "2026-10-01T11:58:00Z".into(),
+        };
+        assert_eq!(effects, vec![Effect::Spawn(expected)]);
+        assert!(
+            c.handle(Input::Tick, t0 + Duration::from_secs(62))
+                .is_empty(),
+            "one poll in flight at a time"
+        );
+    }
+
+    #[test]
+    fn rate_limits_pause_polling() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        c.handle(Input::Sync(complete("2026-10-01T12:00:00Z")), t0);
+        let limited = SyncEvent::Failed {
+            task: SyncTask::Incremental,
+            error: GithubError::RateLimited {
+                retry_after_secs: 120,
+            },
+        };
+        c.handle(Input::Sync(limited), t0 + Duration::from_secs(1));
+        assert!(
+            c.handle(Input::Tick, t0 + Duration::from_secs(60))
+                .is_empty()
+        );
+        assert_eq!(
+            c.handle(Input::Tick, t0 + Duration::from_secs(122)).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn unsupported_incremental_mode_polls_in_full() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        let fake = Arc::new(FakeHerdr::default());
+        let t0 = Instant::now();
+        let mut c = Controller::new(
+            options(dir.path(), Some("tviles/3")),
+            fake,
+            IncrementalMode::Unsupported,
+            t0,
+        );
+        c.start(Ok(()), t0);
+        c.handle(Input::Sync(complete("2026-10-01T12:00:00Z")), t0);
+        assert!(matches!(
+            c.handle(Input::Tick, t0 + Duration::from_secs(31))
+                .as_slice(),
+            [Effect::Spawn(SyncJob::Refresh(_))]
+        ));
+    }
+
+    #[test]
+    fn refresh_key_starts_a_full_poll_unless_one_is_running() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        assert!(
+            c.handle(Input::Key(key('r')), t0).is_empty(),
+            "initial load still running"
+        );
+        c.handle(Input::Sync(complete("2026-10-01T12:00:00Z")), t0);
+        assert!(matches!(
+            c.handle(Input::Key(key('r')), t0).as_slice(),
+            [Effect::Spawn(SyncJob::Refresh(_))]
+        ));
+    }
+
+    #[test]
+    fn quit_exits_and_release_unregisters_the_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        assert_eq!(c.handle(Input::Key(key('q')), t0), vec![Effect::Exit]);
+        c.release();
+        assert_eq!(PaneRegistry::new(dir.path()).lookup(&board()), None);
+    }
+
+    #[test]
+    fn a_failed_board_list_ends_the_loading_picker() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut opts = options(dir.path(), None);
+        opts.picker = true;
+        let fake = Arc::new(FakeHerdr::default());
+        let t0 = Instant::now();
+        let mut c = Controller::new(opts, fake, IncrementalMode::DateTime, t0);
+        assert_eq!(
+            c.start(Ok(()), t0),
+            vec![Effect::Spawn(SyncJob::Projects(Some(
+                "tviles/app".parse().unwrap()
+            )))]
+        );
+        assert!(c.app.picker.as_ref().unwrap().loading);
+        let failure = SyncEvent::Failed {
+            task: SyncTask::Projects,
+            error: GithubError::Network("down".into()),
+        };
+        assert!(c.handle(Input::Sync(failure), t0).is_empty());
+        assert!(!c.app.picker.as_ref().unwrap().loading);
+        assert!(
+            c.app
+                .status
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("could not list boards"))
+        );
+    }
+
+    #[test]
+    fn poll_since_subtracts_two_minutes() {
+        assert_eq!(poll_since("2026-10-01T12:00:00Z"), "2026-10-01T11:58:00Z");
+        assert_eq!(poll_since("not a time"), "not a time");
+    }
+}

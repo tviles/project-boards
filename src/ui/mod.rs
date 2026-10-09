@@ -3,6 +3,7 @@
 pub mod app;
 pub mod board;
 pub mod chrome;
+pub mod controller;
 pub mod detail;
 pub mod keymap;
 pub mod markdown;
