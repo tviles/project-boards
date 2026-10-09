@@ -459,20 +459,26 @@ impl App {
         let action = self.keymap.action(&key);
         match self.mode {
             Mode::Search => {
-                self.sync_selected_id();
-                match self.handle_text_input(&key) {
+                // The anchor stays on the item that was selected when typing began, so
+                // clearing the search returns to it; Enter re-anchors on what is visible.
+                let committed = match self.handle_text_input(&key) {
                     Some(true) => {
                         self.search = std::mem::take(&mut self.input);
                         self.mode = Mode::Normal;
+                        true
                     }
                     None => {
                         self.input.clear();
                         self.search.clear();
                         self.mode = Mode::Normal;
+                        false
                     }
-                    Some(false) => {}
-                }
+                    Some(false) => false,
+                };
                 self.restore_selection();
+                if committed {
+                    self.sync_selected_id();
+                }
                 Vec::new()
             }
             Mode::Filter => match self.handle_text_input(&key) {
@@ -608,6 +614,7 @@ impl App {
                     Vec::new()
                 }
                 Some(Action::Search) => {
+                    self.sync_selected_id();
                     self.input = self.search.clone();
                     self.mode = Mode::Search;
                     Vec::new()
@@ -1192,7 +1199,7 @@ mod tests {
         a.handle_key(key('j'));
         assert_eq!(selected_id(&a), "c");
         let mut all = crate::ui::fixtures::items();
-        all.push(crate::model::item::tests::issue("0", 50, "Earlier"));
+        all.insert(0, crate::model::item::tests::issue("0", 50, "Earlier"));
         a.on_sync(SyncEvent::ItemsComplete {
             items: all,
             fetched_at: "t".into(),
@@ -1200,6 +1207,7 @@ mod tests {
             truncated: false,
         });
         assert_eq!(a.table_rows().len(), 6);
+        assert_eq!(a.table_selected, 3, "the index moved with the insert");
         assert_eq!(
             selected_id(&a),
             "c",
@@ -1223,5 +1231,20 @@ mod tests {
             a.table_rows()[a.table_selected],
             Row::Group { .. }
         ));
+    }
+
+    #[test]
+    fn clearing_a_search_returns_to_the_original_selection() {
+        let mut a = app();
+        a.handle_key(key('j'));
+        a.handle_key(key('j'));
+        assert_eq!(selected_id(&a), "c");
+        a.handle_key(key('/'));
+        for c in "crash".chars() {
+            a.handle_key(key(c));
+        }
+        assert_ne!(selected_id(&a), "c");
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!(selected_id(&a), "c");
     }
 }
