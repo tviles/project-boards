@@ -1,7 +1,7 @@
 use crate::model::{BoardRef, ProjectSummary};
 use crate::ui::text::truncate_to_width;
 use crate::ui::theme::Theme;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -63,6 +63,8 @@ impl PickerState {
 
     pub fn handle(&mut self, key: &KeyEvent) -> PickerOutcome {
         match key.code {
+            // A required picker has no board to go back to; Ctrl+C quits (handled by the App).
+            KeyCode::Esc if self.required => {}
             KeyCode::Esc => return PickerOutcome::Cancel,
             KeyCode::Enter => {
                 if let Some(p) = self.visible().get(self.selected) {
@@ -75,7 +77,11 @@ impl PickerState {
                 self.input.pop();
                 self.selected = 0;
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
                 self.input.push(c);
                 self.selected = 0;
             }
@@ -108,11 +114,15 @@ pub fn render_picker(frame: &mut Frame, area: Rect, state: &PickerState, theme: 
     } else if state.visible().is_empty() {
         lines.push(Line::styled("No boards match.", theme.dim()));
     }
+    // The window follows the selection, so the selected row is always drawn.
+    let window = h.saturating_sub(4).max(1) as usize;
+    let offset = state.selected.saturating_sub(window - 1);
     for (i, p) in state
         .visible()
         .into_iter()
         .enumerate()
-        .take(h.saturating_sub(4) as usize)
+        .skip(offset)
+        .take(window)
     {
         let style = if i == state.selected {
             theme.selected()
@@ -128,7 +138,7 @@ pub fn render_picker(frame: &mut Frame, area: Rect, state: &PickerState, theme: 
         ));
     }
     let title = if state.required {
-        " pick a board · esc quits "
+        " pick a board · ctrl+c quits "
     } else {
         " switch board · esc cancels "
     };
@@ -170,7 +180,48 @@ mod tests {
             p.handle(&code(KeyCode::Enter)),
             PickerOutcome::Chosen("acme/7".parse().unwrap())
         );
+        assert_eq!(p.handle(&code(KeyCode::Esc)), PickerOutcome::None);
+        p.required = false;
         assert_eq!(p.handle(&code(KeyCode::Esc)), PickerOutcome::Cancel);
+    }
+
+    #[test]
+    fn esc_on_a_required_picker_does_nothing_and_ctrl_keys_do_not_type() {
+        let mut p = PickerState::with(vec![summary("tviles/1", "a")], true);
+        assert_eq!(p.handle(&code(KeyCode::Esc)), PickerOutcome::None);
+        p.handle(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        p.handle(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
+        assert_eq!(p.input, "");
+        p.handle(&KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
+        assert_eq!(p.input, "A");
+    }
+
+    fn render(p: &PickerState, w: u16, h: u16) -> String {
+        crate::ui::fixtures::render_to_string(w, h, |f| {
+            render_picker(f, f.area(), p, &Theme::plain())
+        })
+    }
+
+    #[test]
+    fn the_selected_row_is_always_on_screen() {
+        let list = (0..30)
+            .map(|i| summary(&format!("acme/{}", i + 1), &format!("Board number {i}")))
+            .collect();
+        let mut p = PickerState::with(list, false);
+        p.selected = 25;
+        assert!(render(&p, 60, 10).contains("Board number 25"));
+        p.selected = 0;
+        assert!(render(&p, 60, 10).contains("Board number 0"));
+    }
+
+    #[test]
+    fn renders_rows_title_and_survives_tiny_areas() {
+        let p = PickerState::with(vec![summary("acme/7", "Sprint")], true);
+        let s = render(&p, 60, 12);
+        assert!(s.contains("acme/7  Sprint") && s.contains("ctrl+c quits"));
+        assert!(render(&PickerState::loading(false), 60, 12).contains("Loading boards"));
+        render(&p, 0, 0);
+        render(&p, 40, 8);
     }
 
     #[test]

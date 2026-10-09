@@ -9216,7 +9216,7 @@ pub struct PickerState {
     pub input: String,
     pub selected: usize,
     pub loading: bool,
-    /// No board is open yet: cancelling quits instead of returning to a board.
+    /// No board is open yet: Esc does nothing (Ctrl+C quits), since there is no board to return to.
     pub required: bool,
 }
 
@@ -9250,6 +9250,7 @@ impl PickerState {
 
     pub fn handle(&mut self, key: &KeyEvent) -> PickerOutcome {
         match key.code {
+            KeyCode::Esc if self.required => {}
             KeyCode::Esc => return PickerOutcome::Cancel,
             KeyCode::Enter => {
                 if let Some(p) = self.visible().get(self.selected) {
@@ -9288,7 +9289,7 @@ pub fn render_picker(frame: &mut Frame, area: Rect, state: &PickerState, theme: 
         let style = if i == state.selected { theme.selected() } else { ratatui::style::Style::default() };
         lines.push(Line::styled(truncate_to_width(&format!("{}  {}", p.board, p.title), w.saturating_sub(2) as usize), style));
     }
-    let title = if state.required { " pick a board · esc quits " } else { " switch board · esc cancels " };
+    let title = if state.required { " pick a board · ctrl+c quits " } else { " switch board · esc cancels " };
     frame.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)), rect);
 }
 
@@ -9310,6 +9311,8 @@ mod tests {
         }
         assert_eq!(p.visible().len(), 1);
         assert_eq!(p.handle(&code(KeyCode::Enter)), PickerOutcome::Chosen("acme/7".parse().unwrap()));
+        assert_eq!(p.handle(&code(KeyCode::Esc)), PickerOutcome::None);
+        p.required = false;
         assert_eq!(p.handle(&code(KeyCode::Esc)), PickerOutcome::Cancel);
     }
 
@@ -9342,15 +9345,9 @@ Expected: 2 tests PASS.
                 vec![Command::PickBoard(board)]
             }
             crate::ui::picker::PickerOutcome::Cancel => {
-                let required = picker.required;
                 self.picker = None;
                 self.mode = Mode::Normal;
-                if required {
-                    self.quit = true;
-                    vec![Command::Quit]
-                } else {
-                    Vec::new()
-                }
+                Vec::new()
             }
         }
     }
@@ -9366,14 +9363,17 @@ Add this test to the App tests and run it:
 
 ```rust
     #[test]
-    fn picker_choice_becomes_a_command_and_required_cancel_quits() {
+    fn picker_choice_becomes_a_command_and_required_esc_stays_but_ctrl_c_quits() {
         let mut a = app();
         a.on_sync(SyncEvent::Projects(vec![ProjectSummary { id: ProjectId::new("x"), board: "acme/7".parse().unwrap(), title: "Sprint".into(), closed: false }]));
         assert_eq!(a.mode, Mode::Picker);
         assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::PickBoard("acme/7".parse().unwrap())]);
         let mut empty = App::new(Box::new(MemoryStore::new(None)), Keymap::defaults(), Theme::plain());
         empty.on_sync(SyncEvent::Projects(vec![]));
-        assert_eq!(empty.handle_key(code(KeyCode::Esc)), vec![Command::Quit]);
+        assert_eq!(empty.handle_key(code(KeyCode::Esc)), Vec::<Command>::new());
+        assert_eq!(empty.mode, Mode::Picker);
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(empty.handle_key(ctrl_c), vec![Command::Quit]);
     }
 ```
 
@@ -10708,7 +10708,7 @@ Setup: `cargo build --release && herdr plugin link .`, keybinding for `tviles.pr
 
 - [ ] Key opens a tab with the testbed board; header shows `stale` (second run) or `loading`, then neither.
 - [ ] Pressing the key again focuses the same tab; no second tab opens.
-- [ ] `open-picker` lists the testbed board first; `Esc` on a fresh picker quits.
+- [ ] `open-picker` lists the testbed board first; `Esc` on a fresh picker does nothing and `Ctrl+C` quits.
 - [ ] `open-overlay`, `open-split` and `open-zoomed` each open the board; quitting returns focus.
 - [ ] `Tab` reaches all four views; "Bugs" shows only bug-labelled items after a moment.
 - [ ] "Board" shows Status columns with Priority lanes and a "No Priority" lane under Todo.

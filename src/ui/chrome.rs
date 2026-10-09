@@ -7,7 +7,7 @@ use crate::ui::board::render_board;
 use crate::ui::detail::{build_doc, render_detail};
 use crate::ui::picker::render_picker;
 use crate::ui::table::{render_table, table_columns};
-use crate::ui::text::truncate_to_width;
+use crate::ui::text::{display_width, pad_to_width, truncate_to_width};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout as Split, Rect};
 use ratatui::text::{Line, Span};
@@ -87,13 +87,10 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         flags.push("rate limit low".into());
     }
     let right = flags.join(" · ");
-    let left_width = (area.width as usize).saturating_sub(right.chars().count() + 1);
+    let left_width = (area.width as usize).saturating_sub(display_width(&right) + 1);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!("{:<left_width$}", truncate_to_width(&title, left_width)),
-                app.theme.bold(),
-            ),
+            Span::styled(pad_to_width(&title, left_width), app.theme.bold()),
             Span::styled(format!(" {right}"), app.theme.dim()),
         ])),
         area,
@@ -289,6 +286,46 @@ mod tests {
         assert!(lines[2].starts_with("Title"));
         assert!(lines[11].contains("? help"));
         insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn a_cjk_title_keeps_the_flags_at_the_right_edge() {
+        let mut snap = snapshot();
+        snap.project.title = "中文看板中文看板".into();
+        let mut a = App::new(
+            Box::new(MemoryStore::new(Some(snap))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        a.status.stale = true;
+        let screen = render_to_string(44, 10, |f| draw(f, &mut a));
+        let first = screen.lines().next().unwrap();
+        assert!(first.ends_with(" stale"), "{first}");
+        assert!(display_width(first) <= 44);
+    }
+
+    #[test]
+    fn picker_and_setup_overlays_render_and_tiny_sizes_do_not_panic() {
+        let mut a = app();
+        a.on_sync(crate::sync::SyncEvent::Projects(vec![
+            crate::model::ProjectSummary {
+                id: crate::model::ProjectId::new("x"),
+                board: "acme/7".parse().unwrap(),
+                title: "Sprint".into(),
+                closed: false,
+            },
+        ]));
+        let screen = render_to_string(80, 16, |f| draw(f, &mut a));
+        assert!(screen.contains("acme/7  Sprint") && screen.contains("esc cancels"));
+        render_to_string(0, 0, |f| draw(f, &mut a));
+        render_to_string(40, 8, |f| draw(f, &mut a));
+
+        let mut b = app();
+        b.mode = Mode::Setup;
+        b.setup = Some("Run gh auth login first.".into());
+        let screen = render_to_string(80, 12, |f| draw(f, &mut b));
+        assert!(screen.contains("Run gh auth login first.") && screen.contains("setup"));
+        render_to_string(40, 8, |f| draw(f, &mut b));
     }
 
     #[test]

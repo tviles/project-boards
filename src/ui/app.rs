@@ -667,15 +667,9 @@ impl App {
                 vec![Command::PickBoard(board)]
             }
             PickerOutcome::Cancel => {
-                let required = picker.required;
                 self.picker = None;
                 self.mode = Mode::Normal;
-                if required {
-                    self.quit = true;
-                    vec![Command::Quit]
-                } else {
-                    Vec::new()
-                }
+                Vec::new()
             }
         }
     }
@@ -776,7 +770,10 @@ impl App {
             .as_ref()
             .map(|p| p.required)
             .unwrap_or(self.snapshot().is_none());
-        self.picker = Some(PickerState::with(list, required));
+        let typed = self.picker.take().map(|p| p.input).unwrap_or_default();
+        let mut picker = PickerState::with(list, required);
+        picker.input = typed;
+        self.picker = Some(picker);
         self.mode = Mode::Picker;
     }
 
@@ -807,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn picker_choice_becomes_a_command_and_required_cancel_quits() {
+    fn picker_choice_becomes_a_command_and_required_esc_stays_but_ctrl_c_quits() {
         let mut a = app();
         a.on_sync(SyncEvent::Projects(vec![ProjectSummary {
             id: ProjectId::new("x"),
@@ -826,7 +823,24 @@ mod tests {
             Theme::plain(),
         );
         empty.on_sync(SyncEvent::Projects(vec![]));
-        assert_eq!(empty.handle_key(code(KeyCode::Esc)), vec![Command::Quit]);
+        assert_eq!(empty.handle_key(code(KeyCode::Esc)), Vec::<Command>::new());
+        assert_eq!(empty.mode, Mode::Picker);
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(empty.handle_key(ctrl_c), vec![Command::Quit]);
+    }
+
+    #[test]
+    fn filter_typed_while_loading_survives_the_list_arriving() {
+        let mut a = App::new(
+            Box::new(MemoryStore::new(None)),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        a.picker = Some(PickerState::loading(true));
+        a.mode = Mode::Picker;
+        a.handle_key(key('s'));
+        a.on_sync(SyncEvent::Projects(vec![]));
+        assert_eq!(a.picker.as_ref().unwrap().input, "s");
     }
 
     #[test]
