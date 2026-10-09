@@ -52,7 +52,14 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Command::Pane | Command::Doctor { .. } => {
+        Command::Pane => match project_boards::commands::pane::run_pane() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("project-boards: {e:#}");
+                ExitCode::FAILURE
+            }
+        },
+        Command::Doctor { .. } => {
             eprintln!("project-boards: this subcommand is not built yet in this version");
             ExitCode::FAILURE
         }

@@ -7,6 +7,7 @@ pub mod config;
 pub mod fsutil;
 pub mod github;
 pub mod herdr;
+pub mod logging;
 pub mod model;
 pub mod state;
 pub mod store;

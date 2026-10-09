@@ -20,7 +20,7 @@ clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 reqwest = { version = "0.13", features = ["json"] }
 graphql_client = "0.16"
 project-boards-queries = { path = "crates/queries" }
