@@ -77,7 +77,12 @@ pub enum SyncJob {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    Spawn(SyncJob),
+    /// `generation` is the controller's generation when the effect was produced; the shell
+    /// tags the job's events with it.
+    Spawn {
+        job: SyncJob,
+        generation: u64,
+    },
     OpenUrl(String),
     /// Resolve the token again and call `start` (after Retry).
     ResolveToken,
@@ -146,6 +151,13 @@ impl Controller {
         self.generation
     }
 
+    fn spawn(&self, job: SyncJob) -> Effect {
+        Effect::Spawn {
+            job,
+            generation: self.generation,
+        }
+    }
+
     pub fn board(&self) -> Option<&BoardRef> {
         self.board.as_ref()
     }
@@ -175,7 +187,7 @@ impl Controller {
             FirstStep::Use(board) => self.open_board(board, now),
             FirstStep::FetchRepoProjects(repo) => {
                 self.awaiting_repo_projects = true;
-                vec![Effect::Spawn(SyncJob::RepoProjects(repo))]
+                vec![self.spawn(SyncJob::RepoProjects(repo))]
             }
             FirstStep::PickAll => self.show_picker(true),
         }
@@ -189,7 +201,7 @@ impl Controller {
     fn show_picker(&mut self, required: bool) -> Vec<Effect> {
         self.app.picker = Some(PickerState::loading(required));
         self.app.mode = Mode::Picker;
-        vec![Effect::Spawn(SyncJob::Projects(self.options.repo.clone()))]
+        vec![self.spawn(SyncJob::Projects(self.options.repo.clone()))]
     }
 
     /// Shows `board` in this pane, unless another live pane already shows it.
@@ -216,6 +228,7 @@ impl Controller {
         }
         self.release();
         self.generation += 1;
+        self.awaiting_repo_projects = false;
         if let Some(own) = &own {
             if let Err(e) = registry.register(&board, own) {
                 tracing::warn!(error = %e, "could not record this pane in the registry");
@@ -247,7 +260,7 @@ impl Controller {
             Some(snapshot) => SyncJob::Refresh(snapshot.project),
             None => SyncJob::Resolve(board),
         };
-        let mut effects = vec![Effect::Spawn(job)];
+        let mut effects = vec![self.spawn(job)];
         let cmds: Vec<Command> = self.app.view_needs_ids().into_iter().collect();
         effects.extend(self.commands(cmds, now));
         effects
@@ -270,7 +283,7 @@ impl Controller {
             };
             self.full_load_in_flight = true;
             self.scheduler.started(PollKind::Full, now);
-            return vec![Effect::Spawn(SyncJob::Resolve(board))];
+            return vec![self.spawn(SyncJob::Resolve(board))];
         };
         let project = snapshot.project.clone();
         let since = snapshot.fetched_at.clone();
@@ -292,7 +305,7 @@ impl Controller {
             PollKind::Incremental
         };
         self.scheduler.started(started, now);
-        vec![Effect::Spawn(job)]
+        vec![self.spawn(job)]
     }
 
     pub fn handle(&mut self, input: Input, now: Instant) -> Vec<Effect> {
@@ -424,7 +437,7 @@ impl Controller {
             match cmd {
                 Command::FetchViewIds { view, filter } => {
                     if let Some(s) = self.app.snapshot() {
-                        effects.push(Effect::Spawn(SyncJob::ViewIds {
+                        effects.push(self.spawn(SyncJob::ViewIds {
                             project: s.project.id.clone(),
                             view,
                             filter,
@@ -434,7 +447,7 @@ impl Controller {
                     }
                 }
                 Command::LoadDetail { item, before } => {
-                    effects.push(Effect::Spawn(SyncJob::Detail { item, before }))
+                    effects.push(self.spawn(SyncJob::Detail { item, before }))
                 }
                 Command::OpenUrl(url) => effects.push(Effect::OpenUrl(url)),
                 Command::Refresh => {
@@ -538,10 +551,7 @@ mod tests {
     fn a_board_without_cache_is_resolved_registered_and_remembered() {
         let dir = tempfile::tempdir().unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        assert_eq!(
-            c.start(Ok(()), t0),
-            vec![Effect::Spawn(SyncJob::Resolve(board()))]
-        );
+        assert_eq!(c.start(Ok(()), t0), vec![sp(&c, SyncJob::Resolve(board()))]);
         assert_eq!(
             PaneRegistry::new(dir.path()).lookup(&board()).as_deref(),
             Some("me")
@@ -558,7 +568,9 @@ mod tests {
         save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
         let effects = c.start(Ok(()), t0);
-        assert!(matches!(&effects[0], Effect::Spawn(SyncJob::Refresh(p)) if p.board == board()));
+        assert!(
+            matches!(&effects[0], Effect::Spawn { job: SyncJob::Refresh(p), .. } if p.board == board())
+        );
         assert!(c.app.snapshot().is_some() && c.app.status.stale);
     }
 
@@ -587,7 +599,7 @@ mod tests {
         let (mut one, _, t0) = controller(dir.path(), None);
         assert_eq!(
             one.start(Ok(()), t0),
-            vec![Effect::Spawn(SyncJob::RepoProjects(repo.clone()))]
+            vec![sp(&one, SyncJob::RepoProjects(repo.clone()))]
         );
         let effects = one.handle(
             Input::Sync {
@@ -596,7 +608,7 @@ mod tests {
             },
             t0,
         );
-        assert_eq!(effects, vec![Effect::Spawn(SyncJob::Resolve(board()))]);
+        assert_eq!(effects, vec![sp(&one, SyncJob::Resolve(board()))]);
 
         let dir2 = tempfile::tempdir().unwrap();
         let (mut two, _, t0) = controller(dir2.path(), None);
@@ -626,7 +638,7 @@ mod tests {
                 },
                 t0
             ),
-            vec![Effect::Spawn(SyncJob::Projects(Some(repo)))]
+            vec![sp(&failed, SyncJob::Projects(Some(repo)))]
         );
         assert_eq!(failed.app.mode, Mode::Picker);
     }
@@ -642,7 +654,7 @@ mod tests {
         .unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
         let effects = c.start(Ok(()), t0);
-        assert!(effects.iter().any(|e| matches!(e, Effect::Spawn(SyncJob::ViewIds { hydrate: false, filter, .. }) if filter == "label:bug")));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Spawn { job: SyncJob::ViewIds { hydrate: false, filter, .. }, .. } if filter == "label:bug")));
         let effects = c.handle(
             Input::Sync {
                 generation: c.generation(),
@@ -651,9 +663,13 @@ mod tests {
             t0,
         );
         assert!(
-            effects
-                .iter()
-                .any(|e| matches!(e, Effect::Spawn(SyncJob::ViewIds { hydrate: true, .. }))),
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::Spawn {
+                    job: SyncJob::ViewIds { hydrate: true, .. },
+                    ..
+                }
+            )),
             "revalidated after the load, now hydrating"
         );
         assert!(cache_path(dir.path(), &board()).exists());
@@ -677,7 +693,7 @@ mod tests {
             project: ProjectId::new("PVT_1"),
             since: "2026-10-01T11:58:00Z".into(),
         };
-        assert_eq!(effects, vec![Effect::Spawn(expected)]);
+        assert_eq!(effects, vec![sp(&c, expected)]);
         assert!(
             c.handle(Input::Tick, t0 + Duration::from_secs(62))
                 .is_empty(),
@@ -744,7 +760,10 @@ mod tests {
         assert!(matches!(
             c.handle(Input::Tick, t0 + Duration::from_secs(31))
                 .as_slice(),
-            [Effect::Spawn(SyncJob::Refresh(_))]
+            [Effect::Spawn {
+                job: SyncJob::Refresh(_),
+                ..
+            }]
         ));
     }
 
@@ -767,7 +786,10 @@ mod tests {
         );
         assert!(matches!(
             c.handle(Input::Key(key('r')), t0).as_slice(),
-            [Effect::Spawn(SyncJob::Refresh(_))]
+            [Effect::Spawn {
+                job: SyncJob::Refresh(_),
+                ..
+            }]
         ));
     }
 
@@ -791,9 +813,10 @@ mod tests {
         let mut c = Controller::new(opts, fake, IncrementalMode::DateTime, t0);
         assert_eq!(
             c.start(Ok(()), t0),
-            vec![Effect::Spawn(SyncJob::Projects(Some(
-                "tviles/app".parse().unwrap()
-            )))]
+            vec![sp(
+                &c,
+                SyncJob::Projects(Some("tviles/app".parse().unwrap()))
+            )]
         );
         assert!(c.app.picker.as_ref().unwrap().loading);
         let failure = SyncEvent::Failed {
@@ -820,6 +843,13 @@ mod tests {
         );
     }
 
+    fn sp(c: &Controller, job: SyncJob) -> Effect {
+        Effect::Spawn {
+            job,
+            generation: c.generation(),
+        }
+    }
+
     fn at(c: &Controller, event: SyncEvent) -> Input {
         Input::Sync {
             generation: c.generation(),
@@ -844,7 +874,13 @@ mod tests {
         c.handle(e, t0 + Duration::from_secs(1));
         let effects = c.handle(Input::Tick, t0 + Duration::from_secs(31));
         assert_eq!(effects.len(), 1);
-        assert!(matches!(&effects[0], Effect::Spawn(SyncJob::Refresh(_))));
+        assert!(matches!(
+            &effects[0],
+            Effect::Spawn {
+                job: SyncJob::Refresh(_),
+                ..
+            }
+        ));
         assert!(
             c.handle(Input::Tick, t0 + Duration::from_secs(32))
                 .is_empty()
@@ -864,7 +900,7 @@ mod tests {
         );
         assert_eq!(
             c.handle(Input::Tick, t0 + Duration::from_secs(31)),
-            vec![Effect::Spawn(SyncJob::Resolve(board()))]
+            vec![sp(&c, SyncJob::Resolve(board()))]
         );
         assert!(
             c.handle(Input::Tick, t0 + Duration::from_secs(32))
@@ -881,10 +917,7 @@ mod tests {
         let old = c.generation();
         let other: BoardRef = "tviles/4".parse().unwrap();
         let effects = c.commands(vec![Command::PickBoard(other.clone())], t0);
-        assert_eq!(
-            effects,
-            vec![Effect::Spawn(SyncJob::Resolve(other.clone()))]
-        );
+        assert_eq!(effects, vec![sp(&c, SyncJob::Resolve(other.clone()))]);
         assert!(c.generation() > old);
         let late = Input::Sync {
             generation: old,
@@ -918,10 +951,7 @@ mod tests {
             &["plugin", "pane", "focus", "other"],
             FakeHerdr::not_found(),
         );
-        assert_eq!(
-            c.start(Ok(()), t0),
-            vec![Effect::Spawn(SyncJob::Resolve(board()))]
-        );
+        assert_eq!(c.start(Ok(()), t0), vec![sp(&c, SyncJob::Resolve(board()))]);
     }
 
     #[test]
@@ -959,7 +989,10 @@ mod tests {
         assert_eq!(effects.len(), 1);
         assert!(matches!(
             &effects[0],
-            Effect::Spawn(SyncJob::Incremental { .. })
+            Effect::Spawn {
+                job: SyncJob::Incremental { .. },
+                ..
+            }
         ));
     }
 
@@ -975,6 +1008,51 @@ mod tests {
         let e = at(&c, failure);
         assert!(c.handle(e, t0).is_empty());
         assert_eq!(c.app.mode, Mode::Setup);
+    }
+
+    #[test]
+    fn effects_are_tagged_when_produced_not_when_executed() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        let e = at(&c, complete("2026-10-01T12:00:00Z"));
+        c.handle(e, t0);
+        let old = c.generation();
+        c.app.picker = Some(PickerState::with(vec![summary("tviles/4")], false));
+        c.app.mode = Mode::Picker;
+        // One Enter, after idling: the idle poll starts on the old board, then the pick switches.
+        let enter = Input::Key(crate::ui::fixtures::code(crossterm::event::KeyCode::Enter));
+        let effects = c.handle(enter, t0 + Duration::from_secs(400));
+        let other: BoardRef = "tviles/4".parse().unwrap();
+        assert_eq!(effects.len(), 2, "{effects:?}");
+        assert!(
+            matches!(&effects[0], Effect::Spawn { job: SyncJob::Incremental { .. }, generation } if *generation == old)
+        );
+        assert_eq!(
+            effects[1],
+            Effect::Spawn {
+                job: SyncJob::Resolve(other),
+                generation: old + 1
+            }
+        );
+    }
+
+    #[test]
+    fn opening_a_board_forgets_a_pending_repo_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), None);
+        c.start(Ok(()), t0);
+        assert!(c.awaiting_repo_projects);
+        c.commands(vec![Command::PickBoard(board())], t0);
+        assert!(!c.awaiting_repo_projects);
+        let e = at(&c, fail(SyncTask::Projects));
+        c.handle(e, t0);
+        assert_ne!(
+            c.app.mode,
+            Mode::Picker,
+            "no required picker reopened over the board"
+        );
     }
 
     #[test]

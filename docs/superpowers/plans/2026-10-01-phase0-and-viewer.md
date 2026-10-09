@@ -9633,6 +9633,8 @@ git commit -m "Add the screen layout, board picker and setup screen"
 
 ### Task 24: Pane controller
 
+> **As shipped:** `src/ui/controller.rs` at the commit that closes Task 24's fix rounds supersedes the code blocks below (the tests there use the old `Input::Sync(..)` / `Effect::Spawn(..)` shapes). Deltas: R30 (`Failed { Resolve }` ends the load; the Refresh job stops after a failed refresh), R31 (generation tagging: `Input::Sync { generation, event }`, `Effect::Spawn { job, generation }` tagged when produced, bump in `open_board`, which also clears `awaiting_repo_projects`), R32 (`poll` retries `Resolve` when a board has no snapshot and nothing is in flight), a failed focus of the other pane opens the board here, persistence rules (an empty `ItemsUpdated` is not saved, `Hydrated` is), and `tracing::warn!` on State/registry write errors.
+
 **Files:**
 - Create: `src/ui/controller.rs`
 - Modify: `src/ui/mod.rs`
@@ -9643,7 +9645,7 @@ git commit -m "Add the screen layout, board picker and setup screen"
   - `ui::controller::PaneOptions { state_dir: PathBuf, own_pane: Option<String>, config: Config, warnings: Vec<String>, repo: Option<RepoSlug>, board: Option<BoardRef>, picker: bool }`.
   - `ui::controller::Input::{Key(KeyEvent), Focus(bool), Tick, Sync { generation: u64, event: SyncEvent }}` (events whose generation is not the controller's current one are dropped; `Controller::generation() -> u64`, bumped whenever the shown board changes`.
   - `ui::controller::SyncJob::{Resolve(BoardRef), Refresh(Project), Incremental { project, since }, ViewIds { project, view, filter, known, hydrate }, Detail { item, before }, RepoProjects(RepoSlug), Projects(Option<RepoSlug>)}`.
-  - `ui::controller::Effect::{Spawn(SyncJob), OpenUrl(String), ResolveToken, Exit}`.
+  - `ui::controller::Effect::{Spawn { job: SyncJob, generation: u64 }, OpenUrl(String), ResolveToken, Exit}` (`generation` is set by the controller when it produces the effect`.
   - `ui::controller::poll_since(&str) -> String`.
   - `ui::controller::Controller` with `pub app: App`, `new(PaneOptions, Arc<dyn HerdrCli>, IncrementalMode, Instant)`, `start(Result<(), GithubError>, Instant) -> Vec<Effect>`, `handle(Input, Instant) -> Vec<Effect>`, `release()`, `board() -> Option<&BoardRef>`.
 
@@ -9905,7 +9907,8 @@ pub enum SyncJob {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    Spawn(SyncJob),
+    /// `generation` is the controller's generation when the effect was produced.
+    Spawn { job: SyncJob, generation: u64 },
     OpenUrl(String),
     /// Resolve the token again and call `start` (after Retry).
     ResolveToken,
@@ -10186,7 +10189,7 @@ git commit -m "Add the pane controller: startup, single instance, polling, hydra
 - Modify: `src/ui/mod.rs`, `src/commands/mod.rs`, `src/lib.rs`, `src/main.rs`
 
 **Interfaces:**
-- Consumes: `Controller` (including `generation()`), `Input` (`Sync { generation, event }`), `Effect`, `SyncJob`, `PaneOptions` (Task 24); `chrome::draw` (Task 23); `Syncer` (Tasks 16, 21); `resolve_token_from_system`, `HttpTransport`, `Github` (Tasks 4, 8); `ProcessHerdr` (Task 13); `PluginEnv`, `detect_repo` (Task 13); `load_config` (Task 12).
+- Consumes: `Controller`, `Input` (`Sync { generation, event }`), `Effect` (`Spawn { job, generation }`), `SyncJob`, `PaneOptions` (Task 24); `chrome::draw` (Task 23); `Syncer` (Tasks 16, 21); `resolve_token_from_system`, `HttpTransport`, `Github` (Tasks 4, 8); `ProcessHerdr` (Task 13); `PluginEnv`, `detect_repo` (Task 13); `load_config` (Task 12).
 - Produces: `logging::init(state_dir: &Path) -> Option<tracing_appender::non_blocking::WorkerGuard>`; `ui::runtime::run(PaneOptions) -> anyhow::Result<()>`; `commands::pane::run_pane() -> anyhow::Result<()>`.
 
 The shell only moves data: terminal events and sync events go into the controller, and the controller's effects come out as spawned sync jobs, browser launches, token resolution and exit. It has no unit tests; every decision lives in the controller (Task 24), and the smoke checklist (Task 27) exercises the shell.
@@ -10268,9 +10271,10 @@ async fn event_loop(terminal: &mut DefaultTerminal, options: PaneOptions, herdr:
         while !pending.is_empty() {
             for effect in std::mem::take(&mut pending) {
                 match effect {
-                    Effect::Spawn(job) => match &runner {
-                        // Each job's events carry the generation it was spawned under.
-                        Some(r) => r.spawn(job, controller.generation()),
+                    Effect::Spawn { job, generation } => match &runner {
+                        // The effect carries the generation it was produced under; never read
+                        // controller.generation() here (a bump may have happened since).
+                        Some(r) => r.spawn(job, generation),
                         None => tracing::warn!(?job, "no GitHub client yet; job dropped"),
                     },
                     Effect::OpenUrl(url) => open_url(&url),
