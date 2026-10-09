@@ -201,6 +201,19 @@ impl Syncer {
         }
     }
 
+    /// The item's body, comments and links. `before` loads the comments older than a cursor.
+    pub async fn detail(&self, item: &ItemId, before: Option<String>) {
+        let older = before.is_some();
+        match self.gh.fetch_item_detail(item, before).await {
+            Ok(detail) => self.send(SyncEvent::Detail {
+                item: item.clone(),
+                detail,
+                older,
+            }),
+            Err(e) => self.fail(SyncTask::Detail(item.clone()), e),
+        }
+    }
+
     /// The boards linked to `repo`, for the startup decision.
     pub async fn repo_projects(&self, repo: &RepoSlug) {
         match self.gh.list_repo_projects(repo).await {
@@ -454,5 +467,22 @@ mod tests {
                 .any(|e| matches!(e, SyncEvent::ItemsUpdated { .. }))
         );
         assert_eq!(t.requests()[1].variables["query"], "");
+    }
+
+    #[tokio::test]
+    async fn detail_is_sent_with_the_older_flag() {
+        let (t, s, mut rx) = setup(2000);
+        let node = json!({"node": {"content": {"__typename": "Issue", "body": "b",
+            "comments": {"totalCount": 0, "pageInfo": {"hasPreviousPage": false, "startCursor": null}, "nodes": []}}}});
+        t.push("ItemDetail", node.clone());
+        t.push("ItemDetail", node);
+        s.detail(&ItemId::new("I1"), None).await;
+        s.detail(&ItemId::new("I1"), Some("cur".into())).await;
+        let events = drain(&mut rx);
+        assert!(
+            matches!(&events[0], SyncEvent::Detail { item, detail, older: false } if item.as_str() == "I1" && detail.body == "b")
+        );
+        assert!(matches!(&events[1], SyncEvent::Detail { older: true, .. }));
+        assert_eq!(t.requests()[1].variables["before"], "cur");
     }
 }

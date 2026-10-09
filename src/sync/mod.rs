@@ -5,7 +5,7 @@ pub mod syncer;
 
 use crate::github::GithubError;
 use crate::github::transport::RateInfo;
-use crate::model::{Item, ItemId, Project, ProjectSummary, ViewId};
+use crate::model::{Item, ItemDetail, ItemId, Project, ProjectSummary, ViewId};
 use crate::store::{StoreUpdate, ViewList};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +69,11 @@ pub enum SyncEvent {
     RepoProjects(Vec<ProjectSummary>),
     Projects(Vec<ProjectSummary>),
     Rate(RateInfo),
+    Detail {
+        item: ItemId,
+        detail: ItemDetail,
+        older: bool,
+    },
     Failed {
         task: SyncTask,
         error: GithubError,
@@ -90,6 +95,7 @@ pub fn store_update(event: &SyncEvent) -> Option<StoreUpdate> {
         }),
         SyncEvent::RepoProjects(_)
         | SyncEvent::Projects(_)
+        | SyncEvent::Detail { .. }
         | SyncEvent::Rate(_)
         | SyncEvent::Failed { .. } => None,
     }

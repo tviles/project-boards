@@ -168,6 +168,19 @@ impl Github {
         Ok(nodes.iter().filter_map(convert::item_from_wire).collect())
     }
 
+    pub async fn fetch_item_detail(
+        &self,
+        item: &ItemId,
+        before: Option<String>,
+    ) -> Result<ItemDetail, GithubError> {
+        let body = queries::ItemDetail::build_query(queries::item_detail::Variables {
+            id: item.0.clone(),
+            before,
+        });
+        let data = self.run(GraphqlRequest::from_body(body)).await?.data;
+        Ok(convert::detail_from_wire(&data["node"]))
+    }
+
     pub async fn list_repo_projects(
         &self,
         repo: &RepoSlug,

@@ -107,3 +107,32 @@ async fn view_ids() {
     let items = gh.hydrate_items(&ids.nodes).await.unwrap();
     assert!(items.iter().all(|i| i.label_names().contains(&"bug")));
 }
+
+#[tokio::test]
+async fn detail() {
+    let (_, id) = testbed();
+    let gh = github("detail");
+    let page = gh.fetch_items_page(&id, "", None).await.unwrap();
+    let crash = page
+        .nodes
+        .iter()
+        .find(|i| i.title().starts_with("Crash when board"))
+        .expect("seeded issue");
+    let d = gh.fetch_item_detail(&crash.id, None).await.unwrap();
+    assert!(d.body.contains("## Steps"));
+    assert_eq!(d.comments.len(), 2);
+    assert_eq!(d.comments[0].body, "First comment with `code`.");
+}
+
+#[tokio::test]
+async fn projects() {
+    let (board, _) = testbed();
+    let gh = github("projects");
+    let linked = gh
+        .list_repo_projects(&"tviles/project-boards-testbed".parse().unwrap())
+        .await
+        .unwrap();
+    assert!(linked.iter().any(|p| p.board == board));
+    let all = gh.list_viewer_projects().await.unwrap();
+    assert!(all.iter().any(|p| p.board == board));
+}

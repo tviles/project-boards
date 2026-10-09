@@ -262,6 +262,52 @@ pub fn summary_from_wire(v: &Value) -> Option<ProjectSummary> {
     })
 }
 
+fn linked(v: &Value) -> Option<LinkedRef> {
+    Some(LinkedRef {
+        number: v["number"].as_u64()? as u32,
+        title: str_of(&v["title"]),
+        state: str_of(&v["state"]),
+    })
+}
+
+/// Decodes the `node` of an `ItemDetail` response. Deleted authors show as "ghost", as on GitHub.
+pub fn detail_from_wire(node: &Value) -> ItemDetail {
+    let c = &node["content"];
+    let comments = &c["comments"];
+    let has_older = comments["pageInfo"]["hasPreviousPage"].as_bool() == Some(true);
+    let prs_key = if typename(c) == "PullRequest" {
+        "closingIssuesReferences"
+    } else {
+        "closedByPullRequestsReferences"
+    };
+    ItemDetail {
+        body: str_of(&c["body"]),
+        comments: nodes(c, "comments")
+            .into_iter()
+            .map(|n| Comment {
+                author: n["author"]["login"].as_str().unwrap_or("ghost").to_string(),
+                created_at: str_of(&n["createdAt"]),
+                body: str_of(&n["body"]),
+            })
+            .collect(),
+        comments_total: comments["totalCount"].as_u64().unwrap_or(0) as usize,
+        older_cursor: if has_older {
+            comments["pageInfo"]["startCursor"]
+                .as_str()
+                .map(String::from)
+        } else {
+            None
+        },
+        sub_issues: nodes(c, "subIssues")
+            .into_iter()
+            .filter_map(linked)
+            .collect(),
+        parent: linked(&c["parent"]),
+        issue_type: c["issueType"]["name"].as_str().map(String::from),
+        linked_prs: nodes(c, prs_key).into_iter().filter_map(linked).collect(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -479,5 +525,38 @@ pub(crate) mod tests {
             value_from_wire(&v),
             Some((FieldId::new("F_title"), FieldValue::Text("x".into())))
         );
+    }
+
+    #[test]
+    fn decodes_issue_detail_with_comments_oldest_first() {
+        let v = json!({"node": {"content": {"__typename": "Issue", "body": "Body **md**",
+            "issueType": {"name": "Bug"}, "parent": {"number": 3, "title": "Epic", "state": "OPEN"},
+            "subIssues": {"nodes": [{"number": 4, "title": "Child", "state": "CLOSED"}]},
+            "closedByPullRequestsReferences": {"nodes": [{"number": 9, "title": "Fix", "state": "MERGED"}]},
+            "comments": {"totalCount": 30, "pageInfo": {"hasPreviousPage": true, "startCursor": "cur"},
+                         "nodes": [{"author": {"login": "a"}, "createdAt": "2026-10-01T00:00:00Z", "body": "first"},
+                                   {"author": null, "createdAt": "2026-10-02T00:00:00Z", "body": "second"}]}}}});
+        let d = detail_from_wire(&v["node"]);
+        assert_eq!(d.body, "Body **md**");
+        assert_eq!(d.issue_type.as_deref(), Some("Bug"));
+        assert_eq!(d.parent.unwrap().number, 3);
+        assert_eq!(d.sub_issues[0].state, "CLOSED");
+        assert_eq!(d.linked_prs[0].number, 9);
+        assert_eq!(
+            (
+                d.comments.len(),
+                d.comments_total,
+                d.older_cursor.as_deref()
+            ),
+            (2, 30, Some("cur"))
+        );
+        assert_eq!(d.comments[1].author, "ghost");
+    }
+
+    #[test]
+    fn draft_detail_has_only_a_body() {
+        let d = detail_from_wire(&json!({"content": {"__typename": "DraftIssue", "body": "idea"}}));
+        assert_eq!(d.body, "idea");
+        assert!(d.comments.is_empty() && d.older_cursor.is_none());
     }
 }
