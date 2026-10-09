@@ -6,7 +6,7 @@ use crate::ui::board::{BoardSelection, Column, build_columns, resolve_layout};
 use crate::ui::detail::{DetailOutcome, DetailState, build_doc};
 use crate::ui::keymap::{Action, Keymap};
 use crate::ui::markdown::Target;
-use crate::ui::picker::PickerState;
+use crate::ui::picker::{PickerOutcome, PickerState};
 use crate::ui::search;
 use crate::ui::table::{Row, build_rows, collapse_key};
 use crate::ui::theme::Theme;
@@ -654,10 +654,30 @@ impl App {
         }
     }
 
-    /// Replaced in Task 23, which defines the picker.
-    fn handle_picker_key(&mut self, _key: KeyEvent) -> Vec<Command> {
-        self.mode = Mode::Normal;
-        Vec::new()
+    fn handle_picker_key(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(picker) = self.picker.as_mut() else {
+            self.mode = Mode::Normal;
+            return Vec::new();
+        };
+        match picker.handle(&key) {
+            PickerOutcome::None => Vec::new(),
+            PickerOutcome::Chosen(board) => {
+                self.picker = None;
+                self.mode = Mode::Normal;
+                vec![Command::PickBoard(board)]
+            }
+            PickerOutcome::Cancel => {
+                let required = picker.required;
+                self.picker = None;
+                self.mode = Mode::Normal;
+                if required {
+                    self.quit = true;
+                    vec![Command::Quit]
+                } else {
+                    Vec::new()
+                }
+            }
+        }
     }
 
     /// The filter a view currently applies, looked up by id.
@@ -750,10 +770,16 @@ impl App {
         cmds
     }
 
-    /// Replaced in Task 23, which defines the picker.
-    fn show_projects(&mut self, _list: Vec<ProjectSummary>) {}
+    fn show_projects(&mut self, list: Vec<ProjectSummary>) {
+        let required = self
+            .picker
+            .as_ref()
+            .map(|p| p.required)
+            .unwrap_or(self.snapshot().is_none());
+        self.picker = Some(PickerState::with(list, required));
+        self.mode = Mode::Picker;
+    }
 
-    #[allow(dead_code)] // consumed by the chrome (Task 23)
     pub(crate) fn view_list(&self) -> Option<&ViewList> {
         self.snapshot()?.views.get(&self.current_view()?.id)
     }
@@ -778,6 +804,29 @@ mod tests {
         app.selected_item()
             .map(|i| i.id.0.clone())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn picker_choice_becomes_a_command_and_required_cancel_quits() {
+        let mut a = app();
+        a.on_sync(SyncEvent::Projects(vec![ProjectSummary {
+            id: ProjectId::new("x"),
+            board: "acme/7".parse().unwrap(),
+            title: "Sprint".into(),
+            closed: false,
+        }]));
+        assert_eq!(a.mode, Mode::Picker);
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::PickBoard("acme/7".parse().unwrap())]
+        );
+        let mut empty = App::new(
+            Box::new(MemoryStore::new(None)),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        empty.on_sync(SyncEvent::Projects(vec![]));
+        assert_eq!(empty.handle_key(code(KeyCode::Esc)), vec![Command::Quit]);
     }
 
     #[test]

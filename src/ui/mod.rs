@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod board;
+pub mod chrome;
 pub mod detail;
 pub mod keymap;
 pub mod markdown;
