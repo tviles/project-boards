@@ -202,6 +202,12 @@ fn finish(mut spans: Vec<Span<'static>>) -> Line<'static> {
 }
 
 pub fn render_markdown(src: &str, width: u16, theme: &Theme) -> Rendered {
+    render_markdown_from(src, width, theme, 0)
+}
+
+/// Like `render_markdown`, but footnote markers are numbered `first_target + index + 1`, so
+/// several documents can share one list of targets.
+pub fn render_markdown_from(src: &str, width: u16, theme: &Theme, first_target: usize) -> Rendered {
     let mut r = Renderer {
         // The screen layout shows "widen the pane" below 40 columns, so widths under 10 never arrive.
         width: (width as usize).max(10),
@@ -297,7 +303,7 @@ pub fn render_markdown(src: &str, width: u16, theme: &Theme) -> Rendered {
                 r.styles.pop();
                 if let Some(dest) = r.link.take() {
                     r.targets.push(Target::Link(dest));
-                    let n = r.targets.len();
+                    let n = first_target + r.targets.len();
                     r.inline((format!("[{n}]"), theme.dim()));
                 }
             }

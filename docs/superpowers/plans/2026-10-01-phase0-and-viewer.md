@@ -9501,6 +9501,11 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App) {
     app.detail_width = inner.width;
     let (Some(state), Some(item), Some(project)) = (app.detail.as_ref(), app.detail_item(), app.project()) else { return };
     let doc = build_doc(item, project, state, inner.width, &app.theme);
+    let max_scroll = doc.lines.len().saturating_sub(crate::ui::detail::body_height(&doc, inner.height));
+    if let Some(state) = app.detail.as_mut() {
+        state.max_scroll = max_scroll;
+    }
+    let Some(state) = app.detail.as_ref() else { return };
     frame.render_widget(Clear, area);
     frame.render_widget(Block::default().borders(Borders::LEFT), area);
     render_detail(frame, inner, &doc, state, &app.theme);

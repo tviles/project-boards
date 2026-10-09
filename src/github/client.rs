@@ -178,6 +178,11 @@ impl Github {
             before,
         });
         let data = self.run(GraphqlRequest::from_body(body)).await?.data;
+        if data["node"].is_null() {
+            return Err(GithubError::Decode(
+                "item detail response has no node".into(),
+            ));
+        }
         Ok(convert::detail_from_wire(&data["node"]))
     }
 
@@ -407,5 +412,16 @@ mod tests {
                 ("acme/7".to_string(), true)
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn item_detail_without_a_node_is_a_decode_error() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push("ItemDetail", json!({"node": null}));
+        let err = Github::new(t)
+            .fetch_item_detail(&ItemId::new("x"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GithubError::Decode(_)));
     }
 }

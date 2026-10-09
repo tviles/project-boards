@@ -1,12 +1,13 @@
 use crate::model::*;
 use crate::ui::keymap::Action;
-use crate::ui::markdown::{Target, render_markdown};
-use crate::ui::text::truncate_to_width;
+use crate::ui::markdown::{Target, render_markdown_from};
+use crate::ui::text::{display_width, truncate_to_width};
 use crate::ui::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout as Split, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DetailState {
@@ -16,6 +17,8 @@ pub struct DetailState {
     pub raw: bool,
     pub scroll: usize,
     pub target: Option<usize>,
+    /// The last useful scroll offset; the chrome sets it from the doc before rendering.
+    pub max_scroll: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +41,7 @@ impl DetailState {
             raw: false,
             scroll: 0,
             target: None,
+            max_scroll: usize::MAX,
         }
     }
 
@@ -56,11 +60,20 @@ impl DetailState {
     }
 
     pub fn handle(&mut self, action: Option<Action>, targets: usize) -> DetailOutcome {
+        if self.target.is_some_and(|t| t >= targets) {
+            self.target = None;
+        }
+        let outcome = self.act(action, targets);
+        self.scroll = self.scroll.min(self.max_scroll);
+        outcome
+    }
+
+    fn act(&mut self, action: Option<Action>, targets: usize) -> DetailOutcome {
         match action {
-            Some(Action::Down) => self.scroll += 1,
+            Some(Action::Down) => self.scroll = self.scroll.saturating_add(1),
             Some(Action::Up) => self.scroll = self.scroll.saturating_sub(1),
             Some(Action::Top) => self.scroll = 0,
-            Some(Action::Bottom) => self.scroll = usize::MAX / 2,
+            Some(Action::Bottom) => self.scroll = self.max_scroll,
             Some(Action::NextView) if targets > 0 => {
                 self.target = Some(self.target.map_or(0, |t| (t + 1) % targets))
             }
@@ -180,26 +193,13 @@ pub fn build_doc(
             lines.push(Line::styled("No description.", theme.dim()));
         } else if state.raw {
             for l in src.lines() {
-                lines.push(Line::from(truncate_to_width(l, w)));
-            }
-        } else {
-            let mut r = render_markdown(src, width, theme);
-            // Footnote numbers continue across body and comments.
-            let offset = targets.len();
-            if offset > 0 {
-                for line in &mut r.lines {
-                    for span in &mut line.spans {
-                        if let Some(n) = span
-                            .content
-                            .strip_prefix('[')
-                            .and_then(|c| c.strip_suffix(']'))
-                            .and_then(|n| n.parse::<usize>().ok())
-                        {
-                            span.content = format!("[{}]", n + offset).into();
-                        }
-                    }
+                for piece in wrap_raw(l, w) {
+                    lines.push(Line::from(piece));
                 }
             }
+        } else {
+            // Footnote numbers continue across body and comments.
+            let r = render_markdown_from(src, width, theme, targets.len());
             lines.extend(r.lines);
             targets.extend(r.targets);
         }
@@ -238,20 +238,26 @@ pub fn build_doc(
             ""
         };
         lines.push(Line::styled(
-            format!(
-                "Comments ({} of {}){older}",
-                detail.comments.len(),
-                detail.comments_total
+            truncate_to_width(
+                &format!(
+                    "Comments ({} of {}){older}",
+                    detail.comments.len(),
+                    detail.comments_total
+                ),
+                w,
             ),
             theme.bold(),
         ));
         for c in &detail.comments {
             lines.push(Line::from(""));
             lines.push(Line::styled(
-                format!(
-                    "@{} · {}",
-                    c.author,
-                    c.created_at.get(..10).unwrap_or(&c.created_at)
+                truncate_to_width(
+                    &format!(
+                        "@{} · {}",
+                        c.author,
+                        c.created_at.get(..10).unwrap_or(&c.created_at)
+                    ),
+                    w,
                 ),
                 theme.accent(),
             ));
@@ -259,6 +265,39 @@ pub fn build_doc(
         }
     }
     DetailDoc { lines, targets }
+}
+
+/// Greedy wrap on grapheme boundaries; leading spaces of the source line are kept.
+fn wrap_raw(line: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut used = 0;
+    for g in line.graphemes(true) {
+        let gw = display_width(g);
+        if used + gw > width && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+            used = 0;
+        }
+        cur.push_str(g);
+        used += gw;
+    }
+    out.push(cur);
+    out
+}
+
+fn footer_height(doc: &DetailDoc, area_height: u16) -> u16 {
+    if doc.targets.is_empty() {
+        0
+    } else {
+        (doc.targets.len() as u16 + 1).min(area_height / 3)
+    }
+}
+
+/// Rows the document body gets in an area of `area_height`; `max_scroll` is
+/// `doc.lines.len().saturating_sub(body_height(..))`.
+pub fn body_height(doc: &DetailDoc, area_height: u16) -> usize {
+    (area_height - footer_height(doc, area_height).min(area_height)).max(1) as usize
 }
 
 fn target_label(t: &Target) -> String {
@@ -275,11 +314,7 @@ pub fn render_detail(
     state: &DetailState,
     theme: &Theme,
 ) {
-    let footer_height = if doc.targets.is_empty() {
-        0
-    } else {
-        (doc.targets.len() as u16 + 1).min(area.height / 3)
-    };
+    let footer_height = footer_height(doc, area.height);
     let [body, footer] =
         Split::vertical([Constraint::Min(1), Constraint::Length(footer_height)]).areas(area);
     let max_scroll = doc.lines.len().saturating_sub(body.height as usize);
@@ -328,6 +363,7 @@ mod tests {
     use super::*;
     use crate::ui::fixtures::{items, project, render_to_string};
     use crate::ui::markdown::line_text;
+    use crate::ui::text::display_width;
 
     fn detail() -> ItemDetail {
         ItemDetail {
@@ -422,6 +458,62 @@ mod tests {
         assert!(s.raw);
         assert_eq!(s.handle(Some(Action::Back), 2), DetailOutcome::Close);
         assert_eq!(s.handle(Some(Action::Quit), 2), DetailOutcome::Quit);
+    }
+
+    #[test]
+    fn raw_lines_wrap_instead_of_truncating() {
+        let (p, all) = (project(), items());
+        let mut s = loaded();
+        s.raw = true;
+        s.detail.as_mut().unwrap().body = format!("  {}", "word ".repeat(30).trim_end());
+        let doc = build_doc(&all[0], &p, &s, 20, &Theme::plain());
+        let text: Vec<String> = doc.lines.iter().map(line_text).collect();
+        assert!(text.iter().all(|l| display_width(l) <= 20));
+        let start = text.iter().position(|l| l.starts_with("  word")).unwrap();
+        let joined: String = text[start..].join("");
+        assert!(joined.starts_with("  word word"));
+        assert_eq!(joined.matches("word").count(), 30, "{joined}");
+    }
+
+    #[test]
+    fn footnotes_continue_across_comments_and_literals_are_kept() {
+        let (p, all) = (project(), items());
+        let mut s = DetailState::new(ItemId::new("a"));
+        let mut d = detail();
+        d.body = "[a](https://a.example)".into();
+        d.comments[0].body = "[b](https://b.example) and literal [3]".into();
+        s.set_detail(d, false);
+        let doc = build_doc(&all[0], &p, &s, 80, &Theme::plain());
+        let text: Vec<String> = doc.lines.iter().map(line_text).collect();
+        assert!(
+            text.iter()
+                .any(|l| l.contains("b[2]") && l.contains("literal [3]")),
+            "{text:?}"
+        );
+        assert_eq!(
+            doc.targets,
+            vec![
+                Target::Link("https://a.example".into()),
+                Target::Link("https://b.example".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn scroll_is_clamped_to_max_scroll_and_stale_targets_cleared() {
+        let mut s = loaded();
+        s.max_scroll = 5;
+        s.handle(Some(Action::Bottom), 2);
+        assert_eq!(s.scroll, 5);
+        s.handle(Some(Action::Up), 2);
+        assert_eq!(s.scroll, 4);
+        for _ in 0..10 {
+            s.handle(Some(Action::Down), 2);
+        }
+        assert_eq!(s.scroll, 5);
+        s.target = Some(3);
+        s.handle(None, 2);
+        assert_eq!(s.target, None);
     }
 
     #[test]
