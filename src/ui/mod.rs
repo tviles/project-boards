@@ -2,6 +2,7 @@
 
 pub mod board;
 pub mod keymap;
+pub mod markdown;
 pub mod table;
 pub mod text;
 pub mod theme;
