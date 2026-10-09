@@ -26,7 +26,7 @@ pub fn collapse_key(key: &Option<String>) -> String {
 
 /// Buckets for any field: option/iteration buckets when it has them, otherwise one bucket
 /// per distinct display value (sorted), then "No <field>".
-fn buckets_for(items: &[&Item], field: &Field) -> Vec<Bucket> {
+pub(crate) fn buckets_for(items: &[&Item], field: &Field) -> Vec<Bucket> {
     if let Some(b) = field.buckets() {
         return b;
     }

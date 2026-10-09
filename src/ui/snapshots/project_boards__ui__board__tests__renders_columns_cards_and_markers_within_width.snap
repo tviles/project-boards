@@ -1,0 +1,9 @@
+---
+source: src/ui/board.rs
+expression: screen
+---
+Todo 2                   In Progress 1            Done 1                   No Status 1
+#1 Fix crash             #2 Add iteration columns Draft idea               ? #5 Old option
+@tviles · bug
+#3 Emoji 🚀 title 中文 …
+@tviles · enhancement
