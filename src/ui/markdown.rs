@@ -46,14 +46,26 @@ impl<'t> Renderer<'t> {
     /// Block prefix (quotes and list indentation), cut to at most half the width so deep
     /// nesting never squeezes the text out.
     fn prefix(&self) -> String {
+        self.prefix_within(self.width / 2)
+    }
+
+    fn prefix_within(&self, limit: usize) -> String {
         let mut out = String::new();
         for ch in self.prefixes.concat().chars() {
-            if display_width(&out) + display_width(&ch.to_string()) > self.width / 2 {
+            if display_width(&out) + display_width(&ch.to_string()) > limit {
                 break;
             }
             out.push(ch);
         }
         out
+    }
+
+    /// All inline output goes through here so table cells collect it instead of the line buffer.
+    fn inline(&mut self, (text, style): (String, Style)) {
+        match self.table_cell.as_mut() {
+            Some(cell) => cell.push_str(&text),
+            None => self.current.push((text, style)),
+        }
     }
 
     fn push_text(&mut self, text: &str) {
@@ -72,12 +84,12 @@ impl<'t> Renderer<'t> {
                 .take_while(|c| c.is_ascii_digit())
                 .collect();
             let (before, after) = rest.split_at(pos);
-            if starts_word && !digits.is_empty() && self.link.is_none() {
+            let number = digits.parse::<u32>().ok();
+            if starts_word && number.is_some() && self.link.is_none() {
                 self.current.push((before.to_string(), style));
                 self.current
                     .push((format!("#{digits}"), style.patch(self.theme.accent())));
-                self.targets
-                    .push(Target::IssueRef(digits.parse().unwrap_or(0)));
+                self.targets.push(Target::IssueRef(number.unwrap_or(0)));
                 rest = &after[1 + digits.len()..];
             } else {
                 self.current.push((rest[..pos + 1].to_string(), style));
@@ -93,8 +105,14 @@ impl<'t> Renderer<'t> {
         if self.current.is_empty() && self.bullet.is_none() {
             return;
         }
-        let base = self.prefix();
-        let bullet = self.bullet.take().unwrap_or_default();
+        let mut bullet = self.bullet.take().unwrap_or_default();
+        // Keep at least half the width for text: an over-wide bullet (a 9-digit list number)
+        // is elided, and the nesting prefix shrinks to fit beside it.
+        let bullet_cap = self.width / 4;
+        if display_width(&bullet) > bullet_cap {
+            bullet = truncate_to_width(&bullet, bullet_cap);
+        }
+        let base = self.prefix_within((self.width / 2).saturating_sub(display_width(&bullet)));
         let first = format!("{base}{bullet}");
         let rest_prefix = format!("{base}{}", " ".repeat(display_width(&bullet)));
         let tokens = std::mem::take(&mut self.current);
@@ -135,7 +153,7 @@ fn wrap(
         for word in text.split_inclusive(' ') {
             let w = display_width(word);
             if used + display_width(word.trim_end()) > width && used > prefix_width {
-                lines.push(Line::from(std::mem::take(&mut spans)));
+                lines.push(finish(std::mem::take(&mut spans)));
                 spans.push(Span::styled(rest.to_string(), theme.dim()));
                 used = display_width(rest);
                 prefix_width = used;
@@ -144,14 +162,14 @@ fn wrap(
                     continue;
                 }
             }
-            if used + w > width {
+            if used + display_width(word.trim_end()) > width {
                 // A single word wider than the line: cut it into pieces.
                 let mut piece = String::new();
                 for ch in word.graphemes(true) {
                     let cw = display_width(ch);
                     if used + cw > width {
                         spans.push(Span::styled(std::mem::take(&mut piece), style));
-                        lines.push(Line::from(std::mem::take(&mut spans)));
+                        lines.push(finish(std::mem::take(&mut spans)));
                         spans.push(Span::styled(rest.to_string(), theme.dim()));
                         used = display_width(rest);
                         prefix_width = used;
@@ -167,13 +185,25 @@ fn wrap(
         }
     }
     if used > prefix_width || lines.is_empty() {
-        lines.push(Line::from(spans));
+        lines.push(finish(spans));
     }
     lines
 }
 
+/// Builds a line, dropping the trailing space left by word splitting.
+fn finish(mut spans: Vec<Span<'static>>) -> Line<'static> {
+    if spans.len() > 1 {
+        if let Some(last) = spans.last_mut() {
+            let trimmed = last.content.trim_end_matches(' ').to_string();
+            last.content = trimmed.into();
+        }
+    }
+    Line::from(spans)
+}
+
 pub fn render_markdown(src: &str, width: u16, theme: &Theme) -> Rendered {
     let mut r = Renderer {
+        // The screen layout shows "widen the pane" below 40 columns, so widths under 10 never arrive.
         width: (width as usize).max(10),
         theme,
         lines: Vec::new(),
@@ -268,15 +298,15 @@ pub fn render_markdown(src: &str, width: u16, theme: &Theme) -> Rendered {
                 if let Some(dest) = r.link.take() {
                     r.targets.push(Target::Link(dest));
                     let n = r.targets.len();
-                    r.current.push((format!("[{n}]"), theme.dim()));
+                    r.inline((format!("[{n}]"), theme.dim()));
                 }
             }
             Event::Start(Tag::Image { dest_url, .. }) => {
                 r.link = Some(dest_url.to_string());
-                r.current.push(("[image: ".into(), theme.dim()));
+                r.inline(("[image: ".into(), theme.dim()));
             }
             Event::End(TagEnd::Image) => {
-                r.current.push(("]".into(), theme.dim()));
+                r.inline(("]".into(), theme.dim()));
                 if let Some(dest) = r.link.take() {
                     r.targets.push(Target::Link(dest));
                 }
@@ -297,19 +327,19 @@ pub fn render_markdown(src: &str, width: u16, theme: &Theme) -> Rendered {
             Event::Text(t) => r.push_text(&t),
             Event::Code(t) => {
                 let style = r.style().patch(theme.code());
-                r.current.push((t.to_string(), style));
+                r.inline((t.to_string(), style));
             }
-            Event::Html(t) | Event::InlineHtml(t) => {
-                for (i, line) in t.lines().enumerate() {
-                    if i > 0 {
-                        r.flush();
-                    }
-                    r.current.push((line.to_string(), theme.dim()));
+            Event::Html(t) => {
+                r.flush();
+                for line in t.lines() {
+                    r.inline((line.to_string(), theme.dim()));
+                    r.flush();
                 }
             }
+            Event::InlineHtml(t) => r.inline((t.to_string(), theme.dim())),
             Event::SoftBreak => {
                 let style = r.style();
-                r.current.push((" ".into(), style));
+                r.inline((" ".into(), style));
             }
             Event::HardBreak => r.flush(),
             Event::Rule => {
@@ -448,5 +478,52 @@ mod tests {
                 .all(|l| l.matches(family).count() * family.len() == l.len()),
             "{lines:?}"
         );
+    }
+
+    #[test]
+    fn block_html_does_not_merge_with_the_next_block() {
+        let (lines, _) = text("<img src=\"x.png\">\n\ntext", 40);
+        assert_eq!(lines[0], "<img src=\"x.png\">");
+        assert!(lines.contains(&"text".to_string()), "{lines:?}");
+        let (lines, _) = text("<div>\n<b>x</b>\n</div>\n\n# Head", 40);
+        assert!(lines.contains(&"<b>x</b>".to_string()), "{lines:?}");
+        assert!(lines.contains(&"Head".to_string()), "{lines:?}");
+    }
+
+    #[test]
+    fn table_cells_keep_inline_code_and_links() {
+        let (lines, targets) = text("| a | b |\n|---|---|\n| `x` | [l](u) |", 40);
+        assert!(lines.iter().any(|l| l.contains("x │ l[1]")), "{lines:?}");
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(targets, vec![Target::Link("u".into())]);
+    }
+
+    #[test]
+    fn wide_list_numbers_stay_inside_the_width() {
+        let md = format!(
+            "123456789. a\n\n{}123456789. b\n\n{}123456789. item text\n",
+            " ".repeat(11),
+            " ".repeat(22)
+        );
+        for width in [12u16, 20] {
+            let (lines, _) = text(&md, width);
+            assert!(
+                lines.iter().all(|l| display_width(l) <= width as usize),
+                "width {width}: {lines:?}"
+            );
+            assert!(lines.iter().any(|l| l.contains("item")), "{lines:?}");
+        }
+    }
+
+    #[test]
+    fn exact_fit_words_are_not_cut() {
+        let (lines, _) = text("aaaa bbbbb cc dd", 10);
+        assert_eq!(lines, vec!["aaaa bbbbb", "cc dd"]);
+    }
+
+    #[test]
+    fn huge_issue_numbers_are_not_targets() {
+        let (_, targets) = text("see #99999999999999999999", 40);
+        assert!(targets.is_empty());
     }
 }
