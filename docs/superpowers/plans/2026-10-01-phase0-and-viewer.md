@@ -5786,7 +5786,7 @@ git commit -m "Add the focus-aware poll scheduler with idle fallback"
   - `sync::{IncrementalMode::{DateTime, Date, Unsupported}, INCREMENTAL_MODE, incremental_query(IncrementalMode, since: &str) -> Option<String>, SyncTask, SyncEvent, store_update(&SyncEvent) -> Option<StoreUpdate>}`.
   - `SyncTask::{Resolve, FullLoad, Incremental, ViewIds(ViewId), Hydrate, Detail(ItemId), Projects}`.
   - `SyncEvent::{Project(Project), ItemsPage { items, loaded, total }, ItemsComplete { items, fetched_at, total, truncated }, ItemsUpdated { items, fetched_at }, ViewIds { view, filter, list }, Hydrated(Vec<Item>), RepoProjects(Vec<ProjectSummary>), Projects(Vec<ProjectSummary>), Rate(RateInfo), Failed { task, error }}`. (Task 21 adds `Detail`.)
-  - `sync::syncer::Syncer` with `new(Arc<Github>, mpsc::UnboundedSender<SyncEvent>, max_items: usize, IncrementalMode)` and async `resolve(&BoardRef) -> Option<Project>`, `refresh_project(&Project)`, `full_load(&ProjectId)`, `incremental(&ProjectId, since: &str) -> bool`, `view_ids(&ProjectId, &ViewId, filter: &str, known: &HashSet<ItemId>, hydrate: bool)`, `repo_projects(&RepoSlug)`, `projects(linked: Option<&RepoSlug>)`.
+  - `sync::syncer::Syncer` with `new(Arc<Github>, mpsc::UnboundedSender<SyncEvent>, max_items: usize, IncrementalMode)` and async `resolve(&BoardRef) -> Option<Project>`, `refresh_project(&Project) -> bool`, `full_load(&ProjectId)`, `incremental(&ProjectId, since: &str) -> bool`, `view_ids(&ProjectId, &ViewId, filter: &str, known: &HashSet<ItemId>, hydrate: bool)`, `repo_projects(&RepoSlug)`, `projects(linked: Option<&RepoSlug>)`.
 
 - [ ] **Step 1: Write the failing tests for the pure parts (in `src/sync/mod.rs`)**
 
@@ -6083,10 +6083,17 @@ impl Syncer {
         }
     }
 
-    pub async fn refresh_project(&self, project: &Project) {
+    /// `false` after a failure (already reported as `Failed { Resolve }`); the job must stop.
+    pub async fn refresh_project(&self, project: &Project) -> bool {
         match self.gh.fetch_project(&project.id, &project.board).await {
-            Ok(p) => self.send(SyncEvent::Project(p)),
-            Err(e) => self.fail(SyncTask::Resolve, e),
+            Ok(p) => {
+                self.send(SyncEvent::Project(p));
+                true
+            }
+            Err(e) => {
+                self.fail(SyncTask::Resolve, e);
+                false
+            }
         }
     }
 
@@ -9634,7 +9641,7 @@ git commit -m "Add the screen layout, board picker and setup screen"
 - Consumes: `App`, `Command`, `Mode`, `setup_message` (Task 22); `PickerState` (Task 23); `Scheduler`, `PollConfig`, `PollKind` (Task 15, including `in_flight()`); `SyncEvent`, `SyncTask`, `IncrementalMode` (Task 16); `first_step`, `after_repo_projects` (Task 14); `PaneRegistry`, `HerdrCli`, `focus_plugin_pane`, test-only `FakeHerdr` (Task 13); `State` (Task 12); `cache_path`, `load_cache`, `save_cache`, `MemoryStore` (Task 11); `Config` (Task 12).
 - Produces:
   - `ui::controller::PaneOptions { state_dir: PathBuf, own_pane: Option<String>, config: Config, warnings: Vec<String>, repo: Option<RepoSlug>, board: Option<BoardRef>, picker: bool }`.
-  - `ui::controller::Input::{Key(KeyEvent), Focus(bool), Tick, Sync(SyncEvent)}`.
+  - `ui::controller::Input::{Key(KeyEvent), Focus(bool), Tick, Sync { generation: u64, event: SyncEvent }}` (events whose generation is not the controller's current one are dropped; `Controller::generation() -> u64`, bumped whenever the shown board changes`.
   - `ui::controller::SyncJob::{Resolve(BoardRef), Refresh(Project), Incremental { project, since }, ViewIds { project, view, filter, known, hydrate }, Detail { item, before }, RepoProjects(RepoSlug), Projects(Option<RepoSlug>)}`.
   - `ui::controller::Effect::{Spawn(SyncJob), OpenUrl(String), ResolveToken, Exit}`.
   - `ui::controller::poll_since(&str) -> String`.
@@ -9878,7 +9885,8 @@ pub enum Input {
     Key(KeyEvent),
     Focus(bool),
     Tick,
-    Sync(SyncEvent),
+    /// `generation` is the controller's generation when the job was spawned.
+    Sync { generation: u64, event: SyncEvent },
 }
 
 /// One unit of network work for the shell to spawn on the Syncer.
@@ -9923,6 +9931,8 @@ pub struct Controller {
     board: Option<BoardRef>,
     full_load_in_flight: bool,
     awaiting_repo_projects: bool,
+    /// Bumped whenever the shown board changes, so late events of the old board are dropped.
+    generation: u64,
 }
 
 impl Controller {
@@ -10051,7 +10061,12 @@ impl Controller {
             }
             Input::Focus(focused) => self.scheduler.on_focus(focused, now).map(|k| self.poll(k, now)).unwrap_or_default(),
             Input::Tick => self.scheduler.tick(now).map(|k| self.poll(k, now)).unwrap_or_default(),
-            Input::Sync(event) => self.on_sync(event, now),
+            Input::Sync { generation, event } => {
+                if generation != self.generation {
+                    return Vec::new();
+                }
+                self.on_sync(event, now)
+            }
         }
     }
 
@@ -10171,7 +10186,7 @@ git commit -m "Add the pane controller: startup, single instance, polling, hydra
 - Modify: `src/ui/mod.rs`, `src/commands/mod.rs`, `src/lib.rs`, `src/main.rs`
 
 **Interfaces:**
-- Consumes: `Controller`, `Input`, `Effect`, `SyncJob`, `PaneOptions` (Task 24); `chrome::draw` (Task 23); `Syncer` (Tasks 16, 21); `resolve_token_from_system`, `HttpTransport`, `Github` (Tasks 4, 8); `ProcessHerdr` (Task 13); `PluginEnv`, `detect_repo` (Task 13); `load_config` (Task 12).
+- Consumes: `Controller` (including `generation()`), `Input` (`Sync { generation, event }`), `Effect`, `SyncJob`, `PaneOptions` (Task 24); `chrome::draw` (Task 23); `Syncer` (Tasks 16, 21); `resolve_token_from_system`, `HttpTransport`, `Github` (Tasks 4, 8); `ProcessHerdr` (Task 13); `PluginEnv`, `detect_repo` (Task 13); `load_config` (Task 12).
 - Produces: `logging::init(state_dir: &Path) -> Option<tracing_appender::non_blocking::WorkerGuard>`; `ui::runtime::run(PaneOptions) -> anyhow::Result<()>`; `commands::pane::run_pane() -> anyhow::Result<()>`.
 
 The shell only moves data: terminal events and sync events go into the controller, and the controller's effects come out as spawned sync jobs, browser launches, token resolution and exit. It has no unit tests; every decision lives in the controller (Task 24), and the smoke checklist (Task 27) exercises the shell.
@@ -10241,23 +10256,25 @@ pub async fn run(options: PaneOptions) -> anyhow::Result<()> {
 
 async fn event_loop(terminal: &mut DefaultTerminal, options: PaneOptions, herdr: Arc<dyn HerdrCli>) -> anyhow::Result<()> {
     let max_items = options.config.max_items;
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    // Events arrive tagged with the generation of the job that produced them.
+    let (tx, mut rx) = mpsc::unbounded_channel::<(u64, crate::sync::SyncEvent)>();
     let mut controller = Controller::new(options, herdr, INCREMENTAL_MODE, Instant::now());
-    let mut syncer: Option<Arc<Syncer>> = None;
+    let mut runner: Option<Runner> = None;
     terminal.draw(|f| chrome::draw(f, &mut controller.app))?;
-    let mut pending = start(&mut controller, &mut syncer, &tx, max_items);
+    let mut pending = start(&mut controller, &mut runner, &tx, max_items);
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         while !pending.is_empty() {
             for effect in std::mem::take(&mut pending) {
                 match effect {
-                    Effect::Spawn(job) => match &syncer {
-                        Some(s) => spawn(s.clone(), job),
+                    Effect::Spawn(job) => match &runner {
+                        // Each job's events carry the generation it was spawned under.
+                        Some(r) => r.spawn(job, controller.generation()),
                         None => tracing::warn!(?job, "no GitHub client yet; job dropped"),
                     },
                     Effect::OpenUrl(url) => open_url(&url),
-                    Effect::ResolveToken => pending.extend(start(&mut controller, &mut syncer, &tx, max_items)),
+                    Effect::ResolveToken => pending.extend(start(&mut controller, &mut runner, &tx, max_items)),
                     Effect::Exit => {
                         controller.release();
                         return Ok(());
@@ -10274,50 +10291,74 @@ async fn event_loop(terminal: &mut DefaultTerminal, options: PaneOptions, herdr:
                 Event::FocusLost => controller.handle(Input::Focus(false), now),
                 _ => Vec::new(),
             },
-            Some(event) = rx.recv() => controller.handle(Input::Sync(event), now),
+            Some((generation, event)) = rx.recv() => controller.handle(Input::Sync { generation, event }, now),
             _ = tick.tick() => controller.handle(Input::Tick, now),
         };
     }
 }
 
+/// Runs sync jobs. Every job gets its own `Syncer` whose events are forwarded tagged with the
+/// controller generation the job was spawned under, so late events of a previous board are
+/// dropped by `Controller::handle`.
+struct Runner {
+    gh: Arc<Github>,
+    tx: mpsc::UnboundedSender<(u64, crate::sync::SyncEvent)>,
+    max_items: usize,
+}
+
 /// Resolves the token, builds the GitHub client, and starts the controller.
 fn start(
     controller: &mut Controller,
-    syncer: &mut Option<Arc<Syncer>>,
-    tx: &mpsc::UnboundedSender<crate::sync::SyncEvent>,
+    runner: &mut Option<Runner>,
+    tx: &mpsc::UnboundedSender<(u64, crate::sync::SyncEvent)>,
     max_items: usize,
 ) -> Vec<Effect> {
     match resolve_token_from_system() {
         Ok(token) => {
             let gh = Arc::new(Github::new(Arc::new(HttpTransport::new(token.value))));
-            *syncer = Some(Arc::new(Syncer::new(gh, tx.clone(), max_items, INCREMENTAL_MODE)));
+            *runner = Some(Runner { gh, tx: tx.clone(), max_items });
             controller.start(Ok(()), Instant::now())
         }
         Err(e) => controller.start(Err(e), Instant::now()),
     }
 }
 
-fn spawn(s: Arc<Syncer>, job: SyncJob) {
-    tokio::spawn(async move {
-        match job {
-            SyncJob::Resolve(board) => {
-                if let Some(project) = s.resolve(&board).await {
-                    s.full_load(&project.id).await;
+impl Runner {
+    fn spawn(&self, job: SyncJob, generation: u64) {
+        let (jtx, mut jrx) = mpsc::unbounded_channel();
+        let out = self.tx.clone();
+        tokio::spawn(async move {
+            while let Some(event) = jrx.recv().await {
+                if out.send((generation, event)).is_err() {
+                    break;
                 }
             }
-            SyncJob::Refresh(project) => {
-                s.refresh_project(&project).await;
-                s.full_load(&project.id).await;
+        });
+        let s = Syncer::new(self.gh.clone(), jtx, self.max_items, INCREMENTAL_MODE);
+        tokio::spawn(async move {
+            match job {
+                SyncJob::Resolve(board) => {
+                    if let Some(project) = s.resolve(&board).await {
+                        s.full_load(&project.id).await;
+                    }
+                }
+                SyncJob::Refresh(project) => {
+                    // A failed refresh has already sent Failed { Resolve }, which ends the load
+                    // for the controller; running full_load as well would double up.
+                    if s.refresh_project(&project).await {
+                        s.full_load(&project.id).await;
+                    }
+                }
+                SyncJob::Incremental { project, since } => {
+                    s.incremental(&project, &since).await;
+                }
+                SyncJob::ViewIds { project, view, filter, known, hydrate } => s.view_ids(&project, &view, &filter, &known, hydrate).await,
+                SyncJob::Detail { item, before } => s.detail(&item, before).await,
+                SyncJob::RepoProjects(repo) => s.repo_projects(&repo).await,
+                SyncJob::Projects(repo) => s.projects(repo.as_ref()).await,
             }
-            SyncJob::Incremental { project, since } => {
-                s.incremental(&project, &since).await;
-            }
-            SyncJob::ViewIds { project, view, filter, known, hydrate } => s.view_ids(&project, &view, &filter, &known, hydrate).await,
-            SyncJob::Detail { item, before } => s.detail(&item, before).await,
-            SyncJob::RepoProjects(repo) => s.repo_projects(&repo).await,
-            SyncJob::Projects(repo) => s.projects(repo.as_ref()).await,
-        }
-    });
+        });
+    }
 }
 
 fn open_url(url: &str) {

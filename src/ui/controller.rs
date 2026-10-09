@@ -41,7 +41,12 @@ pub enum Input {
     Key(KeyEvent),
     Focus(bool),
     Tick,
-    Sync(SyncEvent),
+    /// `generation` is the controller's generation when the job was spawned; events from an
+    /// earlier board are dropped.
+    Sync {
+        generation: u64,
+        event: SyncEvent,
+    },
 }
 
 /// One unit of network work for the shell to spawn on the Syncer.
@@ -100,6 +105,8 @@ pub struct Controller {
     board: Option<BoardRef>,
     full_load_in_flight: bool,
     awaiting_repo_projects: bool,
+    /// Bumped whenever the shown board changes, so late events of the old board are dropped.
+    generation: u64,
 }
 
 impl Controller {
@@ -131,7 +138,12 @@ impl Controller {
             board: None,
             full_load_in_flight: false,
             awaiting_repo_projects: false,
+            generation: 0,
         }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn board(&self) -> Option<&BoardRef> {
@@ -188,16 +200,22 @@ impl Controller {
             .live_pane(self.herdr.as_ref(), &board)
             .filter(|p| Some(p) != own.as_ref())
         {
-            if let Err(e) = focus_plugin_pane(self.herdr.as_ref(), &other) {
-                tracing::warn!(error = %e, "could not focus the pane showing this board");
+            match focus_plugin_pane(self.herdr.as_ref(), &other) {
+                Ok(()) => {
+                    return if self.board.is_none() {
+                        vec![Effect::Exit]
+                    } else {
+                        Vec::new()
+                    };
+                }
+                // Better a second pane on this board than none: open it here.
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not focus the pane showing this board; opening it here")
+                }
             }
-            return if self.board.is_none() {
-                vec![Effect::Exit]
-            } else {
-                Vec::new()
-            };
         }
         self.release();
+        self.generation += 1;
         if let Some(own) = &own {
             if let Err(e) = registry.register(&board, own) {
                 tracing::warn!(error = %e, "could not record this pane in the registry");
@@ -210,7 +228,10 @@ impl Controller {
                 s.remember_board(r, &board);
             }
         })
-        .unwrap_or_else(|_| State::load(&dir));
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "could not save the remembered board");
+            State::load(&dir)
+        });
 
         let cached = load_cache(&cache_path(&dir, &board)).filter(|c| c.project.board == board);
         self.app.store = Box::new(MemoryStore::new(cached.clone()));
@@ -235,13 +256,21 @@ impl Controller {
     /// Unregisters this pane from the board it shows. Called on board switch and on exit.
     pub fn release(&mut self) {
         if let (Some(board), Some(own)) = (self.board.take(), &self.options.own_pane) {
-            let _ = PaneRegistry::new(&self.options.state_dir).unregister(&board, own);
+            if let Err(e) = PaneRegistry::new(&self.options.state_dir).unregister(&board, own) {
+                tracing::warn!(error = %e, "could not remove this pane from the registry");
+            }
         }
     }
 
     fn poll(&mut self, kind: PollKind, now: Instant) -> Vec<Effect> {
         let Some(snapshot) = self.app.snapshot() else {
-            return Vec::new();
+            // The first resolve failed and left nothing to refresh: try it again.
+            let Some(board) = self.board.clone().filter(|_| !self.scheduler.in_flight()) else {
+                return Vec::new();
+            };
+            self.full_load_in_flight = true;
+            self.scheduler.started(PollKind::Full, now);
+            return vec![Effect::Spawn(SyncJob::Resolve(board))];
         };
         let project = snapshot.project.clone();
         let since = snapshot.fetched_at.clone();
@@ -288,7 +317,12 @@ impl Controller {
                 .tick(now)
                 .map(|k| self.poll(k, now))
                 .unwrap_or_default(),
-            Input::Sync(event) => self.on_sync(event, now),
+            Input::Sync { generation, event } => {
+                if generation != self.generation {
+                    return Vec::new();
+                }
+                self.on_sync(event, now)
+            }
         }
     }
 
@@ -325,10 +359,11 @@ impl Controller {
         ) {
             self.scheduler.finished();
         }
-        let persist = matches!(
-            &event,
-            SyncEvent::ItemsComplete { .. } | SyncEvent::ItemsUpdated { .. }
-        );
+        let persist = match &event {
+            SyncEvent::ItemsComplete { .. } | SyncEvent::Hydrated(_) => true,
+            SyncEvent::ItemsUpdated { items, .. } => !items.is_empty(),
+            _ => false,
+        };
 
         if self.awaiting_repo_projects {
             match &event {
@@ -409,9 +444,11 @@ impl Controller {
                 }
                 Command::SaveLastView(view) => {
                     if let Some(board) = self.board.clone() {
-                        let _ = State::update(&self.options.state_dir, |s| {
+                        if let Err(e) = State::update(&self.options.state_dir, |s| {
                             s.set_last_view(&board, &view)
-                        });
+                        }) {
+                            tracing::warn!(error = %e, "could not save the last view");
+                        }
                     }
                 }
                 Command::PickBoard(board) => effects.extend(self.open_board(board, now)),
@@ -553,7 +590,10 @@ mod tests {
             vec![Effect::Spawn(SyncJob::RepoProjects(repo.clone()))]
         );
         let effects = one.handle(
-            Input::Sync(SyncEvent::RepoProjects(vec![summary("tviles/3")])),
+            Input::Sync {
+                generation: one.generation(),
+                event: SyncEvent::RepoProjects(vec![summary("tviles/3")]),
+            },
             t0,
         );
         assert_eq!(effects, vec![Effect::Spawn(SyncJob::Resolve(board()))]);
@@ -562,10 +602,10 @@ mod tests {
         let (mut two, _, t0) = controller(dir2.path(), None);
         two.start(Ok(()), t0);
         two.handle(
-            Input::Sync(SyncEvent::RepoProjects(vec![
-                summary("tviles/3"),
-                summary("tviles/4"),
-            ])),
+            Input::Sync {
+                generation: two.generation(),
+                event: SyncEvent::RepoProjects(vec![summary("tviles/3"), summary("tviles/4")]),
+            },
             t0,
         );
         assert_eq!(two.app.mode, Mode::Picker);
@@ -579,7 +619,13 @@ mod tests {
             error: GithubError::Network("down".into()),
         };
         assert_eq!(
-            failed.handle(Input::Sync(failure), t0),
+            failed.handle(
+                Input::Sync {
+                    generation: failed.generation(),
+                    event: failure
+                },
+                t0
+            ),
             vec![Effect::Spawn(SyncJob::Projects(Some(repo)))]
         );
         assert_eq!(failed.app.mode, Mode::Picker);
@@ -597,7 +643,13 @@ mod tests {
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
         let effects = c.start(Ok(()), t0);
         assert!(effects.iter().any(|e| matches!(e, Effect::Spawn(SyncJob::ViewIds { hydrate: false, filter, .. }) if filter == "label:bug")));
-        let effects = c.handle(Input::Sync(complete("2026-10-01T12:00:00Z")), t0);
+        let effects = c.handle(
+            Input::Sync {
+                generation: c.generation(),
+                event: complete("2026-10-01T12:00:00Z"),
+            },
+            t0,
+        );
         assert!(
             effects
                 .iter()
@@ -613,7 +665,13 @@ mod tests {
         save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
         c.start(Ok(()), t0);
-        c.handle(Input::Sync(complete("2026-10-01T12:00:00Z")), t0);
+        c.handle(
+            Input::Sync {
+                generation: c.generation(),
+                event: complete("2026-10-01T12:00:00Z"),
+            },
+            t0,
+        );
         let effects = c.handle(Input::Tick, t0 + Duration::from_secs(31));
         let expected = SyncJob::Incremental {
             project: ProjectId::new("PVT_1"),
@@ -633,14 +691,26 @@ mod tests {
         save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
         c.start(Ok(()), t0);
-        c.handle(Input::Sync(complete("2026-10-01T12:00:00Z")), t0);
+        c.handle(
+            Input::Sync {
+                generation: c.generation(),
+                event: complete("2026-10-01T12:00:00Z"),
+            },
+            t0,
+        );
         let limited = SyncEvent::Failed {
             task: SyncTask::Incremental,
             error: GithubError::RateLimited {
                 retry_after_secs: 120,
             },
         };
-        c.handle(Input::Sync(limited), t0 + Duration::from_secs(1));
+        c.handle(
+            Input::Sync {
+                generation: c.generation(),
+                event: limited,
+            },
+            t0 + Duration::from_secs(1),
+        );
         assert!(
             c.handle(Input::Tick, t0 + Duration::from_secs(60))
                 .is_empty()
@@ -664,7 +734,13 @@ mod tests {
             t0,
         );
         c.start(Ok(()), t0);
-        c.handle(Input::Sync(complete("2026-10-01T12:00:00Z")), t0);
+        c.handle(
+            Input::Sync {
+                generation: c.generation(),
+                event: complete("2026-10-01T12:00:00Z"),
+            },
+            t0,
+        );
         assert!(matches!(
             c.handle(Input::Tick, t0 + Duration::from_secs(31))
                 .as_slice(),
@@ -682,7 +758,13 @@ mod tests {
             c.handle(Input::Key(key('r')), t0).is_empty(),
             "initial load still running"
         );
-        c.handle(Input::Sync(complete("2026-10-01T12:00:00Z")), t0);
+        c.handle(
+            Input::Sync {
+                generation: c.generation(),
+                event: complete("2026-10-01T12:00:00Z"),
+            },
+            t0,
+        );
         assert!(matches!(
             c.handle(Input::Key(key('r')), t0).as_slice(),
             [Effect::Spawn(SyncJob::Refresh(_))]
@@ -718,7 +800,16 @@ mod tests {
             task: SyncTask::Projects,
             error: GithubError::Network("down".into()),
         };
-        assert!(c.handle(Input::Sync(failure), t0).is_empty());
+        assert!(
+            c.handle(
+                Input::Sync {
+                    generation: c.generation(),
+                    event: failure
+                },
+                t0
+            )
+            .is_empty()
+        );
         assert!(!c.app.picker.as_ref().unwrap().loading);
         assert!(
             c.app
@@ -727,6 +818,163 @@ mod tests {
                 .as_deref()
                 .is_some_and(|e| e.contains("could not list boards"))
         );
+    }
+
+    fn at(c: &Controller, event: SyncEvent) -> Input {
+        Input::Sync {
+            generation: c.generation(),
+            event,
+        }
+    }
+
+    fn fail(task: SyncTask) -> SyncEvent {
+        SyncEvent::Failed {
+            task,
+            error: GithubError::Network("down".into()),
+        }
+    }
+
+    #[test]
+    fn a_failed_refresh_ends_the_load_and_polling_resumes() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        let e = at(&c, fail(SyncTask::Resolve));
+        c.handle(e, t0 + Duration::from_secs(1));
+        let effects = c.handle(Input::Tick, t0 + Duration::from_secs(31));
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(&effects[0], Effect::Spawn(SyncJob::Refresh(_))));
+        assert!(
+            c.handle(Input::Tick, t0 + Duration::from_secs(32))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_failed_first_resolve_is_retried_after_the_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        let e = at(&c, fail(SyncTask::Resolve));
+        c.handle(e, t0 + Duration::from_secs(1));
+        assert!(
+            c.handle(Input::Tick, t0 + Duration::from_secs(2))
+                .is_empty()
+        );
+        assert_eq!(
+            c.handle(Input::Tick, t0 + Duration::from_secs(31)),
+            vec![Effect::Spawn(SyncJob::Resolve(board()))]
+        );
+        assert!(
+            c.handle(Input::Tick, t0 + Duration::from_secs(32))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn events_of_the_previous_board_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        let old = c.generation();
+        let other: BoardRef = "tviles/4".parse().unwrap();
+        let effects = c.commands(vec![Command::PickBoard(other.clone())], t0);
+        assert_eq!(
+            effects,
+            vec![Effect::Spawn(SyncJob::Resolve(other.clone()))]
+        );
+        assert!(c.generation() > old);
+        let late = Input::Sync {
+            generation: old,
+            event: complete("2026-10-01T12:00:00Z"),
+        };
+        assert!(c.handle(late, t0).is_empty());
+        assert!(c.app.snapshot().is_none(), "board B's store untouched");
+        assert!(!cache_path(dir.path(), &other).exists());
+        assert!(
+            c.handle(Input::Key(key('r')), t0).is_empty(),
+            "B's load is still in flight"
+        );
+        // A current-generation event applies.
+        let e = at(&c, SyncEvent::Project(crate::ui::fixtures::project()));
+        c.handle(e, t0);
+        let e = at(&c, complete("2026-10-01T12:00:00Z"));
+        c.handle(e, t0);
+        assert!(c.app.snapshot().is_some());
+        assert!(cache_path(dir.path(), &other).exists());
+    }
+
+    #[test]
+    fn failing_to_focus_the_other_pane_opens_the_board_here() {
+        let dir = tempfile::tempdir().unwrap();
+        PaneRegistry::new(dir.path())
+            .register(&board(), "other")
+            .unwrap();
+        let (mut c, fake, t0) = controller(dir.path(), Some("tviles/3"));
+        fake.respond(&["pane", "get", "other"], Ok(json!({})));
+        fake.respond(
+            &["plugin", "pane", "focus", "other"],
+            FakeHerdr::not_found(),
+        );
+        assert_eq!(
+            c.start(Ok(()), t0),
+            vec![Effect::Spawn(SyncJob::Resolve(board()))]
+        );
+    }
+
+    #[test]
+    fn empty_updates_are_not_persisted_but_hydration_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        let e = at(&c, SyncEvent::Project(crate::ui::fixtures::project()));
+        c.handle(e, t0);
+        let path = cache_path(dir.path(), &board());
+        let e = at(
+            &c,
+            SyncEvent::ItemsUpdated {
+                items: vec![],
+                fetched_at: "2026-10-01T12:00:00Z".into(),
+            },
+        );
+        c.handle(e, t0);
+        assert!(!path.exists());
+        let e = at(&c, SyncEvent::Hydrated(crate::ui::fixtures::items()));
+        c.handle(e, t0);
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn focus_regained_after_idle_polls() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        let e = at(&c, complete("2026-10-01T12:00:00Z"));
+        c.handle(e, t0);
+        assert!(c.handle(Input::Focus(false), t0).is_empty());
+        let effects = c.handle(Input::Focus(true), t0 + Duration::from_secs(1));
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(
+            &effects[0],
+            Effect::Spawn(SyncJob::Incremental { .. })
+        ));
+    }
+
+    #[test]
+    fn an_auth_failure_on_the_repo_board_list_shows_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), None);
+        c.start(Ok(()), t0);
+        let failure = SyncEvent::Failed {
+            task: SyncTask::Projects,
+            error: GithubError::Unauthorized,
+        };
+        let e = at(&c, failure);
+        assert!(c.handle(e, t0).is_empty());
+        assert_eq!(c.app.mode, Mode::Setup);
     }
 
     #[test]

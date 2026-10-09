@@ -61,10 +61,17 @@ impl Syncer {
         }
     }
 
-    pub async fn refresh_project(&self, project: &Project) {
+    /// `false` after a failure (already reported as `Failed { Resolve }`); the job must stop.
+    pub async fn refresh_project(&self, project: &Project) -> bool {
         match self.gh.fetch_project(&project.id, &project.board).await {
-            Ok(p) => self.send(SyncEvent::Project(p)),
-            Err(e) => self.fail(SyncTask::Resolve, e),
+            Ok(p) => {
+                self.send(SyncEvent::Project(p));
+                true
+            }
+            Err(e) => {
+                self.fail(SyncTask::Resolve, e);
+                false
+            }
         }
     }
 
