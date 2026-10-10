@@ -6,6 +6,7 @@ pub mod chrome;
 pub mod controller;
 pub mod detail;
 pub mod keymap;
+pub mod labels;
 pub mod markdown;
 pub mod picker;
 pub mod runtime;

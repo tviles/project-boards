@@ -1,5 +1,6 @@
 use crate::model::*;
 use crate::ui::keymap::Action;
+use crate::ui::labels::{label_spans, spans_width};
 use crate::ui::markdown::{Target, render_markdown_from};
 use crate::ui::text::{display_width, truncate_to_width};
 use crate::ui::theme::Theme;
@@ -140,6 +141,34 @@ fn state_word(content: &ItemContent) -> &'static str {
     }
 }
 
+/// `Name: value · Name: value` within `width` cells; labels are coloured pills.
+fn field_line(item: &Item, project: &Project, width: usize, theme: &Theme) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut left = width;
+    for f in project.fields.iter().filter(|f| f.kind != FieldKind::Title) {
+        let Some(value) = item.value(&f.id) else {
+            continue;
+        };
+        let sep = if spans.is_empty() { "" } else { " · " };
+        let prefix = format!("{sep}{}: ", f.name);
+        if display_width(&prefix) >= left {
+            if left > 0 {
+                spans.push(Span::raw(truncate_to_width(&prefix, left)));
+            }
+            break;
+        }
+        left -= display_width(&prefix);
+        spans.push(Span::raw(prefix));
+        let value_spans = match (theme.color, value) {
+            (true, FieldValue::Labels(labels)) => label_spans(labels, left, theme),
+            _ => vec![Span::raw(truncate_to_width(&value.display(), left))],
+        };
+        left -= spans_width(&value_spans);
+        spans.extend(value_spans);
+    }
+    Line::from(spans)
+}
+
 /// Everything the detail pane shows, as lines at `width`, with the followable targets.
 pub fn build_doc(
     item: &Item,
@@ -172,17 +201,9 @@ pub fn build_doc(
             w,
         )));
     }
-    let fields: Vec<String> = project
-        .fields
-        .iter()
-        .filter(|f| f.kind != FieldKind::Title)
-        .filter_map(|f| {
-            item.value(&f.id)
-                .map(|v| format!("{}: {}", f.name, v.display()))
-        })
-        .collect();
-    if !fields.is_empty() {
-        lines.push(Line::from(truncate_to_width(&fields.join(" · "), w)));
+    let fields = field_line(item, project, w, theme);
+    if !fields.spans.is_empty() {
+        lines.push(fields);
     }
     lines.push(Line::from(""));
 
@@ -430,6 +451,38 @@ mod tests {
                 Target::Link("https://example.com".into()),
                 Target::IssueRef(2)
             ]
+        );
+    }
+
+    #[test]
+    fn labels_in_the_field_line_are_pills_with_colour_and_plain_text_without() {
+        use ratatui::style::Color;
+        let (p, all) = (project(), items());
+        let coloured = Theme {
+            color: true,
+            truecolor: true,
+        };
+        let doc = build_doc(&all[0], &p, &loaded(), 80, &coloured);
+        let line = doc
+            .lines
+            .iter()
+            .find(|l| line_text(l).contains("Labels:"))
+            .unwrap();
+        assert!(line_text(line).contains("Labels:  bug "));
+        let pill = line.spans.iter().find(|s| s.content == " bug ").unwrap();
+        assert_eq!(pill.style.bg, Some(Color::Rgb(0xd7, 0x3a, 0x4a)));
+        let doc = build_doc(&all[0], &p, &loaded(), 80, &Theme::plain());
+        assert!(
+            doc.lines
+                .iter()
+                .any(|l| line_text(l).contains("Labels: bug"))
+        );
+        let narrow = build_doc(&all[0], &p, &loaded(), 20, &coloured);
+        assert!(
+            narrow
+                .lines
+                .iter()
+                .all(|l| display_width(&line_text(l)) <= 20)
         );
     }
 

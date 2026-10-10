@@ -64,7 +64,7 @@ Apart from the fixed `Ctrl+C` quit, no default key uses Ctrl, so herdr's prefix 
     [keys]
     next_view = "]"                    # action = key
 
-`NO_COLOR=1` turns colour off.
+`NO_COLOR=1` turns colour off. Labels use GitHub's colours: exact on terminals that set `COLORTERM=truecolor`, otherwise the nearest of 256; with `NO_COLOR=1` they show as plain text.
 
 ## Tokens
 

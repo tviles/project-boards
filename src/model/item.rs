@@ -182,7 +182,7 @@ impl Item {
             .collect()
     }
 
-    pub fn label_names(&self) -> Vec<&str> {
+    pub fn labels(&self) -> Vec<&Label> {
         self.values
             .values()
             .filter_map(|v| match v {
@@ -190,8 +190,11 @@ impl Item {
                 _ => None,
             })
             .flatten()
-            .map(|l| l.name.as_str())
             .collect()
+    }
+
+    pub fn label_names(&self) -> Vec<&str> {
+        self.labels().into_iter().map(|l| l.name.as_str()).collect()
     }
 }
 

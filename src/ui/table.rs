@@ -1,4 +1,5 @@
 use crate::model::*;
+use crate::ui::labels::{label_spans, spans_width};
 use crate::ui::text::{pad_to_width, truncate_to_width};
 use crate::ui::theme::Theme;
 use ratatui::Frame;
@@ -132,6 +133,27 @@ pub fn cell_text(item: &Item, field: &Field) -> String {
         .unwrap_or_default()
 }
 
+/// One cell, exactly `width` cells wide. Labels are coloured pills (they keep their colours
+/// on the selected row); everything else is text in the row's `style`.
+fn item_cell(
+    item: &Item,
+    field: &Field,
+    width: usize,
+    style: ratatui::style::Style,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    if let (true, Some(FieldValue::Labels(labels))) = (theme.color, item.value(&field.id)) {
+        let mut spans = label_spans(labels, width, theme);
+        let pad = width.saturating_sub(spans_width(&spans));
+        spans.push(Span::styled(" ".repeat(pad), style));
+        return spans;
+    }
+    vec![Span::styled(
+        pad_to_width(&cell_text(item, field), width),
+        style,
+    )]
+}
+
 /// Column widths: every non-title column gets 10–20 cells by its header; the title takes
 /// the rest. Columns are dropped from the right until the title has at least 20 cells.
 fn widths(columns: &[&Field], total: usize) -> Vec<usize> {
@@ -219,10 +241,9 @@ pub fn render_table(
                     .iter()
                     .zip(&widths)
                     .flat_map(|(f, w)| {
-                        [
-                            Span::styled(pad_to_width(&cell_text(item, f), *w), style),
-                            Span::styled(" ", style),
-                        ]
+                        let mut cell = item_cell(item, f, *w, style, theme);
+                        cell.push(Span::styled(" ", style));
+                        cell
                     })
                     .collect::<Vec<_>>(),
             ),
@@ -354,5 +375,35 @@ mod tests {
             render_table(f, f.area(), &[], &cols, 0, &Theme::plain())
         });
         assert!(screen.contains("No items match this view"));
+    }
+
+    #[test]
+    fn label_cells_are_pills_that_keep_their_colours_when_selected() {
+        use ratatui::style::{Color, Modifier};
+        let all = items();
+        let p = project();
+        let rows = build_rows(&refs(&all), None, &HashSet::new());
+        let labels = p.fields.iter().find(|f| f.name == "Labels").unwrap();
+        let title = p.title_field().unwrap();
+        let cols = vec![title, labels];
+        let theme = Theme {
+            color: true,
+            truecolor: true,
+        };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 3)).unwrap();
+        let buf = terminal
+            .draw(|f| render_table(f, f.area(), &rows, &cols, 0, &theme))
+            .unwrap()
+            .buffer
+            .clone();
+        // Row 1 is "#1 Fix crash", selected; the Labels column is the last 12 cells.
+        let pill = &buf[(30, 1)];
+        assert_eq!(pill.symbol(), "b");
+        assert_eq!(pill.bg, Color::Rgb(0xd7, 0x3a, 0x4a));
+        assert_eq!(pill.fg, Color::White);
+        assert!(!pill.modifier.contains(Modifier::REVERSED));
+        assert!(buf[(2, 1)].modifier.contains(Modifier::REVERSED));
+        assert!(!buf[(2, 2)].modifier.contains(Modifier::REVERSED));
     }
 }

@@ -1,8 +1,9 @@
 //! The board layout: one column per option or iteration, optional swimlanes, cards of two lines.
 
 use crate::model::*;
+use crate::ui::labels::{label_spans, spans_width};
 use crate::ui::table::{bucket_of, buckets_for};
-use crate::ui::text::{pad_to_width, truncate_to_width};
+use crate::ui::text::{display_width, pad_to_width, truncate_to_width};
 use crate::ui::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -159,22 +160,43 @@ fn card_lines(
         Some(n) => format!("{marker}#{n} {}", item.title()),
         None => format!("{marker}{}", item.title()),
     };
-    let mut meta: Vec<String> = item.assignees().iter().map(|a| format!("@{a}")).collect();
-    meta.extend(item.label_names().iter().map(|l| l.to_string()));
+    let assignees: Vec<String> = item.assignees().iter().map(|a| format!("@{a}")).collect();
     let style = if selected {
         theme.selected()
     } else {
         Style::default()
+    };
+    let meta_style = if selected { style } else { theme.dim() };
+    let labels = item.labels();
+    let meta = if theme.color && !labels.is_empty() {
+        // Assignees as dim text, then the pills in whatever room is left; the pills keep
+        // their own colours even on the selected card.
+        let labels: Vec<Label> = labels.into_iter().cloned().collect();
+        let mut text = truncate_to_width(&assignees.join(" · "), width);
+        if !text.is_empty() && width.saturating_sub(display_width(&text)) > 3 {
+            text.push_str(" · ");
+        }
+        let used = display_width(&text);
+        let mut spans = vec![Span::styled(text, meta_style)];
+        let pills = label_spans(&labels, width.saturating_sub(used), theme);
+        let pad = width.saturating_sub(used + spans_width(&pills));
+        spans.extend(pills);
+        spans.push(Span::styled(" ".repeat(pad), meta_style));
+        Line::from(spans)
+    } else {
+        let mut meta = assignees;
+        meta.extend(item.label_names().iter().map(|l| l.to_string()));
+        Line::from(Span::styled(
+            pad_to_width(&truncate_to_width(&meta.join(" · "), width), width),
+            meta_style,
+        ))
     };
     [
         Line::from(Span::styled(
             pad_to_width(&truncate_to_width(&title, width), width),
             style.patch(theme.bold()),
         )),
-        Line::from(Span::styled(
-            pad_to_width(&truncate_to_width(&meta.join(" · "), width), width),
-            if selected { style } else { theme.dim() },
-        )),
+        meta,
     ]
 }
 
@@ -388,5 +410,39 @@ mod tests {
         );
         assert!(screen.contains("No Status"));
         assert!(!screen.contains("Todo 2"));
+    }
+
+    #[test]
+    fn card_labels_are_pills_after_the_assignees_and_keep_colours_when_selected() {
+        use ratatui::style::{Color, Modifier};
+        let (p, all) = (project(), items());
+        let refs: Vec<&Item> = all.iter().collect();
+        let status = field(&p, "Status");
+        let cols = build_columns(&refs, status, None);
+        let theme = Theme {
+            color: true,
+            truecolor: true,
+        };
+        let sel = BoardSelection {
+            column: 0,
+            index: 0,
+        };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 6)).unwrap();
+        let buf = terminal
+            .draw(|f| render_board(f, f.area(), &cols, &sel, status, &theme))
+            .unwrap()
+            .buffer
+            .clone();
+        // Card "#1 Fix crash": line 2 reads "@tviles · bug" and is selected.
+        let row: String = (0..15).map(|x| buf[(x, 2)].symbol()).collect();
+        assert_eq!(row, "@tviles ·  bug ");
+        let pill = &buf[(11, 2)];
+        assert_eq!(pill.symbol(), "b");
+        assert_eq!(pill.bg, Color::Rgb(0xd7, 0x3a, 0x4a));
+        assert!(!pill.modifier.contains(Modifier::REVERSED));
+        assert!(buf[(0, 2)].modifier.contains(Modifier::REVERSED));
+        // The unselected card in the same column keeps its dim text.
+        assert!(buf[(0, 4)].modifier.contains(Modifier::DIM));
     }
 }
