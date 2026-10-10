@@ -3,11 +3,13 @@
 use crate::github::Github;
 use crate::github::token::resolve_token_from_system;
 use crate::github::transport::HttpTransport;
-use crate::herdr::cli::{HerdrCli, ProcessHerdr};
+use crate::herdr::cli::{HerdrCli, ProcessHerdr, action_cwd};
 use crate::herdr::env::PluginEnv;
 use crate::herdr::repo::detect_repo;
+use crate::model::RepoSlug;
 use crate::ui::keymap::{KeySpec, Keymap};
 use std::fmt;
+use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +101,28 @@ pub fn key_collisions(herdr_config: &str, keymap: &Keymap) -> Vec<String> {
     out
 }
 
+/// The board `open` would pick for the directory `cwd`.
+pub fn repo_check(cwd: Option<&str>, detect: impl Fn(&Path) -> Option<RepoSlug>) -> Check {
+    let check = |level, detail: String| Check {
+        level,
+        name: "repo",
+        detail,
+    };
+    match cwd {
+        Some(dir) => match detect(Path::new(dir)) {
+            Some(repo) => check(Level::Ok, format!("{repo} ({dir})")),
+            None => check(
+                Level::Warn,
+                format!("{dir} is not a GitHub checkout; the board picker will open"),
+            ),
+        },
+        None => check(
+            Level::Warn,
+            "no working directory known; the board picker will open".into(),
+        ),
+    }
+}
+
 pub fn run_doctor(notify: bool) -> anyhow::Result<bool> {
     let env = PluginEnv::from_system();
     let mut checks = Vec::new();
@@ -157,18 +181,8 @@ pub fn run_doctor(notify: bool) -> anyhow::Result<bool> {
         }),
     }
 
-    match std::env::current_dir().ok().and_then(|d| detect_repo(&d)) {
-        Some(r) => checks.push(Check {
-            level: Level::Ok,
-            name: "repo",
-            detail: r.to_string(),
-        }),
-        None => checks.push(Check {
-            level: Level::Warn,
-            name: "repo",
-            detail: "not in a GitHub checkout; the board picker will open".into(),
-        }),
-    }
+    // The same directory `open` uses: herdr runs this action from the plugin root.
+    checks.push(repo_check(action_cwd(&env, &herdr).as_deref(), detect_repo));
 
     let (config, warnings) = crate::config::load_config(&env.config_dir);
     let (keymap, key_warnings) = Keymap::with_overrides(&config.keys);
@@ -232,6 +246,25 @@ pub fn run_doctor(notify: bool) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_check_names_the_repo_of_the_action_directory() {
+        let detect =
+            |d: &Path| (d == Path::new("/code/app")).then(|| "tviles/app".parse().unwrap());
+        let ok = repo_check(Some("/code/app"), detect);
+        assert_eq!(
+            (ok.level, ok.detail.as_str()),
+            (Level::Ok, "tviles/app (/code/app)")
+        );
+        let elsewhere = repo_check(Some("/plugin/root"), detect);
+        assert_eq!(elsewhere.level, Level::Warn);
+        assert!(
+            elsewhere
+                .detail
+                .starts_with("/plugin/root is not a GitHub checkout")
+        );
+        assert_eq!(repo_check(None, detect).level, Level::Warn);
+    }
 
     #[test]
     fn scopes_with_project_pass_and_without_warn() {

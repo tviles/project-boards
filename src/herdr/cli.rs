@@ -2,6 +2,7 @@
 //! `{"error":{"code","message"}}` envelope herdr prints on stderr.
 
 use crate::cli::Placement;
+use crate::herdr::env::PluginEnv;
 use serde_json::Value;
 use std::process::Command;
 
@@ -89,6 +90,31 @@ pub fn pane_live_cwd(cli: &dyn HerdrCli, pane: &str) -> Option<String> {
         .as_str()
         .or_else(|| p["cwd"].as_str())
         .map(String::from)
+}
+
+/// The user's working directory for a plugin action: the focused pane's live directory, then
+/// the directory that pane was launched in, then the worktree checkout. herdr runs actions from
+/// the plugin root, so the process's own directory is used only outside herdr.
+pub fn action_cwd(env: &PluginEnv, cli: &dyn HerdrCli) -> Option<String> {
+    action_cwd_with(env, cli, || {
+        std::env::current_dir()
+            .ok()
+            .map(|d| d.display().to_string())
+    })
+}
+
+pub fn action_cwd_with(
+    env: &PluginEnv,
+    cli: &dyn HerdrCli,
+    current_dir: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    let ctx = &env.context;
+    ctx.focused_pane_id
+        .as_deref()
+        .and_then(|p| pane_live_cwd(cli, p))
+        .or_else(|| ctx.focused_pane_cwd.clone())
+        .or_else(|| ctx.worktree.as_ref().and_then(|w| w.checkout_path.clone()))
+        .or_else(|| if env.in_herdr { None } else { current_dir() })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -205,6 +231,53 @@ mod tests {
         fake.respond(&["pane", "get", "p2"], FakeHerdr::not_found());
         assert_eq!(pane_exists(&fake, "p1"), Ok(true));
         assert_eq!(pane_exists(&fake, "p2"), Ok(false));
+    }
+
+    #[test]
+    fn action_cwd_prefers_the_live_pane_then_context_then_worktree() {
+        use crate::herdr::env::{PluginContext, Worktree};
+        let mut env = PluginEnv::from_vars(|k| (k == "HERDR_ENV").then(|| "1".to_string()));
+        env.context = PluginContext {
+            focused_pane_id: Some("p1".into()),
+            focused_pane_cwd: Some("/launched".into()),
+            worktree: Some(Worktree {
+                repo_root: None,
+                checkout_path: Some("/checkout".into()),
+            }),
+            ..Default::default()
+        };
+        let plugin_root = || Some("/plugin/root".to_string());
+        let live = FakeHerdr::default();
+        live.respond(
+            &["pane", "list"],
+            Ok(json!({"panes": [{"pane_id": "p1", "foreground_cwd": "/live"}]})),
+        );
+        assert_eq!(
+            action_cwd_with(&env, &live, plugin_root).as_deref(),
+            Some("/live")
+        );
+
+        let no_live = FakeHerdr::default();
+        assert_eq!(
+            action_cwd_with(&env, &no_live, plugin_root).as_deref(),
+            Some("/launched")
+        );
+        env.context.focused_pane_cwd = None;
+        assert_eq!(
+            action_cwd_with(&env, &no_live, plugin_root).as_deref(),
+            Some("/checkout")
+        );
+        env.context.worktree = None;
+        assert_eq!(
+            action_cwd_with(&env, &no_live, plugin_root),
+            None,
+            "inside herdr the process directory is the plugin root, never the user's"
+        );
+        env.in_herdr = false;
+        assert_eq!(
+            action_cwd_with(&env, &no_live, plugin_root).as_deref(),
+            Some("/plugin/root")
+        );
     }
 
     #[test]

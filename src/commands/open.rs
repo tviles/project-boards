@@ -3,9 +3,7 @@
 
 use crate::cli::Placement;
 use crate::config::Config;
-use crate::herdr::cli::{
-    HerdrCli, OpenRequest, focus_plugin_pane, open_plugin_pane, pane_live_cwd,
-};
+use crate::herdr::cli::{HerdrCli, OpenRequest, action_cwd, focus_plugin_pane, open_plugin_pane};
 use crate::herdr::env::PluginEnv;
 use crate::herdr::registry::PaneRegistry;
 use crate::model::{BoardRef, RepoSlug};
@@ -34,17 +32,7 @@ pub fn open(
     detect_repo: impl Fn(&Path) -> Option<RepoSlug>,
 ) -> anyhow::Result<OpenOutcome> {
     let ctx = &env.context;
-    let cwd = ctx
-        .focused_pane_id
-        .as_deref()
-        .and_then(|p| pane_live_cwd(cli, p))
-        .or_else(|| ctx.focused_pane_cwd.clone())
-        .or_else(|| ctx.worktree.as_ref().and_then(|w| w.checkout_path.clone()))
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|d| d.display().to_string())
-        });
+    let cwd = action_cwd(env, cli);
     let repo = cwd.as_deref().and_then(|d| detect_repo(Path::new(d)));
     let board = args.project.clone().or_else(|| {
         if args.picker {
