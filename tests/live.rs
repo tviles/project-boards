@@ -29,10 +29,14 @@ fn http() -> Arc<dyn Transport> {
     Arc::new(HttpTransport::new(token.value))
 }
 
+fn recording() -> bool {
+    std::env::var("PB_RECORD").as_deref() == Ok("1")
+}
+
 /// A client for one test; with PB_RECORD=1 it records into tests/fixtures/recorded/<name>/.
 fn github(name: &str) -> Github {
     let http = http();
-    if std::env::var("PB_RECORD").as_deref() == Ok("1") {
+    if recording() {
         let dir = std::path::Path::new("tests/fixtures/recorded").join(name);
         let _ = std::fs::remove_dir_all(&dir);
         Github::new(Arc::new(RecordingTransport::new(http, dir)))
@@ -141,6 +145,37 @@ async fn projects() {
     assert!(linked.iter().any(|p| p.board == board));
     let all = gh.list_viewer_projects().await.unwrap();
     assert!(all.iter().any(|p| p.board == board));
+    if recording() {
+        keep_only_testbed_project(&board);
+    }
+}
+
+/// The project lists are recorded from a real account, so they name every board it can see.
+/// Fixtures are committed to a public repository: rewrite them to hold only the testbed.
+fn keep_only_testbed_project(board: &BoardRef) {
+    let dir = std::path::Path::new("tests/fixtures/recorded/projects");
+    let is_testbed = |n: &serde_json::Value| {
+        n["number"] == board.number && n["owner"]["login"] == board.owner.as_str()
+    };
+    let rewrite = |file: &str, edit: &dyn Fn(&mut serde_json::Value)| {
+        let path = dir.join(file);
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        edit(&mut doc);
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+    };
+    let retain = |nodes: &mut serde_json::Value| {
+        nodes.as_array_mut().unwrap().retain(is_testbed);
+    };
+    rewrite("RepoProjects__1.json", &|d| {
+        retain(&mut d["data"]["repository"]["projectsV2"]["nodes"])
+    });
+    rewrite("ViewerProjects__1.json", &|d| {
+        let viewer = &mut d["data"]["viewer"];
+        retain(&mut viewer["projectsV2"]["nodes"]);
+        // Other organizations' names are not the testbed's either.
+        viewer["organizations"]["nodes"] = serde_json::json!([]);
+    });
 }
 
 /// R37: GitHub scores a query by its `first:` arguments. A full page must stay cheap, since
