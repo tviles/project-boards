@@ -171,15 +171,20 @@ fn card_lines(
     let meta = if theme.color && !labels.is_empty() {
         // Assignees as dim text, then the pills in whatever room is left; the pills keep
         // their own colours even on the selected card.
-        let labels: Vec<Label> = labels.into_iter().cloned().collect();
         let mut text = truncate_to_width(&assignees.join(" · "), width);
-        if !text.is_empty() && width.saturating_sub(display_width(&text)) > 3 {
-            text.push_str(" · ");
+        let mut room = width.saturating_sub(display_width(&text));
+        if !text.is_empty() {
+            // The separator is only worth drawing with a whole pill (3 cells) after it.
+            if room >= 6 {
+                text.push_str(" · ");
+                room -= 3;
+            } else {
+                room = 0;
+            }
         }
-        let used = display_width(&text);
+        let pills = label_spans(&labels, room, theme);
+        let pad = width.saturating_sub(display_width(&text) + spans_width(&pills));
         let mut spans = vec![Span::styled(text, meta_style)];
-        let pills = label_spans(&labels, width.saturating_sub(used), theme);
-        let pad = width.saturating_sub(used + spans_width(&pills));
         spans.extend(pills);
         spans.push(Span::styled(" ".repeat(pad), meta_style));
         Line::from(spans)
@@ -444,5 +449,27 @@ mod tests {
         assert!(buf[(0, 2)].modifier.contains(Modifier::REVERSED));
         // The unselected card in the same column keeps its dim text.
         assert!(buf[(0, 4)].modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn no_separator_dangles_when_too_little_room_is_left_for_a_pill() {
+        let (p, all) = (project(), items());
+        let status = field(&p, "Status");
+        let theme = Theme {
+            color: true,
+            truecolor: true,
+        };
+        // "@tviles" is 7 cells, so widths 11 and 12 leave 4 and 5 cells: under 6.
+        for width in [11, 12] {
+            let [_, meta] = card_lines(&all[0], status, width, false, &theme);
+            let text: String = meta.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(text, format!("{:<width$}", "@tviles"), "width {width}");
+        }
+        let [_, meta] = card_lines(&all[0], status, 13, false, &theme);
+        let text: String = meta.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "@tviles ·  … ");
+        let [_, meta] = card_lines(&all[0], status, 15, false, &theme);
+        let text: String = meta.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "@tviles ·  bug ");
     }
 }

@@ -145,6 +145,7 @@ fn state_word(content: &ItemContent) -> &'static str {
 fn field_line(item: &Item, project: &Project, width: usize, theme: &Theme) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut left = width;
+    let mut overflow = false;
     for f in project.fields.iter().filter(|f| f.kind != FieldKind::Title) {
         let Some(value) = item.value(&f.id) else {
             continue;
@@ -152,21 +153,47 @@ fn field_line(item: &Item, project: &Project, width: usize, theme: &Theme) -> Li
         let sep = if spans.is_empty() { "" } else { " · " };
         let prefix = format!("{sep}{}: ", f.name);
         if display_width(&prefix) >= left {
-            if left > 0 {
-                spans.push(Span::raw(truncate_to_width(&prefix, left)));
-            }
+            overflow = true;
             break;
         }
         left -= display_width(&prefix);
         spans.push(Span::raw(prefix));
         let value_spans = match (theme.color, value) {
-            (true, FieldValue::Labels(labels)) => label_spans(labels, left, theme),
+            (true, FieldValue::Labels(labels)) => {
+                let labels: Vec<&Label> = labels.iter().collect();
+                label_spans(&labels, left, theme)
+            }
             _ => vec![Span::raw(truncate_to_width(&value.display(), left))],
         };
         left -= spans_width(&value_spans);
         spans.extend(value_spans);
     }
+    if overflow {
+        ellipsize(&mut spans, left);
+    }
     Line::from(spans)
+}
+
+/// Marks a line that dropped later fields: `…` in the free cell, or in place of the last
+/// cell when the line is full. Nothing changes if the line already ends with one.
+fn ellipsize(spans: &mut Vec<Span<'static>>, left: usize) {
+    if spans.last().is_some_and(|s| s.content.ends_with('…')) {
+        return;
+    }
+    if left > 0 {
+        spans.push(Span::raw("…"));
+        return;
+    }
+    if let Some(last) = spans.last_mut() {
+        let keep = display_width(&last.content).saturating_sub(1);
+        let text = truncate_to_width(&format!("{}…", last.content), keep + 1);
+        let text = if text.ends_with('…') {
+            text
+        } else {
+            format!("{}…", truncate_to_width(&last.content, keep))
+        };
+        *last = Span::styled(text, last.style);
+    }
 }
 
 /// Everything the detail pane shows, as lines at `width`, with the followable targets.
@@ -484,6 +511,35 @@ mod tests {
                 .iter()
                 .all(|l| display_width(&line_text(l)) <= 20)
         );
+    }
+
+    #[test]
+    fn a_full_field_line_ends_with_an_ellipsis_plain_and_coloured() {
+        let (p, all) = (project(), items());
+        let coloured = Theme {
+            color: true,
+            truecolor: true,
+        };
+        for theme in [Theme::plain(), coloured] {
+            for width in [14u16, 20, 28, 34] {
+                let doc = build_doc(&all[0], &p, &loaded(), width, &theme);
+                let line = doc
+                    .lines
+                    .iter()
+                    .map(line_text)
+                    .find(|l| l.starts_with("Status:"))
+                    .unwrap();
+                assert!(line.ends_with('…'), "width {width}: {line:?}");
+                assert!(display_width(&line) <= width as usize, "{line:?}");
+            }
+            let wide = build_doc(&all[0], &p, &loaded(), 80, &theme);
+            assert!(
+                wide.lines
+                    .iter()
+                    .map(line_text)
+                    .any(|l| l.starts_with("Status:") && !l.ends_with('…'))
+            );
+        }
     }
 
     #[test]

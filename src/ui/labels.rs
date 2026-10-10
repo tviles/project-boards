@@ -1,7 +1,7 @@
 //! Labels drawn as GitHub-coloured pills, shared by the table, the board and the detail view.
 
 use crate::model::Label;
-use crate::ui::text::{display_width, truncate_to_width};
+use crate::ui::text::{display_width, sanitize, truncate_to_width};
 use crate::ui::theme::Theme;
 use ratatui::text::Span;
 
@@ -16,7 +16,7 @@ fn pill_text(name: &str) -> String {
 /// unstyled space. As many whole pills as fit are shown, then a dim `+N` for the rest when it
 /// fits; if not even the first pill fits, its name is cut with `…` inside the pill. Without
 /// colour the names are plain text joined by ", " and cut with `…`.
-pub fn label_spans(labels: &[Label], width: usize, theme: &Theme) -> Vec<Span<'static>> {
+pub fn label_spans(labels: &[&Label], width: usize, theme: &Theme) -> Vec<Span<'static>> {
     if labels.is_empty() || width == 0 {
         return Vec::new();
     }
@@ -26,7 +26,7 @@ pub fn label_spans(labels: &[Label], width: usize, theme: &Theme) -> Vec<Span<'s
     }
     let pills: Vec<(String, &Label)> = labels
         .iter()
-        .map(|l| (pill_text(&truncate_to_width(&l.name, usize::MAX)), l))
+        .map(|l| (pill_text(&sanitize(&l.name)), *l))
         .collect();
     let widths: Vec<usize> = pills.iter().map(|(t, _)| display_width(t)).collect();
     // Cells used by the first `k` pills with a separator between them.
@@ -93,7 +93,8 @@ mod tests {
     }
 
     fn draw(labels: &[Label], width: usize, theme: &Theme) -> String {
-        let spans = label_spans(labels, width, theme);
+        let refs: Vec<&Label> = labels.iter().collect();
+        let spans = label_spans(&refs, width, theme);
         assert!(spans_width(&spans) <= width, "{spans:?} wider than {width}");
         // Drawn through the buffer too: nothing may spill past `width` cells.
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
@@ -110,7 +111,6 @@ mod tests {
 
     #[test]
     fn pills_are_padded_and_separated_by_one_space() {
-        assert_eq!(draw(&two(), 10, &colour()), " bug   ui ");
         assert_eq!(draw(&two(), 10, &colour()), " bug   ui ");
     }
 
@@ -162,7 +162,7 @@ mod tests {
         let plain = Theme::plain();
         assert_eq!(draw(&two(), 20, &plain), "bug, ui");
         assert_eq!(draw(&two(), 5, &plain), "bug,…");
-        let spans = label_spans(&two(), 20, &plain);
+        let spans = label_spans(&two().iter().collect::<Vec<_>>(), 20, &plain);
         assert!(spans.iter().all(|s| s.style == Default::default()));
     }
 
@@ -171,7 +171,11 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(12, 1)).unwrap();
         let buf = terminal
             .draw(|f| {
-                let line = Line::from(label_spans(&two(), 12, &colour()));
+                let line = Line::from(label_spans(
+                    &two().iter().collect::<Vec<_>>(),
+                    12,
+                    &colour(),
+                ));
                 f.render_widget(Paragraph::new(line), f.area());
             })
             .unwrap()

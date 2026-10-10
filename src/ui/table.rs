@@ -143,7 +143,8 @@ fn item_cell(
     theme: &Theme,
 ) -> Vec<Span<'static>> {
     if let (true, Some(FieldValue::Labels(labels))) = (theme.color, item.value(&field.id)) {
-        let mut spans = label_spans(labels, width, theme);
+        let labels: Vec<&Label> = labels.iter().collect();
+        let mut spans = label_spans(&labels, width, theme);
         let pad = width.saturating_sub(spans_width(&spans));
         spans.push(Span::styled(" ".repeat(pad), style));
         return spans;

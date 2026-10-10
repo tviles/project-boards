@@ -57,12 +57,14 @@ impl Theme {
         let Some(rgb) = parse_hex(hex).filter(|_| self.color) else {
             return Style::default();
         };
-        let bg = if self.truecolor {
-            Color::Rgb(rgb.0, rgb.1, rgb.2)
+        // The text colour follows the background actually shown, not the requested one.
+        let (bg, shown) = if self.truecolor {
+            (Color::Rgb(rgb.0, rgb.1, rgb.2), rgb)
         } else {
-            Color::Indexed(nearest_256(rgb))
+            let index = nearest_256(rgb);
+            (Color::Indexed(index), index_rgb(index))
         };
-        Style::default().bg(bg).fg(contrast_fg(rgb))
+        Style::default().bg(bg).fg(contrast_fg(shown))
     }
 
     pub fn selected(&self) -> Style {
@@ -131,27 +133,31 @@ fn contrast_fg((r, g, b): (u8, u8, u8)) -> Color {
     }
 }
 
+const CUBE_LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+
+/// The RGB of an xterm-256 colour in the cube (16..=231) or the grey ramp (232..=255).
+fn index_rgb(index: u8) -> (u8, u8, u8) {
+    if index >= 232 {
+        let v = 8 + 10 * (index - 232);
+        return (v, v, v);
+    }
+    let i = usize::from(index.saturating_sub(16));
+    (
+        CUBE_LEVELS[(i / 36) % 6],
+        CUBE_LEVELS[(i / 6) % 6],
+        CUBE_LEVELS[i % 6],
+    )
+}
+
 /// The xterm-256 colour (6x6x6 cube or grey ramp; not the 16 theme-dependent ones)
 /// nearest to `rgb` by squared RGB distance.
 fn nearest_256((r, g, b): (u8, u8, u8)) -> u8 {
-    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
     let distance = |(cr, cg, cb): (u8, u8, u8)| {
         let d = |a: u8, b: u8| (i32::from(a) - i32::from(b)).pow(2);
         d(r, cr) + d(g, cg) + d(b, cb)
     };
-    let cube = (0..216u8).map(|i| {
-        let (ri, gi, bi) = (i / 36, (i / 6) % 6, i % 6);
-        let rgb = (
-            LEVELS[ri as usize],
-            LEVELS[gi as usize],
-            LEVELS[bi as usize],
-        );
-        (distance(rgb), 16 + i)
-    });
-    let grey = (0..24u8).map(|i| {
-        let v = 8 + 10 * i;
-        (distance((v, v, v)), 232 + i)
-    });
+    let cube = (0..216u8).map(|i| (distance(index_rgb(16 + i)), 16 + i));
+    let grey = (232..=255u8).map(|i| (distance(index_rgb(i)), i));
     cube.chain(grey)
         .min_by_key(|(d, _)| *d)
         .map_or(16, |(_, index)| index)
@@ -203,6 +209,27 @@ mod tests {
         assert_eq!(nearest_256((255, 255, 255)), 231);
         assert_eq!(nearest_256((128, 128, 128)), 244);
         assert!((232..=255).contains(&nearest_256((100, 101, 100))));
+    }
+
+    #[test]
+    fn index_rgb_matches_the_cube_and_grey_ramp() {
+        assert_eq!(index_rgb(16), (0, 0, 0));
+        assert_eq!(index_rgb(196), (255, 0, 0));
+        assert_eq!(index_rgb(231), (255, 255, 255));
+        assert_eq!(index_rgb(232), (8, 8, 8));
+        assert_eq!(index_rgb(255), (238, 238, 238));
+    }
+
+    #[test]
+    fn in_256_colours_the_text_follows_the_displayed_background() {
+        // a05050 is dark enough for white text, but quantises to index 131 (af5f5f),
+        // which is light enough for black text.
+        let style = Theme::from_env(|_| None).label("a05050");
+        assert_eq!(style.bg, Some(Color::Indexed(131)));
+        assert_eq!(style.fg, Some(Color::Black));
+        assert_eq!(contrast_fg(parse_hex("a05050").unwrap()), Color::White);
+        let tc = Theme::from_env(|k| (k == "COLORTERM").then(|| "truecolor".to_string()));
+        assert_eq!(tc.label("a05050").fg, Some(Color::White));
     }
 
     #[test]

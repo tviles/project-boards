@@ -11,6 +11,11 @@ fn cell(g: &str) -> (&str, usize) {
     }
 }
 
+/// `s` with control characters replaced by spaces.
+pub fn sanitize(s: &str) -> String {
+    s.graphemes(true).map(|g| cell(g).0).collect()
+}
+
 /// Width in terminal cells, counting control characters as one cell (they render as spaces).
 pub fn display_width(s: &str) -> usize {
     s.graphemes(true).map(|g| cell(g).1).sum()
