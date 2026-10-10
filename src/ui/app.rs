@@ -37,6 +37,16 @@ pub enum Command {
     OpenUrl(String),
     Refresh,
     SaveLastView(ViewId),
+    /// The user chose `layout` for `view`, whose own layout on GitHub is `github_layout`.
+    SaveLayout {
+        view: ViewId,
+        layout: Layout,
+        github_layout: Layout,
+    },
+    /// The user is back on GitHub's layout for `view`: forget the choice.
+    ClearLayout {
+        view: ViewId,
+    },
     PickBoard(BoardRef),
     ShowPicker,
     /// Re-run startup after the user fixed authentication.
@@ -158,6 +168,11 @@ impl App {
     /// Selects a view by id. Works before the project has loaded.
     pub fn select_view(&mut self, id: &ViewId) {
         self.current = Some(id.clone());
+    }
+
+    /// Replaces the remembered layout choices (one board's, loaded from state).
+    pub fn set_layout_overrides(&mut self, overrides: HashMap<ViewId, Layout>) {
+        self.layout_toggle = overrides;
     }
 
     pub fn effective_filter(&self) -> String {
@@ -602,8 +617,19 @@ impl App {
                             Layout::Board
                         };
                         self.sync_selected_id();
-                        self.layout_toggle.insert(view.id, next);
+                        let cmd = if next == view.layout {
+                            self.layout_toggle.remove(&view.id);
+                            Command::ClearLayout { view: view.id }
+                        } else {
+                            self.layout_toggle.insert(view.id.clone(), next);
+                            Command::SaveLayout {
+                                view: view.id,
+                                layout: next,
+                                github_layout: view.layout,
+                            }
+                        };
                         self.restore_selection();
+                        return vec![cmd];
                     }
                     Vec::new()
                 }
@@ -945,6 +971,28 @@ mod tests {
         a.handle_key(code(KeyCode::Tab));
         a.handle_key(code(KeyCode::BackTab));
         assert_eq!(a.layout().0, Layout::Board, "remembered for the session");
+    }
+
+    #[test]
+    fn toggling_the_layout_saves_it_and_toggling_back_clears_it() {
+        let mut a = app();
+        let cmds = a.handle_key(key('L'));
+        assert_eq!(
+            cmds,
+            vec![Command::SaveLayout {
+                view: ViewId::new("V_table"),
+                layout: Layout::Board,
+                github_layout: Layout::Table,
+            }]
+        );
+        let cmds = a.handle_key(key('L'));
+        assert_eq!(
+            cmds,
+            vec![Command::ClearLayout {
+                view: ViewId::new("V_table")
+            }]
+        );
+        assert_eq!(a.layout().0, Layout::Table);
     }
 
     #[test]

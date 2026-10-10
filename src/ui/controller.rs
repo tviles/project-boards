@@ -7,7 +7,7 @@ use crate::github::GithubError;
 use crate::herdr::cli::{HerdrCli, focus_plugin_pane};
 use crate::herdr::registry::PaneRegistry;
 use crate::model::*;
-use crate::state::State;
+use crate::state::{LayoutOverride, State};
 use crate::store::MemoryStore;
 use crate::store::cache::{cache_path, load_cache, save_cache};
 use crate::sync::scheduler::{PollConfig, PollKind, Scheduler};
@@ -289,6 +289,7 @@ impl Controller {
             self.app.select_view(&view);
         }
         self.board = Some(board.clone());
+        self.reconcile_layouts();
         self.scheduler = Scheduler::new(PollConfig::from_config(&self.options.config), now);
         self.scheduler.started(PollKind::Full, now);
         self.full_load_in_flight = true;
@@ -454,7 +455,11 @@ impl Controller {
                 ..
             }
         );
+        let project_changed = matches!(event, SyncEvent::Project(_));
         let cmds = self.app.on_sync(event);
+        if project_changed {
+            self.reconcile_layouts();
+        }
         if projects_failed {
             // The App records the error in the status line; do not leave "Loading boards…" up.
             if let Some(picker) = self.app.picker.as_mut() {
@@ -465,6 +470,46 @@ impl Controller {
             self.persist_cache();
         }
         self.commands(cmds, now)
+    }
+
+    /// Gives the app this board's saved layout choices, dropping (and forgetting) any whose
+    /// view has since changed layout on GitHub. Run whenever the views may have changed;
+    /// running it twice changes nothing more. Choices for views not in the project yet are
+    /// kept unchecked.
+    fn reconcile_layouts(&mut self) {
+        let Some(board) = self.board.clone() else {
+            return;
+        };
+        let saved = State::load(&self.options.state_dir).layout_overrides_for(&board);
+        let mut keep = std::collections::HashMap::new();
+        let mut stale: Vec<(ViewId, String)> = Vec::new();
+        for (id, o) in saved {
+            let view = self
+                .app
+                .project()
+                .and_then(|p| p.views.iter().find(|v| v.id == id));
+            match view {
+                Some(v) if v.layout != o.github_layout => stale.push((id, v.name.clone())),
+                _ => {
+                    keep.insert(id, o.layout);
+                }
+            }
+        }
+        self.app.set_layout_overrides(keep);
+        if stale.is_empty() {
+            return;
+        }
+        if let Err(e) = State::update(&self.options.state_dir, |s| {
+            for (id, _) in &stale {
+                s.clear_layout_override(&board, id);
+            }
+        }) {
+            tracing::warn!(error = %e, "could not clear stale layout choices");
+        }
+        self.app.status.flash = Some(format!(
+            "View '{}' layout changed on GitHub; local layout cleared",
+            stale[0].1
+        ));
     }
 
     fn persist_cache(&self) {
@@ -509,6 +554,35 @@ impl Controller {
                         })
                     {
                         tracing::warn!(error = %e, "could not save the last view");
+                    }
+                }
+                Command::SaveLayout {
+                    view,
+                    layout,
+                    github_layout,
+                } => {
+                    if let Some(board) = self.board.clone()
+                        && let Err(e) = State::update(&self.options.state_dir, |s| {
+                            s.set_layout_override(
+                                &board,
+                                &view,
+                                LayoutOverride {
+                                    layout,
+                                    github_layout,
+                                },
+                            )
+                        })
+                    {
+                        tracing::warn!(error = %e, "could not save the layout");
+                    }
+                }
+                Command::ClearLayout { view } => {
+                    if let Some(board) = self.board.clone()
+                        && let Err(e) = State::update(&self.options.state_dir, |s| {
+                            s.clear_layout_override(&board, &view)
+                        })
+                    {
+                        tracing::warn!(error = %e, "could not clear the layout");
                     }
                 }
                 Command::PickBoard(board) => effects.extend(self.open_board(board, now)),
@@ -688,6 +762,147 @@ mod tests {
             vec![sp(&failed, SyncJob::Projects(Some(repo)))]
         );
         assert_eq!(failed.app.mode, Mode::Picker);
+    }
+
+    fn set_override(dir: &Path, board: &BoardRef, view: &str, layout: Layout, github: Layout) {
+        State::update(dir, |s| {
+            s.set_layout_override(
+                board,
+                &ViewId::new(view),
+                LayoutOverride {
+                    layout,
+                    github_layout: github,
+                },
+            )
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn opening_a_board_applies_its_saved_layouts_per_view_and_per_board() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        set_override(
+            dir.path(),
+            &board(),
+            "V_table",
+            Layout::Board,
+            Layout::Table,
+        );
+        set_override(
+            dir.path(),
+            &"tviles/9".parse().unwrap(),
+            "V_bugs",
+            Layout::Board,
+            Layout::Table,
+        );
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        assert_eq!(c.app.layout().0, Layout::Board, "V_table is overridden");
+        c.app.select_view(&ViewId::new("V_bugs"));
+        assert_eq!(
+            c.app.layout().0,
+            Layout::Table,
+            "another board's choice and unset views stay"
+        );
+        assert!(c.app.status.flash.is_none());
+    }
+
+    #[test]
+    fn pressing_l_persists_the_layout_and_pressing_it_again_removes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        c.handle(Input::Key(key('L')), t0);
+        let saved = State::load(dir.path()).layout_overrides_for(&board());
+        assert_eq!(
+            saved,
+            vec![(
+                ViewId::new("V_table"),
+                LayoutOverride {
+                    layout: Layout::Board,
+                    github_layout: Layout::Table
+                }
+            )]
+        );
+        c.handle(Input::Key(key('L')), t0);
+        assert!(State::load(dir.path()).layout_overrides.is_empty());
+    }
+
+    #[test]
+    fn a_layout_changed_on_github_drops_the_saved_choice_with_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        // V_table is a table on GitHub; the choice was made when it was a board.
+        set_override(
+            dir.path(),
+            &board(),
+            "V_table",
+            Layout::Table,
+            Layout::Board,
+        );
+        set_override(
+            dir.path(),
+            &board(),
+            "V_board",
+            Layout::Table,
+            Layout::Board,
+        );
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        assert_eq!(
+            c.app.status.flash.as_deref(),
+            Some("View 'Table' layout changed on GitHub; local layout cleared")
+        );
+        let left = State::load(dir.path()).layout_overrides_for(&board());
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].0, ViewId::new("V_board"));
+        assert_eq!(c.app.layout().0, Layout::Table);
+
+        // The fresh project arriving re-checks, and changes nothing more.
+        c.app.status.flash = None;
+        let project = c.app.project().unwrap().clone();
+        c.handle(
+            Input::Sync {
+                generation: c.generation(),
+                event: SyncEvent::Project(project),
+            },
+            t0,
+        );
+        assert!(c.app.status.flash.is_none());
+        assert_eq!(
+            State::load(dir.path()).layout_overrides_for(&board()).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_choice_made_before_the_views_are_known_is_checked_when_they_arrive() {
+        let dir = tempfile::tempdir().unwrap();
+        set_override(
+            dir.path(),
+            &board(),
+            "V_table",
+            Layout::Board,
+            Layout::Board,
+        );
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        assert_eq!(
+            State::load(dir.path()).layout_overrides.len(),
+            1,
+            "nothing to compare yet"
+        );
+        c.handle(
+            Input::Sync {
+                generation: c.generation(),
+                event: SyncEvent::Project(snapshot().project),
+            },
+            t0,
+        );
+        assert!(State::load(dir.path()).layout_overrides.is_empty());
+        assert!(c.app.status.flash.is_some());
     }
 
     /// Plan review Q6: no hydration while the full load is still fetching the same items.

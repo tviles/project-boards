@@ -2,11 +2,17 @@ use crate::model::field::Field;
 use crate::model::ids::{FieldId, ViewId};
 use serde::{Deserialize, Serialize};
 
+/// Serialized as `"table"`, `"board"`, `"roadmap"`; the capitalised names are accepted so
+/// caches written before the rename still load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Layout {
+    #[serde(alias = "Table")]
     Table,
+    #[serde(alias = "Board")]
     Board,
     /// Shown as a table in 0.1.
+    #[serde(alias = "Roadmap")]
     Roadmap,
 }
 

@@ -32,7 +32,7 @@ The board opens for the repository of the focused pane (the board you last used 
 | `h` `j` `k` `l`, arrows | move |
 | `Home` / `End` | first / last |
 | `Tab` / `Shift+Tab` | next / previous view |
-| `L` | table / board |
+| `L` | table / board (remembered per view) |
 | `Enter` | item detail (collapse a group in the table) |
 | `z` | collapse or expand a group |
 | `/` | quick search |
