@@ -15,10 +15,11 @@ esac
 asset="project-boards-$target"
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
 
-# A fake cargo that "builds" by writing a marker binary.
+# A fake cargo that "builds" by writing a marker binary, and records its arguments.
 mkdir -p "$work/fakebin"
 cat > "$work/fakebin/cargo" <<'EOT'
 #!/bin/sh
+echo "$*" > cargo-args
 mkdir -p target/release
 printf '#!/bin/sh\necho built-from-source\n' > target/release/project-boards
 chmod +x target/release/project-boards
@@ -56,6 +57,7 @@ fi
 make_root "$work/r3" 1.3.0-dev
 (cd "$work/r3" && PATH="$work/fakebin:$PATH" PB_RELEASE_BASE="file://$work/rel" sh scripts/install.sh)
 [ "$("$work/r3/bin/project-boards")" = built-from-source ] || fail "dev build"
+[ "$(cat "$work/r3/cargo-args")" = "build --release --locked" ] || fail "source build uses the lockfile"
 
 # 4. A version with no release falls back to building from source.
 make_root "$work/r4" 9.9.9

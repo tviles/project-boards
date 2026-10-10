@@ -20,8 +20,8 @@ asset="project-boards-$target"
 sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
 
 build_from_source() {
-  echo "project-boards: building from source (cargo build --release)"
-  (cd "$root" && cargo build --release)
+  echo "project-boards: building from source (cargo build --release --locked; needs Rust 1.88 or newer)"
+  (cd "$root" && cargo build --release --locked)
   mkdir -p "$root/bin"
   cp "$root/target/release/project-boards" "$root/bin/project-boards"
   chmod 0755 "$root/bin/project-boards"
