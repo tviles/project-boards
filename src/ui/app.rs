@@ -1,0 +1,1650 @@
+use crate::github::GithubError;
+use crate::model::*;
+use crate::store::{BoardSnapshot, Store, StoreUpdate, ViewList};
+use crate::sync::{SyncEvent, SyncTask, store_update};
+use crate::ui::board::{BoardSelection, Column, build_columns, constrain_columns, resolve_layout};
+use crate::ui::detail::{DetailOutcome, DetailState, build_doc};
+use crate::ui::keymap::{Action, Keymap};
+use crate::ui::markdown::Target;
+use crate::ui::picker::{PickerOutcome, PickerState};
+use crate::ui::pills::card_fields;
+use crate::ui::search;
+use crate::ui::table::{Row, build_rows, collapse_key};
+use crate::ui::theme::Theme;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+    Search,
+    Filter,
+    Help,
+    Detail,
+    Picker,
+    Setup,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Command {
+    FetchViewIds {
+        view: ViewId,
+        filter: String,
+    },
+    LoadDetail {
+        item: ItemId,
+        before: Option<String>,
+    },
+    OpenUrl(String),
+    Refresh,
+    SaveLastView(ViewId),
+    /// The user chose `layout` for `view`, whose own layout on GitHub is `github_layout`.
+    SaveLayout {
+        view: ViewId,
+        layout: Layout,
+        github_layout: Layout,
+    },
+    /// The user is back on GitHub's layout for `view`: forget the choice.
+    ClearLayout {
+        view: ViewId,
+    },
+    PickBoard(BoardRef),
+    ShowPicker,
+    /// Re-run startup after the user fixed authentication.
+    Retry,
+    Quit,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Status {
+    /// Showing the cache; a fresh full load has not finished yet.
+    pub stale: bool,
+    pub loading: Option<(usize, usize)>,
+    pub error: Option<String>,
+    /// Config warnings and notes such as "loaded N of M".
+    pub notes: Vec<String>,
+    pub rate_low: bool,
+    /// A one-off reply to the last key press, such as "not opened: not a web link". The next
+    /// key press clears it.
+    pub flash: Option<String>,
+}
+
+pub struct App {
+    pub store: Box<dyn Store>,
+    pub keymap: Keymap,
+    pub theme: Theme,
+    pub mode: Mode,
+    /// Text being typed in Search or Filter mode.
+    pub input: String,
+    pub status: Status,
+    pub detail: Option<DetailState>,
+    pub picker: Option<PickerState>,
+    pub setup: Option<String>,
+    pub table_selected: usize,
+    pub board_sel: BoardSelection,
+    pub collapsed: HashSet<String>,
+    pub quit: bool,
+    /// The current view, by id, so views reordered on GitHub never move you to another one.
+    current: Option<ViewId>,
+    /// The selected item, so polls, re-sorts and search never move the cursor to another one.
+    selected_id: Option<ItemId>,
+    search: String,
+    layout_toggle: HashMap<ViewId, Layout>,
+    /// Per view, a filter the user added on top of the view's GitHub filter. Session only.
+    extra_filter: HashMap<ViewId, String>,
+    /// Detail width used to number targets; kept in sync by the renderer.
+    pub detail_width: u16,
+}
+
+fn task_words(task: &SyncTask) -> &'static str {
+    match task {
+        SyncTask::Resolve => "could not load the board",
+        SyncTask::FullLoad => "could not load items",
+        SyncTask::Incremental => "refresh failed",
+        SyncTask::ViewIds(_) => "could not load this view",
+        SyncTask::Hydrate => "could not load some items",
+        SyncTask::Detail(_) => "could not load the item",
+        SyncTask::Projects => "could not list boards",
+    }
+}
+
+/// The setup screen text for errors the user has to fix outside the app.
+pub fn setup_message(error: &GithubError) -> Option<String> {
+    match error {
+        GithubError::NoToken => Some(
+            "No GitHub token found.\n\nRun:  gh auth login\nor set GH_TOKEN, then press r.".into(),
+        ),
+        GithubError::Unauthorized => {
+            Some("GitHub rejected the token.\n\nRun:  gh auth login\nthen press r.".into())
+        }
+        GithubError::InsufficientScopes { missing } => Some(format!(
+            "The token is missing the {} scope.\n\nRun:  gh auth refresh -s project\n(add -s repo for private repositories), then press r.",
+            missing.join(", ")
+        )),
+        _ => None,
+    }
+}
+
+impl App {
+    pub fn new(store: Box<dyn Store>, keymap: Keymap, theme: Theme) -> Self {
+        Self {
+            store,
+            keymap,
+            theme,
+            mode: Mode::Normal,
+            input: String::new(),
+            status: Status::default(),
+            detail: None,
+            picker: None,
+            setup: None,
+            table_selected: 0,
+            board_sel: BoardSelection::default(),
+            collapsed: HashSet::new(),
+            quit: false,
+            current: None,
+            selected_id: None,
+            search: String::new(),
+            layout_toggle: HashMap::new(),
+            extra_filter: HashMap::new(),
+            detail_width: 80,
+        }
+    }
+
+    pub fn snapshot(&self) -> Option<&BoardSnapshot> {
+        self.store.snapshot()
+    }
+
+    pub fn project(&self) -> Option<&Project> {
+        self.snapshot().map(|s| &s.project)
+    }
+
+    /// The selected view; the first view when none is selected or it was deleted on GitHub.
+    pub fn current_view(&self) -> Option<&View> {
+        let views = &self.project()?.views;
+        self.current
+            .as_ref()
+            .and_then(|id| views.iter().find(|v| &v.id == id))
+            .or_else(|| views.first())
+    }
+
+    /// Selects a view by id. Works before the project has loaded.
+    pub fn select_view(&mut self, id: &ViewId) {
+        self.current = Some(id.clone());
+    }
+
+    /// Replaces the remembered layout choices (one board's, loaded from state).
+    pub fn set_layout_overrides(&mut self, overrides: HashMap<ViewId, Layout>) {
+        self.layout_toggle = overrides;
+    }
+
+    /// The current view's GitHub filter plus the local one, if any.
+    pub fn effective_filter(&self) -> String {
+        self.current_view()
+            .map(|v| self.filter_for(v))
+            .unwrap_or_default()
+    }
+
+    /// The local filter of the current view, if one is set.
+    pub fn extra_filter(&self) -> Option<&str> {
+        let view = self.current_view()?;
+        self.extra_filter.get(&view.id).map(String::as_str)
+    }
+
+    /// Views with a local filter; their id lists don't match the GitHub filter, so they
+    /// are left out of the disk cache.
+    pub fn views_with_extra_filter(&self) -> impl Iterator<Item = &ViewId> {
+        self.extra_filter.keys()
+    }
+
+    fn filter_for(&self, view: &View) -> String {
+        match self.extra_filter.get(&view.id) {
+            Some(extra) => format!("{} {extra}", view.filter).trim().to_string(),
+            None => view.filter.clone(),
+        }
+    }
+
+    /// Sets (or, when empty, clears) the current view's local filter and refetches the
+    /// view's ids for the new effective filter.
+    fn set_extra_filter(&mut self, extra: &str) -> Vec<Command> {
+        let Some(view) = self.current_view().cloned() else {
+            return Vec::new();
+        };
+        let before = self.effective_filter();
+        let extra = extra.trim();
+        if extra.is_empty() {
+            self.extra_filter.remove(&view.id);
+        } else {
+            self.extra_filter.insert(view.id.clone(), extra.to_string());
+        }
+        let filter = self.effective_filter();
+        if filter == before {
+            // Nothing changed: keep the cached list and the cursor.
+            return self.revalidate_view().into_iter().collect();
+        }
+        // A changed filter invalidates the cached list.
+        self.store.apply(StoreUpdate::ClearViewIds(view.id.clone()));
+        self.table_selected = 0;
+        self.board_sel = BoardSelection::default();
+        self.sync_selected_id();
+        if filter.is_empty() {
+            Vec::new()
+        } else {
+            vec![Command::FetchViewIds {
+                view: view.id,
+                filter,
+            }]
+        }
+    }
+
+    /// Forgets what belonged to the previous board when another one opens: the quick search,
+    /// the error and the "loaded N of M" note. Config warnings stay.
+    pub fn reset_for_new_board(&mut self) {
+        self.search.clear();
+        self.input.clear();
+        self.status.error = None;
+        self.status.notes.retain(|n| !n.starts_with("loaded "));
+    }
+
+    pub fn search_query(&self) -> &str {
+        if self.mode == Mode::Search {
+            &self.input
+        } else {
+            &self.search
+        }
+    }
+
+    /// Items of the current view: the whole board for an empty filter, else the view's id
+    /// list (`None` until it arrives); then quick search; then the view's sort.
+    pub fn view_items(&self) -> Option<Vec<&Item>> {
+        let snap = self.snapshot()?;
+        let view = self.current_view()?;
+        let filter = self.effective_filter();
+        let mut items = if filter.trim().is_empty() {
+            snap.all_items()
+        } else {
+            snap.view_items(&view.id)?
+        };
+        let query = self.search_query();
+        if !query.is_empty() {
+            items.retain(|i| search::matches(i, query));
+        }
+        sort_items(&mut items, &view.sort_by, &snap.project.fields);
+        Some(items)
+    }
+
+    pub fn column_field(&self) -> Option<&Field> {
+        self.current_view()?.column_field(&self.project()?.fields)
+    }
+
+    pub fn layout(&self) -> (Layout, Option<&'static str>) {
+        let Some(view) = self.current_view() else {
+            return (Layout::Table, None);
+        };
+        let requested = self
+            .layout_toggle
+            .get(&view.id)
+            .copied()
+            .unwrap_or(view.layout);
+        resolve_layout(requested, self.column_field())
+    }
+
+    pub fn table_rows(&self) -> Vec<Row<'_>> {
+        let items = self.view_items().unwrap_or_default();
+        let group = self
+            .current_view()
+            .zip(self.project())
+            .and_then(|(v, p)| v.group_field(&p.fields));
+        build_rows(&items, group, &self.collapsed)
+    }
+
+    pub fn board_columns(&self) -> Vec<Column<'_>> {
+        let (Some(field), Some(view), Some(project)) =
+            (self.column_field(), self.current_view(), self.project())
+        else {
+            return Vec::new();
+        };
+        let items = self.view_items().unwrap_or_default();
+        let columns = build_columns(&items, field, view.group_field(&project.fields));
+        constrain_columns(columns, &column_constraint(&self.effective_filter(), field))
+    }
+
+    /// The fields board cards show as pills in the current view.
+    pub fn card_fields(&self) -> Vec<&Field> {
+        let (Some(column), Some(view), Some(project)) =
+            (self.column_field(), self.current_view(), self.project())
+        else {
+            return Vec::new();
+        };
+        card_fields(view, project, column, view.group_field(&project.fields))
+    }
+
+    pub fn selected_item(&self) -> Option<&Item> {
+        match self.layout().0 {
+            Layout::Board => {
+                let cols = self.board_columns();
+                cols.get(self.board_sel.column)?
+                    .items()
+                    .get(self.board_sel.index)
+                    .copied()
+            }
+            _ => match self.table_rows().get(self.table_selected)? {
+                Row::Item(i) => Some(*i),
+                Row::Group { .. } => None,
+            },
+        }
+    }
+
+    pub fn detail_item(&self) -> Option<&Item> {
+        let id = &self.detail.as_ref()?.item;
+        self.snapshot()?.items.get(id)
+    }
+
+    /// A request for the current view's ids, when it has a filter and no list yet.
+    pub fn view_needs_ids(&self) -> Option<Command> {
+        let view = self.current_view()?;
+        let filter = self.effective_filter();
+        let missing = !self.snapshot()?.views.contains_key(&view.id);
+        (!filter.trim().is_empty() && missing).then(|| Command::FetchViewIds {
+            view: view.id.clone(),
+            filter,
+        })
+    }
+
+    /// A request for the current view's ids whenever it has a filter, cached list or not.
+    pub fn revalidate_view(&self) -> Option<Command> {
+        let view = self.current_view()?;
+        let filter = self.effective_filter();
+        (!filter.trim().is_empty()).then(|| Command::FetchViewIds {
+            view: view.id.clone(),
+            filter,
+        })
+    }
+
+    fn clamp_selection(&mut self) {
+        let rows = self.table_rows().len();
+        self.table_selected = self.table_selected.min(rows.saturating_sub(1));
+        let cols = self.board_columns();
+        let lens: Vec<usize> = cols.iter().map(|c| c.len()).collect();
+        self.board_sel.column = self.board_sel.column.min(lens.len().saturating_sub(1));
+        // Never rest on an empty column when a populated one exists: the nearest to the
+        // right, else to the left.
+        if lens.get(self.board_sel.column) == Some(&0) {
+            let c = self.board_sel.column;
+            if let Some(n) = (c + 1..lens.len())
+                .find(|&n| lens[n] > 0)
+                .or_else(|| (0..c).rev().find(|&n| lens[n] > 0))
+            {
+                self.board_sel.column = n;
+            }
+        }
+        let len = lens.get(self.board_sel.column).copied().unwrap_or(0);
+        self.board_sel.index = self.board_sel.index.min(len.saturating_sub(1));
+    }
+
+    /// Remembers the item under the cursor.
+    fn sync_selected_id(&mut self) {
+        self.selected_id = self.selected_item().map(|i| i.id.clone());
+    }
+
+    /// Re-finds the remembered item after the data or rows changed; clamps when it is gone.
+    fn restore_selection(&mut self) {
+        if let Some(id) = self.selected_id.clone() {
+            let row = self
+                .table_rows()
+                .iter()
+                .position(|r| matches!(r, Row::Item(i) if i.id == id));
+            let cell = self
+                .board_columns()
+                .iter()
+                .enumerate()
+                .find_map(|(c, col)| col.items().iter().position(|i| i.id == id).map(|i| (c, i)));
+            if let Some(row) = row {
+                self.table_selected = row;
+            }
+            if let Some((column, index)) = cell {
+                self.board_sel = BoardSelection { column, index };
+            }
+        }
+        self.clamp_selection();
+    }
+
+    fn switch_view(&mut self, forward: bool) -> Vec<Command> {
+        let Some(project) = self.project() else {
+            return Vec::new();
+        };
+        let n = project.views.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        let pos = self
+            .current_view()
+            .and_then(|cur| project.views.iter().position(|v| v.id == cur.id))
+            .unwrap_or(0);
+        let next = if forward {
+            (pos + 1) % n
+        } else {
+            (pos + n - 1) % n
+        };
+        let id = project.views[next].id.clone();
+        self.current = Some(id.clone());
+        self.table_selected = 0;
+        self.board_sel = BoardSelection::default();
+        self.sync_selected_id();
+        let mut cmds = vec![Command::SaveLastView(id)];
+        // The cached list shows at once; a fresh one replaces it (spec section 5, "Views").
+        cmds.extend(self.revalidate_view());
+        cmds
+    }
+
+    fn move_selection(&mut self, action: Action) {
+        if self.layout().0 == Layout::Board {
+            let lens: Vec<usize> = self.board_columns().iter().map(|c| c.len()).collect();
+            if lens.is_empty() {
+                return;
+            }
+            let s = &mut self.board_sel;
+            match action {
+                // Left and right skip empty columns; at the last populated one they stay put.
+                Action::Left => {
+                    if let Some(c) = (0..s.column).rev().find(|&c| lens[c] > 0) {
+                        s.column = c;
+                    }
+                }
+                Action::Right => {
+                    if let Some(c) = (s.column + 1..lens.len()).find(|&c| lens[c] > 0) {
+                        s.column = c;
+                    }
+                }
+                Action::Up => s.index = s.index.saturating_sub(1),
+                Action::Down => s.index += 1,
+                Action::Top => s.index = 0,
+                Action::Bottom => s.index = usize::MAX,
+                _ => {}
+            }
+            s.index = s.index.min(lens[s.column].saturating_sub(1));
+        } else {
+            let rows = self.table_rows().len();
+            let s = &mut self.table_selected;
+            match action {
+                Action::Up => *s = s.saturating_sub(1),
+                Action::Down => *s += 1,
+                Action::Top => *s = 0,
+                Action::Bottom => *s = usize::MAX,
+                _ => {}
+            }
+            *s = (*s).min(rows.saturating_sub(1));
+        }
+    }
+
+    fn toggle_group(&mut self) {
+        let mut header = None;
+        for (i, row) in self
+            .table_rows()
+            .iter()
+            .enumerate()
+            .take(self.table_selected + 1)
+            .rev()
+        {
+            if let Row::Group { key: k, .. } = row {
+                header = Some((i, collapse_key(k)));
+                break;
+            }
+        }
+        if let Some((index, k)) = header
+            && !self.collapsed.remove(&k)
+        {
+            self.collapsed.insert(k);
+            // The rows under the header vanish: land on the header, not another group.
+            self.table_selected = index;
+        }
+        self.sync_selected_id();
+        self.restore_selection();
+    }
+
+    fn open_detail(&mut self, item: ItemId) -> Vec<Command> {
+        self.detail = Some(DetailState::new(item.clone()));
+        self.mode = Mode::Detail;
+        vec![Command::LoadDetail { item, before: None }]
+    }
+
+    fn follow(&mut self, target: Target) -> Vec<Command> {
+        match target {
+            Target::Link(url) => vec![Command::OpenUrl(url)],
+            Target::IssueRef(n) => {
+                let repo = self
+                    .detail_item()
+                    .and_then(|i| i.reference())
+                    .map(|r| r.repo.clone());
+                let Some(repo) = repo else { return Vec::new() };
+                let on_board = self.snapshot().and_then(|s| {
+                    s.items
+                        .values()
+                        .find(|i| {
+                            i.reference()
+                                .is_some_and(|r| r.repo == repo && r.number == n)
+                        })
+                        .map(|i| i.id.clone())
+                });
+                match on_board {
+                    Some(id) => self.open_detail(id),
+                    None => vec![Command::OpenUrl(format!(
+                        "https://github.com/{repo}/issues/{n}"
+                    ))],
+                }
+            }
+        }
+    }
+
+    fn detail_targets(&self) -> Vec<Target> {
+        match (self.detail.as_ref(), self.detail_item(), self.project()) {
+            (Some(state), Some(item), Some(project)) => {
+                build_doc(item, project, state, self.detail_width, &self.theme).targets
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn handle_text_input(&mut self, key: &KeyEvent) -> Option<bool> {
+        match key.code {
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.input.push(c);
+                Some(false)
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+                Some(false)
+            }
+            KeyCode::Enter => Some(true),
+            KeyCode::Esc => None,
+            _ => Some(false),
+        }
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> Vec<Command> {
+        self.status.flash = None;
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.quit = true;
+            return vec![Command::Quit];
+        }
+        let action = self.keymap.action(&key);
+        match self.mode {
+            Mode::Search => {
+                // The anchor stays on the item that was selected when typing began, so
+                // clearing the search returns to it; Enter re-anchors on what is visible.
+                let committed = match self.handle_text_input(&key) {
+                    Some(true) => {
+                        self.search = std::mem::take(&mut self.input);
+                        self.mode = Mode::Normal;
+                        true
+                    }
+                    None => {
+                        self.input.clear();
+                        self.search.clear();
+                        self.mode = Mode::Normal;
+                        false
+                    }
+                    Some(false) => false,
+                };
+                self.restore_selection();
+                if committed {
+                    self.sync_selected_id();
+                }
+                Vec::new()
+            }
+            Mode::Filter => match self.handle_text_input(&key) {
+                Some(true) => {
+                    self.mode = Mode::Normal;
+                    let extra = std::mem::take(&mut self.input);
+                    self.set_extra_filter(&extra)
+                }
+                None => {
+                    self.input.clear();
+                    self.mode = Mode::Normal;
+                    Vec::new()
+                }
+                Some(false) => Vec::new(),
+            },
+            Mode::Help => {
+                self.mode = Mode::Normal;
+                if action == Some(Action::Quit) {
+                    self.quit = true;
+                    return vec![Command::Quit];
+                }
+                Vec::new()
+            }
+            Mode::Setup => match key.code {
+                KeyCode::Char('r') => vec![Command::Retry],
+                // Esc never quits; the keymap's Quit does.
+                _ if action == Some(Action::Quit) => {
+                    self.quit = true;
+                    vec![Command::Quit]
+                }
+                _ => Vec::new(),
+            },
+            Mode::Picker => self.handle_picker_key(key),
+            Mode::Detail => {
+                let targets = self.detail_targets();
+                let Some(state) = self.detail.as_mut() else {
+                    self.mode = Mode::Normal;
+                    return Vec::new();
+                };
+                match state.handle(action, targets.len()) {
+                    DetailOutcome::None => Vec::new(),
+                    DetailOutcome::Close => {
+                        self.detail = None;
+                        self.mode = Mode::Normal;
+                        Vec::new()
+                    }
+                    DetailOutcome::Quit => {
+                        self.quit = true;
+                        vec![Command::Quit]
+                    }
+                    DetailOutcome::Follow(i) => self.follow(targets[i].clone()),
+                    DetailOutcome::LoadOlder(cursor) => vec![Command::LoadDetail {
+                        item: state.item.clone(),
+                        before: Some(cursor),
+                    }],
+                    DetailOutcome::OpenInBrowser => self
+                        .detail_item()
+                        .and_then(|i| i.url())
+                        .map(|u| vec![Command::OpenUrl(u.to_string())])
+                        .unwrap_or_default(),
+                }
+            }
+            Mode::Normal => match action {
+                Some(
+                    a @ (Action::Up
+                    | Action::Down
+                    | Action::Left
+                    | Action::Right
+                    | Action::Top
+                    | Action::Bottom),
+                ) => {
+                    self.move_selection(a);
+                    self.sync_selected_id();
+                    Vec::new()
+                }
+                Some(Action::NextView) => self.switch_view(true),
+                Some(Action::PrevView) => self.switch_view(false),
+                Some(Action::ToggleLayout) => {
+                    if let Some(view) = self.current_view().cloned() {
+                        let next = if self.layout().0 == Layout::Board {
+                            Layout::Table
+                        } else {
+                            Layout::Board
+                        };
+                        self.sync_selected_id();
+                        let cmd = if next == view.layout {
+                            self.layout_toggle.remove(&view.id);
+                            Command::ClearLayout { view: view.id }
+                        } else {
+                            self.layout_toggle.insert(view.id.clone(), next);
+                            Command::SaveLayout {
+                                view: view.id,
+                                layout: next,
+                                github_layout: view.layout,
+                            }
+                        };
+                        self.restore_selection();
+                        return vec![cmd];
+                    }
+                    Vec::new()
+                }
+                Some(Action::Open) => {
+                    if self.layout().0 == Layout::Table
+                        && matches!(
+                            self.table_rows().get(self.table_selected),
+                            Some(Row::Group { .. })
+                        )
+                    {
+                        self.toggle_group();
+                        return Vec::new();
+                    }
+                    match self.selected_item().map(|i| i.id.clone()) {
+                        Some(id) => self.open_detail(id),
+                        None => Vec::new(),
+                    }
+                }
+                Some(Action::ToggleGroup) => {
+                    self.toggle_group();
+                    Vec::new()
+                }
+                Some(Action::Search) => {
+                    self.sync_selected_id();
+                    self.input = self.search.clone();
+                    self.mode = Mode::Search;
+                    Vec::new()
+                }
+                Some(Action::Filter) => {
+                    self.input = self.extra_filter().unwrap_or_default().to_string();
+                    self.mode = Mode::Filter;
+                    Vec::new()
+                }
+                Some(Action::ClearFilter) if self.extra_filter().is_some() => {
+                    self.set_extra_filter("")
+                }
+                Some(Action::Refresh) => vec![Command::Refresh],
+                Some(Action::OpenBrowser) => {
+                    let url = self
+                        .selected_item()
+                        .and_then(|i| i.url())
+                        .map(String::from)
+                        .or_else(|| self.project().map(|p| p.url.clone()));
+                    url.map(|u| vec![Command::OpenUrl(u)]).unwrap_or_default()
+                }
+                Some(Action::Help) => {
+                    self.mode = Mode::Help;
+                    Vec::new()
+                }
+                Some(Action::Back) => {
+                    self.search.clear();
+                    self.status.error = None;
+                    self.sync_selected_id();
+                    self.restore_selection();
+                    Vec::new()
+                }
+                Some(Action::PickBoard) => vec![Command::ShowPicker],
+                Some(Action::Quit) => {
+                    self.quit = true;
+                    vec![Command::Quit]
+                }
+                _ => Vec::new(),
+            },
+        }
+    }
+
+    fn handle_picker_key(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(picker) = self.picker.as_mut() else {
+            self.mode = Mode::Normal;
+            return Vec::new();
+        };
+        match picker.handle(&key) {
+            PickerOutcome::None => Vec::new(),
+            PickerOutcome::Chosen(board) => {
+                self.picker = None;
+                self.mode = Mode::Normal;
+                vec![Command::PickBoard(board)]
+            }
+            PickerOutcome::Cancel => {
+                self.picker = None;
+                self.mode = Mode::Normal;
+                Vec::new()
+            }
+        }
+    }
+
+    /// The filter a view currently applies, looked up by id.
+    fn filter_of(&self, id: &ViewId) -> Option<String> {
+        let view = self.project()?.views.iter().find(|v| &v.id == id)?;
+        Some(self.filter_for(view))
+    }
+
+    pub fn on_sync(&mut self, event: SyncEvent) -> Vec<Command> {
+        // A late answer for a filter that has since changed must not replace the list.
+        if let SyncEvent::ViewIds { view, filter, .. } = &event
+            && self
+                .filter_of(view)
+                .is_some_and(|current| &current != filter)
+        {
+            return Vec::new();
+        }
+        self.sync_selected_id();
+        if let Some(update) = store_update(&event) {
+            self.store.apply(update);
+        }
+        let mut cmds = Vec::new();
+        match event {
+            SyncEvent::Project(_) => cmds.extend(self.view_needs_ids()),
+            SyncEvent::ItemsPage { loaded, total, .. } => {
+                self.status.loading = Some((loaded, total))
+            }
+            SyncEvent::ItemsComplete {
+                fetched_at,
+                total,
+                truncated,
+                ..
+            } => {
+                self.store.apply(StoreUpdate::FetchedAt(fetched_at));
+                self.status.loading = None;
+                self.status.stale = false;
+                self.status.error = None;
+                self.status.notes.retain(|n| !n.starts_with("loaded "));
+                if truncated {
+                    let loaded = self.snapshot().map(|s| s.items.len()).unwrap_or(0);
+                    self.status
+                        .notes
+                        .push(format!("loaded {loaded} of {total} items (max_items)"));
+                }
+                cmds.extend(self.revalidate_view());
+            }
+            SyncEvent::ItemsUpdated { items, fetched_at } => {
+                self.store.apply(StoreUpdate::FetchedAt(fetched_at));
+                self.status.error = None;
+                if !items.is_empty() {
+                    cmds.extend(self.revalidate_view());
+                }
+            }
+            SyncEvent::Detail {
+                item,
+                detail,
+                older,
+            } => {
+                if let Some(state) = self.detail.as_mut().filter(|s| s.item == item) {
+                    state.set_detail(detail, older);
+                }
+            }
+            SyncEvent::Projects(list) => self.show_projects(list),
+            SyncEvent::Rate(rate) => self.status.rate_low = rate.is_low(),
+            SyncEvent::Failed { task, error } => {
+                if matches!(task, SyncTask::FullLoad | SyncTask::Resolve) {
+                    self.status.loading = None;
+                }
+                if let Some(message) = setup_message(&error) {
+                    self.setup = Some(message);
+                    self.mode = Mode::Setup;
+                } else if let (SyncTask::Detail(id), Some(state)) = (&task, self.detail.as_mut()) {
+                    if &state.item == id {
+                        state.loading_older = false;
+                        state.error = Some(format!("{}: {error}", task_words(&task)));
+                    }
+                } else {
+                    self.status.error = Some(format!("{}: {error}", task_words(&task)));
+                }
+            }
+            SyncEvent::ViewIds { .. } | SyncEvent::Hydrated(_) | SyncEvent::RepoProjects(_) => {}
+        }
+        self.restore_selection();
+        cmds
+    }
+
+    fn show_projects(&mut self, list: Vec<ProjectSummary>) {
+        // No picker is waiting: the user cancelled it, or is reading a board (maybe in
+        // detail). Only with no board at all is a picker still required.
+        if self.picker.is_none() && self.snapshot().is_some() {
+            return;
+        }
+        let required = self
+            .picker
+            .as_ref()
+            .map(|p| p.required)
+            .unwrap_or(self.snapshot().is_none());
+        let typed = self.picker.take().map(|p| p.input).unwrap_or_default();
+        let mut picker = PickerState::with(list, required);
+        picker.input = typed;
+        self.picker = Some(picker);
+        self.mode = Mode::Picker;
+    }
+
+    pub(crate) fn view_list(&self) -> Option<&ViewList> {
+        self.snapshot()?.views.get(&self.current_view()?.id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::MemoryStore;
+    use crate::ui::fixtures::{code, key, snapshot};
+    use crossterm::event::KeyCode;
+
+    fn app() -> App {
+        App::new(
+            Box::new(MemoryStore::new(Some(snapshot()))),
+            Keymap::defaults(),
+            Theme::plain(),
+        )
+    }
+
+    fn selected_id(app: &App) -> String {
+        app.selected_item()
+            .map(|i| i.id.0.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn picker_choice_becomes_a_command_and_required_esc_stays_but_ctrl_c_quits() {
+        let mut a = app();
+        a.picker = Some(PickerState::loading(false)); // `B` was pressed
+        a.on_sync(SyncEvent::Projects(vec![ProjectSummary {
+            id: ProjectId::new("x"),
+            board: "acme/7".parse().unwrap(),
+            title: "Sprint".into(),
+            closed: false,
+        }]));
+        assert_eq!(a.mode, Mode::Picker);
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::PickBoard("acme/7".parse().unwrap())]
+        );
+        let mut empty = App::new(
+            Box::new(MemoryStore::new(None)),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        empty.on_sync(SyncEvent::Projects(vec![]));
+        assert_eq!(empty.handle_key(code(KeyCode::Esc)), Vec::<Command>::new());
+        assert_eq!(empty.mode, Mode::Picker);
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(empty.handle_key(ctrl_c), vec![Command::Quit]);
+    }
+
+    #[test]
+    fn a_late_board_list_does_not_reopen_a_cancelled_picker_or_leave_detail() {
+        let list = || {
+            SyncEvent::Projects(vec![ProjectSummary {
+                id: ProjectId::new("x"),
+                board: "acme/7".parse().unwrap(),
+                title: "Sprint".into(),
+                closed: false,
+            }])
+        };
+        let mut a = app();
+        a.picker = Some(PickerState::loading(false));
+        a.mode = Mode::Picker;
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!((a.mode, a.picker.is_none()), (Mode::Normal, true));
+        a.on_sync(list());
+        assert_eq!(a.mode, Mode::Normal, "a cancelled picker stays closed");
+        assert!(a.picker.is_none());
+
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(a.mode, Mode::Detail);
+        a.on_sync(list());
+        assert_eq!(a.mode, Mode::Detail, "the user stays in detail");
+
+        a.picker = Some(PickerState::loading(false));
+        a.mode = Mode::Picker;
+        a.on_sync(list());
+        assert_eq!(
+            a.picker.as_ref().unwrap().visible().len(),
+            1,
+            "a waiting picker fills"
+        );
+    }
+
+    #[test]
+    fn filter_typed_while_loading_survives_the_list_arriving() {
+        let mut a = App::new(
+            Box::new(MemoryStore::new(None)),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        a.picker = Some(PickerState::loading(true));
+        a.mode = Mode::Picker;
+        a.handle_key(key('s'));
+        a.on_sync(SyncEvent::Projects(vec![]));
+        assert_eq!(a.picker.as_ref().unwrap().input, "s");
+    }
+
+    #[test]
+    fn moves_through_table_rows() {
+        let mut a = app();
+        assert_eq!(selected_id(&a), "a");
+        a.handle_key(key('j'));
+        a.handle_key(key('j'));
+        assert_eq!(selected_id(&a), "c");
+        a.handle_key(code(KeyCode::End));
+        assert_eq!(selected_id(&a), "e");
+        a.handle_key(key('j'));
+        assert_eq!(selected_id(&a), "e", "stops at the end");
+    }
+
+    #[test]
+    fn switching_views_saves_and_requests_filtered_ids() {
+        let mut a = app();
+        let cmds = a.handle_key(code(KeyCode::Tab));
+        assert_eq!(a.current_view().unwrap().name, "Board");
+        assert!(cmds.contains(&Command::SaveLastView(ViewId::new("V_board"))));
+        let cmds = a.handle_key(code(KeyCode::Tab));
+        assert!(cmds.contains(&Command::FetchViewIds {
+            view: ViewId::new("V_bugs"),
+            filter: "label:bug".into()
+        }));
+        assert!(a.view_items().is_none(), "filtered view has no ids yet");
+    }
+
+    #[test]
+    fn board_navigation_moves_between_columns() {
+        let mut a = app();
+        a.handle_key(code(KeyCode::Tab));
+        assert_eq!(a.layout().0, Layout::Board);
+        assert_eq!(selected_id(&a), "a");
+        a.handle_key(key('l'));
+        assert_eq!(selected_id(&a), "b");
+        a.handle_key(key('l'));
+        a.handle_key(key('l'));
+        assert_eq!(selected_id(&a), "e", "No Status column");
+        a.handle_key(key('h'));
+        assert_eq!(selected_id(&a), "d");
+    }
+
+    #[test]
+    fn left_and_right_skip_empty_board_columns() {
+        use crate::model::field::{FieldKind, OptionColor, SelectOption};
+        use crate::model::ids::OptionId;
+        // Two empty options between the first and second columns.
+        let mut snap = snapshot();
+        let status = snap
+            .project
+            .fields
+            .iter_mut()
+            .find(|f| f.name == "Status")
+            .unwrap();
+        let FieldKind::SingleSelect { options } = &mut status.kind else {
+            panic!("Status is single-select")
+        };
+        for (i, name) in ["Empty one", "Empty two"].into_iter().enumerate() {
+            options.insert(
+                1 + i,
+                SelectOption {
+                    id: OptionId::new(format!("o_empty{i}")),
+                    name: name.into(),
+                    color: OptionColor::Gray,
+                },
+            );
+        }
+        let mut a = App::new(
+            Box::new(MemoryStore::new(Some(snap))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        a.handle_key(code(KeyCode::Tab));
+        assert_eq!(a.layout().0, Layout::Board);
+        assert_eq!(selected_id(&a), "a");
+        a.handle_key(key('l'));
+        assert_eq!(selected_id(&a), "b", "skipped both empty columns");
+        a.handle_key(key('h'));
+        assert_eq!(selected_id(&a), "a", "and back over them");
+        a.handle_key(key('h'));
+        assert_eq!(
+            selected_id(&a),
+            "a",
+            "nothing populated further left: stays"
+        );
+    }
+
+    #[test]
+    fn the_board_hides_status_columns_its_filter_excludes() {
+        let mut snap = snapshot();
+        snap.project.views[1].filter = "-status:Done,\"In Progress\"".into();
+        let mut a = App::new(
+            Box::new(MemoryStore::new(Some(snap))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        a.select_view(&ViewId::new("V_board"));
+        a.on_sync(SyncEvent::ViewIds {
+            view: ViewId::new("V_board"),
+            filter: "-status:Done,\"In Progress\"".into(),
+            list: ViewList {
+                ids: vec![ItemId::new("a"), ItemId::new("c"), ItemId::new("e")],
+                total: 3,
+                truncated: false,
+            },
+        });
+        let titles: Vec<String> = a
+            .board_columns()
+            .iter()
+            .map(|c| c.bucket.title.clone())
+            .collect();
+        assert_eq!(titles, ["Todo", "No Status"]);
+        a.handle_key(key('l'));
+        assert_eq!(selected_id(&a), "e", "moves straight to No Status");
+    }
+
+    #[test]
+    fn board_cards_show_the_views_fields_but_not_its_column_or_lane_field() {
+        let mut a = App::new(
+            Box::new(MemoryStore::new(Some(snapshot()))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        a.select_view(&ViewId::new("V_board"));
+        let names: Vec<&str> = a.card_fields().iter().map(|f| f.name.as_str()).collect();
+        // Status is the column field and Priority the lane field.
+        assert_eq!(names, ["Linked pull requests", "Created"]);
+    }
+
+    #[test]
+    fn layout_toggle_is_per_view() {
+        let mut a = app();
+        a.handle_key(key('L'));
+        assert_eq!(a.layout().0, Layout::Board);
+        a.handle_key(code(KeyCode::Tab));
+        a.handle_key(code(KeyCode::BackTab));
+        assert_eq!(a.layout().0, Layout::Board, "remembered for the session");
+    }
+
+    #[test]
+    fn toggling_the_layout_saves_it_and_toggling_back_clears_it() {
+        let mut a = app();
+        let cmds = a.handle_key(key('L'));
+        assert_eq!(
+            cmds,
+            vec![Command::SaveLayout {
+                view: ViewId::new("V_table"),
+                layout: Layout::Board,
+                github_layout: Layout::Table,
+            }]
+        );
+        let cmds = a.handle_key(key('L'));
+        assert_eq!(
+            cmds,
+            vec![Command::ClearLayout {
+                view: ViewId::new("V_table")
+            }]
+        );
+        assert_eq!(a.layout().0, Layout::Table);
+    }
+
+    #[test]
+    fn quick_search_filters_live_and_esc_clears() {
+        let mut a = app();
+        a.handle_key(key('/'));
+        assert_eq!(a.mode, Mode::Search);
+        for c in "emoji".chars() {
+            a.handle_key(key(c));
+        }
+        assert_eq!(a.view_items().unwrap().len(), 1);
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(a.mode, Mode::Normal);
+        assert_eq!(a.view_items().unwrap().len(), 1, "committed");
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!(
+            a.view_items().unwrap().len(),
+            5,
+            "esc clears a committed search"
+        );
+    }
+
+    #[test]
+    fn filter_edit_requests_ids_and_empty_filter_shows_all() {
+        let mut a = app();
+        a.handle_key(key('f'));
+        assert_eq!(a.mode, Mode::Filter);
+        for c in "label:bug".chars() {
+            a.handle_key(key(c));
+        }
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert_eq!(
+            cmds,
+            vec![Command::FetchViewIds {
+                view: ViewId::new("V_table"),
+                filter: "label:bug".into()
+            }]
+        );
+        assert_eq!(a.effective_filter(), "label:bug");
+        a.on_sync(SyncEvent::ViewIds {
+            view: ViewId::new("V_table"),
+            filter: "label:bug".into(),
+            list: ViewList {
+                ids: vec![ItemId::new("a")],
+                total: 1,
+                truncated: false,
+            },
+        });
+        assert_eq!(a.view_items().unwrap().len(), 1);
+    }
+
+    fn type_text(a: &mut App, text: &str) {
+        for c in text.chars() {
+            a.handle_key(key(c));
+        }
+    }
+
+    #[test]
+    fn f_edits_a_local_filter_added_to_the_github_one() {
+        let mut a = app();
+        let bugs = ViewId::new("V_bugs");
+        a.select_view(&bugs);
+        a.handle_key(key('f'));
+        assert_eq!(a.input, "", "the GitHub filter is not in the input");
+        type_text(&mut a, " assignee:x ");
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        let fetch = |filter: &str| {
+            vec![Command::FetchViewIds {
+                view: bugs.clone(),
+                filter: filter.into(),
+            }]
+        };
+        assert_eq!(cmds, fetch("label:bug assignee:x"));
+        assert_eq!(a.effective_filter(), "label:bug assignee:x");
+        assert_eq!(a.extra_filter(), Some("assignee:x"));
+
+        a.handle_key(key('f'));
+        assert_eq!(
+            a.input, "assignee:x",
+            "pre-filled with the local filter only"
+        );
+        a.handle_key(key('y'));
+        assert!(a.handle_key(code(KeyCode::Esc)).is_empty());
+        assert_eq!(a.effective_filter(), "label:bug assignee:x", "esc cancels");
+
+        a.handle_key(key('f'));
+        for _ in 0.."assignee:x".len() {
+            a.handle_key(code(KeyCode::Backspace));
+        }
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), fetch("label:bug"));
+        assert_eq!(a.effective_filter(), "label:bug");
+        assert_eq!(a.extra_filter(), None, "an empty input clears it");
+    }
+
+    #[test]
+    fn x_clears_the_local_filter_and_does_nothing_without_one() {
+        let mut a = app();
+        let bugs = ViewId::new("V_bugs");
+        a.select_view(&bugs);
+        assert!(a.handle_key(key('x')).is_empty());
+        assert_eq!(a.effective_filter(), "label:bug");
+        a.handle_key(key('f'));
+        type_text(&mut a, "assignee:x");
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(
+            a.handle_key(key('x')),
+            vec![Command::FetchViewIds {
+                view: bugs,
+                filter: "label:bug".into()
+            }]
+        );
+        assert_eq!(a.extra_filter(), None);
+
+        // On a view without a GitHub filter, clearing shows the whole board again.
+        let mut b = app();
+        b.handle_key(key('f'));
+        type_text(&mut b, "label:bug");
+        b.handle_key(code(KeyCode::Enter));
+        assert!(b.view_items().is_none());
+        assert!(b.handle_key(key('x')).is_empty());
+        assert_eq!(b.view_items().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn a_late_list_for_the_github_filter_alone_is_dropped_once_a_local_one_is_added() {
+        let mut a = app();
+        let bugs = ViewId::new("V_bugs");
+        a.select_view(&bugs);
+        a.handle_key(key('f'));
+        type_text(&mut a, "assignee:x");
+        a.handle_key(code(KeyCode::Enter));
+        let ids = |filter: &str, id: &str| SyncEvent::ViewIds {
+            view: bugs.clone(),
+            filter: filter.into(),
+            list: ViewList {
+                ids: vec![ItemId::new(id)],
+                total: 1,
+                truncated: false,
+            },
+        };
+        a.on_sync(ids("label:bug", "a"));
+        assert!(a.view_items().is_none(), "stale list dropped");
+        a.on_sync(ids("label:bug assignee:x", "c"));
+        assert_eq!(selected_id(&a), "c");
+    }
+
+    #[test]
+    fn enter_opens_detail_and_esc_closes_it() {
+        let mut a = app();
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert_eq!(
+            cmds,
+            vec![Command::LoadDetail {
+                item: ItemId::new("a"),
+                before: None
+            }]
+        );
+        assert_eq!(a.mode, Mode::Detail);
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!(a.mode, Mode::Normal);
+        assert!(a.detail.is_none());
+    }
+
+    #[test]
+    fn following_an_issue_ref_on_the_board_opens_that_item() {
+        let mut a = app();
+        a.handle_key(code(KeyCode::Enter));
+        let detail = ItemDetail {
+            body: "see #2 and #99".into(),
+            ..Default::default()
+        };
+        a.on_sync(SyncEvent::Detail {
+            item: ItemId::new("a"),
+            detail,
+            older: false,
+        });
+        a.handle_key(code(KeyCode::Tab));
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert_eq!(
+            cmds,
+            vec![Command::LoadDetail {
+                item: ItemId::new("b"),
+                before: None
+            }]
+        );
+        a.on_sync(SyncEvent::Detail {
+            item: ItemId::new("b"),
+            detail: ItemDetail {
+                body: "back to #99".into(),
+                ..Default::default()
+            },
+            older: false,
+        });
+        a.handle_key(code(KeyCode::Tab));
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert_eq!(
+            cmds,
+            vec![Command::OpenUrl(
+                "https://github.com/tviles/t/issues/99".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn group_rows_collapse() {
+        let mut a = app();
+        let p = a.project().unwrap().clone();
+        let mut snap = snapshot();
+        snap.project.views[0].group_by = vec![p.fields[1].id.clone()];
+        a.store.apply(StoreUpdate::Replace(snap));
+        assert!(matches!(a.table_rows()[0], Row::Group { .. }));
+        let before = a.table_rows().len();
+        a.handle_key(key('z'));
+        assert_eq!(a.table_rows().len(), before - 2, "Todo's two items hidden");
+    }
+
+    #[test]
+    fn sync_events_update_status() {
+        let mut a = app();
+        a.status.stale = true;
+        a.on_sync(SyncEvent::ItemsPage {
+            items: vec![],
+            loaded: 100,
+            total: 300,
+        });
+        assert_eq!(a.status.loading, Some((100, 300)));
+        a.on_sync(SyncEvent::ItemsComplete {
+            items: crate::ui::fixtures::items(),
+            fetched_at: "t".into(),
+            total: 3000,
+            truncated: true,
+        });
+        assert!(!a.status.stale && a.status.loading.is_none());
+        assert!(
+            a.status
+                .notes
+                .iter()
+                .any(|n| n.contains("loaded 5 of 3000"))
+        );
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::Incremental,
+            error: GithubError::Network("offline".into()),
+        });
+        assert!(
+            a.status
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("refresh failed")
+        );
+    }
+
+    #[test]
+    fn auth_failures_switch_to_the_setup_screen() {
+        let mut a = app();
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::FullLoad,
+            error: GithubError::InsufficientScopes {
+                missing: vec!["read:project".into()],
+            },
+        });
+        assert_eq!(a.mode, Mode::Setup);
+        assert!(
+            a.setup
+                .as_deref()
+                .unwrap()
+                .contains("gh auth refresh -s project")
+        );
+        assert_eq!(a.handle_key(key('r')), vec![Command::Retry]);
+    }
+
+    #[test]
+    fn filtered_views_revalidate_on_switch_and_after_loads() {
+        let mut a = app();
+        a.select_view(&ViewId::new("V_bugs"));
+        let list = ViewList {
+            ids: vec![ItemId::new("a")],
+            total: 1,
+            truncated: false,
+        };
+        a.on_sync(SyncEvent::ViewIds {
+            view: ViewId::new("V_bugs"),
+            filter: "label:bug".into(),
+            list,
+        });
+        let fetch = Command::FetchViewIds {
+            view: ViewId::new("V_bugs"),
+            filter: "label:bug".into(),
+        };
+        a.handle_key(code(KeyCode::Tab));
+        assert!(
+            a.handle_key(code(KeyCode::BackTab)).contains(&fetch),
+            "a cached list is still revalidated"
+        );
+        assert_eq!(
+            a.view_items().unwrap().len(),
+            1,
+            "the cached list shows meanwhile"
+        );
+        let done = SyncEvent::ItemsComplete {
+            items: crate::ui::fixtures::items(),
+            fetched_at: "t".into(),
+            total: 5,
+            truncated: false,
+        };
+        assert_eq!(a.on_sync(done), vec![fetch.clone()]);
+        assert!(
+            a.on_sync(SyncEvent::ItemsUpdated {
+                items: vec![],
+                fetched_at: "t".into()
+            })
+            .is_empty()
+        );
+        let changed = SyncEvent::ItemsUpdated {
+            items: vec![crate::ui::fixtures::items().remove(0)],
+            fetched_at: "t".into(),
+        };
+        assert_eq!(a.on_sync(changed), vec![fetch]);
+    }
+
+    #[test]
+    fn the_current_view_survives_views_reordered_on_github() {
+        let mut a = app();
+        a.select_view(&ViewId::new("V_bugs"));
+        let mut project = a.project().unwrap().clone();
+        project.views.reverse();
+        a.on_sync(SyncEvent::Project(project));
+        assert_eq!(a.current_view().unwrap().id, ViewId::new("V_bugs"));
+    }
+
+    #[test]
+    fn q_quits_from_anywhere_but_input_modes() {
+        let mut a = app();
+        a.handle_key(key('/'));
+        a.handle_key(key('q'));
+        assert!(!a.quit, "q is text while searching");
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!(a.handle_key(key('q')), vec![Command::Quit]);
+        assert!(a.quit);
+    }
+
+    #[test]
+    fn esc_on_the_setup_screen_does_not_quit() {
+        let mut a = app();
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::FullLoad,
+            error: GithubError::NoToken,
+        });
+        assert!(a.handle_key(code(KeyCode::Esc)).is_empty());
+        assert!(!a.quit);
+        assert_eq!(a.handle_key(key('q')), vec![Command::Quit]);
+        assert!(a.quit);
+    }
+
+    #[test]
+    fn failed_full_loads_clear_the_loading_indicator() {
+        let mut a = app();
+        a.on_sync(SyncEvent::ItemsPage {
+            items: vec![],
+            loaded: 1,
+            total: 9,
+        });
+        assert!(a.status.loading.is_some());
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::FullLoad,
+            error: GithubError::Network("offline".into()),
+        });
+        assert!(a.status.loading.is_none());
+        assert!(a.status.error.is_some());
+    }
+
+    #[test]
+    fn late_view_ids_for_an_old_filter_are_dropped() {
+        let mut a = app();
+        let list = |id: &str| ViewList {
+            ids: vec![ItemId::new(id)],
+            total: 1,
+            truncated: false,
+        };
+        let table = ViewId::new("V_table");
+        a.handle_key(key('f'));
+        for c in "label:bug".chars() {
+            a.handle_key(key(c));
+        }
+        a.handle_key(code(KeyCode::Enter));
+        a.handle_key(key('f'));
+        for _ in 0.."label:bug".len() {
+            a.handle_key(code(KeyCode::Backspace));
+        }
+        for c in "label:x".chars() {
+            a.handle_key(key(c));
+        }
+        a.handle_key(code(KeyCode::Enter));
+        a.on_sync(SyncEvent::ViewIds {
+            view: table.clone(),
+            filter: "label:x".into(),
+            list: list("b"),
+        });
+        a.on_sync(SyncEvent::ViewIds {
+            view: table,
+            filter: "label:bug".into(),
+            list: list("a"),
+        });
+        let ids: Vec<_> = a
+            .view_items()
+            .unwrap()
+            .iter()
+            .map(|i| i.id.0.clone())
+            .collect();
+        assert_eq!(ids, vec!["b"]);
+    }
+
+    #[test]
+    fn an_unchanged_filter_keeps_the_cached_list() {
+        let mut a = app();
+        a.select_view(&ViewId::new("V_bugs"));
+        let list = ViewList {
+            ids: vec![ItemId::new("a")],
+            total: 1,
+            truncated: false,
+        };
+        a.on_sync(SyncEvent::ViewIds {
+            view: ViewId::new("V_bugs"),
+            filter: "label:bug".into(),
+            list,
+        });
+        a.handle_key(key('f'));
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(a.view_items().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_detail_failure_allows_loading_older_comments_again() {
+        let mut a = app();
+        a.handle_key(code(KeyCode::Enter));
+        let detail = ItemDetail {
+            older_cursor: Some("c".into()),
+            ..Default::default()
+        };
+        a.on_sync(SyncEvent::Detail {
+            item: ItemId::new("a"),
+            detail,
+            older: false,
+        });
+        let older = Command::LoadDetail {
+            item: ItemId::new("a"),
+            before: Some("c".into()),
+        };
+        assert_eq!(a.handle_key(key('P')), vec![older.clone()]);
+        assert!(a.handle_key(key('P')).is_empty(), "already loading");
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::Detail(ItemId::new("a")),
+            error: GithubError::Network("offline".into()),
+        });
+        assert_eq!(a.handle_key(key('P')), vec![older]);
+    }
+
+    #[test]
+    fn background_loads_keep_the_same_item_selected() {
+        let mut a = app();
+        a.handle_key(key('j'));
+        a.handle_key(key('j'));
+        assert_eq!(selected_id(&a), "c");
+        let mut all = crate::ui::fixtures::items();
+        all.insert(0, crate::model::item::tests::issue("0", 50, "Earlier"));
+        a.on_sync(SyncEvent::ItemsComplete {
+            items: all,
+            fetched_at: "t".into(),
+            total: 6,
+            truncated: false,
+        });
+        assert_eq!(a.table_rows().len(), 6);
+        assert_eq!(a.table_selected, 3, "the index moved with the insert");
+        assert_eq!(
+            selected_id(&a),
+            "c",
+            "the cursor follows the item, not the index"
+        );
+    }
+
+    #[test]
+    fn collapsing_a_group_selects_its_header() {
+        let mut a = app();
+        let p = a.project().unwrap().clone();
+        let mut snap = snapshot();
+        snap.project.views[0].group_by = vec![p.fields[1].id.clone()];
+        a.store.apply(StoreUpdate::Replace(snap));
+        a.handle_key(key('j'));
+        a.handle_key(key('j'));
+        assert!(matches!(a.table_rows()[2], Row::Item(_)));
+        a.handle_key(key('z'));
+        assert_eq!(a.table_selected, 0);
+        assert!(matches!(
+            a.table_rows()[a.table_selected],
+            Row::Group { .. }
+        ));
+    }
+
+    #[test]
+    fn clearing_a_search_returns_to_the_original_selection() {
+        let mut a = app();
+        a.handle_key(key('j'));
+        a.handle_key(key('j'));
+        assert_eq!(selected_id(&a), "c");
+        a.handle_key(key('/'));
+        for c in "crash".chars() {
+            a.handle_key(key(c));
+        }
+        assert_ne!(selected_id(&a), "c");
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!(selected_id(&a), "c");
+    }
+}

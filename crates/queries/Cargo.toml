@@ -1,0 +1,9 @@
+[package]
+name = "project-boards-queries"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+graphql_client = "0.16"
+serde = { version = "1", features = ["derive"] }

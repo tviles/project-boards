@@ -1,0 +1,396 @@
+{
+  "data": {
+    "organization": null,
+    "user": {
+      "projectV2": {
+        "fields": {
+          "nodes": [
+            {
+              "__typename": "ProjectV2Field",
+              "dataType": "TITLE",
+              "id": "PVTF_lAHOADq2Kc4Bl819zhknr28",
+              "name": "Title"
+            },
+            {
+              "__typename": "ProjectV2Field",
+              "dataType": "ASSIGNEES",
+              "id": "PVTF_lAHOADq2Kc4Bl819zhknr3A",
+              "name": "Assignees"
+            },
+            {
+              "__typename": "ProjectV2SingleSelectField",
+              "dataType": "SINGLE_SELECT",
+              "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E",
+              "name": "Status",
+              "options": [
+                {
+                  "color": "GREEN",
+                  "id": "f75ad846",
+                  "name": "Todo"
+                },
+                {
+                  "color": "YELLOW",
+                  "id": "47fc9ee4",
+                  "name": "In Progress"
+                },
+                {
+                  "color": "PURPLE",
+                  "id": "98236657",
+                  "name": "Done"
+                }
+              ]
+            },
+            {
+              "__typename": "ProjectV2Field",
+              "dataType": "LABELS",
+              "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I",
+              "name": "Labels"
+            },
+            {
+              "__typename": "ProjectV2Field",
+              "dataType": "LINKED_PULL_REQUESTS",
+              "id": "PVTF_lAHOADq2Kc4Bl819zhknr3M",
+              "name": "Linked pull requests"
+            },
+            {
+              "__typename": "ProjectV2Field",
+              "dataType": "MILESTONE",
+              "id": "PVTF_lAHOADq2Kc4Bl819zhknr3Q",
+              "name": "Milestone"
+            },
+            {
+              "__typename": "ProjectV2Field",
+              "dataType": "REPOSITORY",
+              "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U",
+              "name": "Repository"
+            },
+            {
+              "__typename": "ProjectV2Field",
+              "dataType": "REVIEWERS",
+              "id": "PVTF_lAHOADq2Kc4Bl819zhknr3c",
+              "name": "Reviewers"
+            },
+            {
+              "__typename": "ProjectV2Field",
+              "dataType": "PARENT_ISSUE",
+              "id": "PVTF_lAHOADq2Kc4Bl819zhknr3g",
+              "name": "Parent issue"
+            },
+            {
+              "__typename": "ProjectV2Field",
+              "dataType": "SUB_ISSUES_PROGRESS",
+              "id": "PVTF_lAHOADq2Kc4Bl819zhknr3k",
+              "name": "Sub-issues progress"
+            },
+            {
+              "__typename": "ProjectV2Field",
+              "dataType": "CREATED",
+              "id": "PVTF_lAHOADq2Kc4Bl819zhknr3o",
+              "name": "Created"
+            },
+            {
+              "__typename": "ProjectV2Field",
+              "dataType": "UPDATED",
+              "id": "PVTF_lAHOADq2Kc4Bl819zhknr3s",
+              "name": "Updated"
+            },
+            {
+              "__typename": "ProjectV2Field",
+              "dataType": "CLOSED",
+              "id": "PVTF_lAHOADq2Kc4Bl819zhknr3w",
+              "name": "Closed"
+            },
+            {
+              "__typename": "ProjectV2SingleSelectField",
+              "dataType": "SINGLE_SELECT",
+              "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k",
+              "name": "Priority",
+              "options": [
+                {
+                  "color": "RED",
+                  "id": "86d2debf",
+                  "name": "P0"
+                },
+                {
+                  "color": "ORANGE",
+                  "id": "c8562a4b",
+                  "name": "P1"
+                },
+                {
+                  "color": "GRAY",
+                  "id": "7aafde11",
+                  "name": "P2"
+                }
+              ]
+            },
+            {
+              "__typename": "ProjectV2Field",
+              "dataType": "NUMBER",
+              "id": "PVTF_lAHOADq2Kc4Bl819zhknr58",
+              "name": "Size"
+            },
+            {
+              "__typename": "ProjectV2Field",
+              "dataType": "DATE",
+              "id": "PVTF_lAHOADq2Kc4Bl819zhknr6A",
+              "name": "Due"
+            },
+            {
+              "__typename": "ProjectV2Field",
+              "dataType": "TEXT",
+              "id": "PVTF_lAHOADq2Kc4Bl819zhknr68",
+              "name": "Notes"
+            },
+            {
+              "__typename": "ProjectV2IterationField",
+              "configuration": {
+                "completedIterations": [],
+                "iterations": [
+                  {
+                    "duration": 14,
+                    "id": "ab9993d6",
+                    "startDate": "2026-10-06",
+                    "title": "Sprint 1"
+                  },
+                  {
+                    "duration": 14,
+                    "id": "eab468ee",
+                    "startDate": "2026-10-20",
+                    "title": "Sprint 2"
+                  },
+                  {
+                    "duration": 14,
+                    "id": "0f3cc452",
+                    "startDate": "2026-11-03",
+                    "title": "Sprint 3"
+                  }
+                ]
+              },
+              "dataType": "ITERATION",
+              "id": "PVTIF_lAHOADq2Kc4Bl819zhknr7A",
+              "name": "Sprint"
+            },
+            {
+              "__typename": "ProjectV2MultiSelectField",
+              "dataType": "MULTI_SELECT",
+              "id": "PVTMSF_lAHOADq2Kc4Bl819zhknr7E",
+              "multiSelectOptions": [
+                {
+                  "color": "BLUE",
+                  "id": "4dba8577",
+                  "name": "api"
+                },
+                {
+                  "color": "GREEN",
+                  "id": "6eaf9169",
+                  "name": "ui"
+                },
+                {
+                  "color": "PURPLE",
+                  "id": "cf2bdef8",
+                  "name": "docs"
+                }
+              ],
+              "name": "Areas"
+            }
+          ]
+        },
+        "id": "PVT_kwHOADq2Kc4Bl819",
+        "number": 4,
+        "owner": {
+          "__typename": "User",
+          "login": "tviles"
+        },
+        "title": "project-boards testbed",
+        "url": "https://github.com/users/tviles/projects/4",
+        "viewerCanUpdate": true,
+        "views": {
+          "nodes": [
+            {
+              "filter": "",
+              "groupByFields": {
+                "nodes": [
+                  {
+                    "__typename": "ProjectV2IterationField",
+                    "id": "PVTIF_lAHOADq2Kc4Bl819zhknr7A"
+                  }
+                ]
+              },
+              "id": "PVTV_lAHOADq2Kc4Bl819zgL8RSE",
+              "layout": "TABLE_LAYOUT",
+              "name": "View 1",
+              "number": 1,
+              "sortByFields": {
+                "nodes": [
+                  {
+                    "direction": "ASC",
+                    "field": {
+                      "__typename": "ProjectV2SingleSelectField",
+                      "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k"
+                    }
+                  }
+                ]
+              },
+              "verticalGroupByFields": {
+                "nodes": []
+              },
+              "visibleFields": {
+                "nodes": [
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3A"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3M"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3k"
+                  }
+                ]
+              }
+            },
+            {
+              "filter": null,
+              "groupByFields": {
+                "nodes": []
+              },
+              "id": "PVTV_lAHOADq2Kc4Bl819zgL8RVA",
+              "layout": "BOARD_LAYOUT",
+              "name": "Board",
+              "number": 2,
+              "sortByFields": {
+                "nodes": []
+              },
+              "verticalGroupByFields": {
+                "nodes": [
+                  {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+                  }
+                ]
+              },
+              "visibleFields": {
+                "nodes": [
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3A"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3M"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3k"
+                  }
+                ]
+              }
+            },
+            {
+              "filter": "label:bug",
+              "groupByFields": {
+                "nodes": []
+              },
+              "id": "PVTV_lAHOADq2Kc4Bl819zgL8RVE",
+              "layout": "TABLE_LAYOUT",
+              "name": "Bugs",
+              "number": 3,
+              "sortByFields": {
+                "nodes": []
+              },
+              "verticalGroupByFields": {
+                "nodes": []
+              },
+              "visibleFields": {
+                "nodes": [
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3A"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3M"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3k"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr5k"
+                  }
+                ]
+              }
+            },
+            {
+              "filter": "label:bug -status:Done",
+              "groupByFields": {
+                "nodes": []
+              },
+              "id": "PVTV_lAHOADq2Kc4Bl819zgL8RVM",
+              "layout": "TABLE_LAYOUT",
+              "name": "Probe",
+              "number": 4,
+              "sortByFields": {
+                "nodes": []
+              },
+              "verticalGroupByFields": {
+                "nodes": []
+              },
+              "visibleFields": {
+                "nodes": [
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3A"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3M"
+                  },
+                  {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3k"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

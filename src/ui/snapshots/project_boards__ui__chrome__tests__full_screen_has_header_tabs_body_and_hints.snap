@@ -1,0 +1,16 @@
+---
+source: src/ui/chrome.rs
+expression: screen
+---
+Testbed · tviles/3
+ Table   Board   Bugs  ▤ table
+Title                                                                        Status     Assignees
+#1 Fix crash                                                                 Todo       @tviles
+#2 Add iteration columns                                                     In Progre…
+#3 Emoji 🚀 title 中文 that is quite long                                    Todo       @tviles
+Draft idea                                                                   Done
+#5 Old option                                                                Blocked
+
+
+
+? help · / search · f filter · L layout · q quit

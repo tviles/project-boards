@@ -1,0 +1,21 @@
+{
+  "_handwritten": "Redacted items and unknown types cannot be produced on demand in the testbed.",
+  "data": {
+    "node": {
+      "items": {
+        "totalCount": 2,
+        "pageInfo": { "hasNextPage": false, "endCursor": null },
+        "nodes": [
+          { "id": "PVTI_redacted", "type": "REDACTED", "isArchived": false, "updatedAt": "2026-10-01T00:00:00Z",
+            "content": null, "fieldValues": { "nodes": [] } },
+          { "id": "PVTI_future", "type": "ISSUE", "isArchived": false, "updatedAt": "2026-10-01T00:00:00Z",
+            "content": { "__typename": "Issue", "number": 1, "title": "t", "url": "u", "state": "OPEN",
+                         "repository": { "nameWithOwner": "tviles/t" },
+                         "labels": { "nodes": [] }, "assignees": { "nodes": [] },
+                         "closedByPullRequestsReferences": { "nodes": [] } },
+            "fieldValues": { "nodes": [ { "__typename": "ProjectV2ItemFieldFromTheFuture", "field": { "id": "F" } } ] } }
+        ]
+      }
+    }
+  }
+}

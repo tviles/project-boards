@@ -779,9 +779,16 @@ A tag `v*` builds and publishes. A manual run with `dry_run` builds all four tar
 
 ```yaml
 name: release
+# Three triggers: 1. push a tag (v*) to publish, 2. PR workflow_dispatch with dry_run to test the build,
+# 3. pull_request on release.yml or Cargo files to run the build matrix automatically (for merge preview).
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -3945,7 +3952,7 @@ git commit -m "Add record mode, the live suite and recorded testbed fixtures"
   - `fsutil::write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()>`.
   - `store::ViewList { ids: Vec<ItemId>, total: usize, truncated: bool }`.
   - `store::BoardSnapshot { version, project, items: BTreeMap<ItemId, Item>, order: Vec<ItemId>, views: BTreeMap<ViewId, ViewList>, fetched_at: Option<String> }` with `new(Project)`, `set_project(Project)`, `upsert_items(Vec<Item>)`, `replace_items(Vec<Item>)`, `set_view_ids(ViewId, ViewList)`, `all_items() -> Vec<&Item>`, `view_items(&ViewId) -> Option<Vec<&Item>>`, `missing_ids(&ViewId) -> Vec<ItemId>`.
-  - `store::{Store, StoreUpdate, MemoryStore}`: `trait Store: Send { fn snapshot(&self) -> Option<&BoardSnapshot>; fn apply(&mut self, update: StoreUpdate); }`; `StoreUpdate::{Replace(BoardSnapshot), Project(Project), UpsertItems(Vec<Item>), ReplaceItems(Vec<Item>), ViewIds { view: ViewId, list: ViewList }, FetchedAt(String)}`; `MemoryStore::new(Option<BoardSnapshot>)`.
+  - `store::{Store, StoreUpdate, MemoryStore}`: `trait Store: Send { fn snapshot(&self) -> Option<&BoardSnapshot>; fn apply(&mut self, update: StoreUpdate); }`; `StoreUpdate::{Replace(BoardSnapshot), Project(Project), UpsertItems(Vec<Item>), ReplaceItems(Vec<Item>), ViewIds { view: ViewId, list: ViewList }, ClearViewIds(ViewId), FetchedAt(String)}`; `MemoryStore::new(Option<BoardSnapshot>)`.
   - `store::cache::{CACHE_VERSION, cache_path(&Path, &BoardRef) -> PathBuf, load_cache(&Path) -> Option<BoardSnapshot>, save_cache(&Path, &BoardSnapshot) -> std::io::Result<()>}`.
 
 - [ ] **Step 1: Write `src/fsutil.rs` with its test**
@@ -4152,6 +4159,7 @@ pub enum StoreUpdate {
     UpsertItems(Vec<Item>),
     ReplaceItems(Vec<Item>),
     ViewIds { view: ViewId, list: ViewList },
+    ClearViewIds(ViewId),
     FetchedAt(String),
 }
 
@@ -5777,8 +5785,8 @@ git commit -m "Add the focus-aware poll scheduler with idle fallback"
 - Produces:
   - `sync::{IncrementalMode::{DateTime, Date, Unsupported}, INCREMENTAL_MODE, incremental_query(IncrementalMode, since: &str) -> Option<String>, SyncTask, SyncEvent, store_update(&SyncEvent) -> Option<StoreUpdate>}`.
   - `SyncTask::{Resolve, FullLoad, Incremental, ViewIds(ViewId), Hydrate, Detail(ItemId), Projects}`.
-  - `SyncEvent::{Project(Project), ItemsPage { items, loaded, total }, ItemsComplete { items, fetched_at, total, truncated }, ItemsUpdated { items, fetched_at }, ViewIds { view, list }, Hydrated(Vec<Item>), RepoProjects(Vec<ProjectSummary>), Projects(Vec<ProjectSummary>), Rate(RateInfo), Failed { task, error }}`. (Task 21 adds `Detail`.)
-  - `sync::syncer::Syncer` with `new(Arc<Github>, mpsc::UnboundedSender<SyncEvent>, max_items: usize, IncrementalMode)` and async `resolve(&BoardRef) -> Option<Project>`, `refresh_project(&Project)`, `full_load(&ProjectId)`, `incremental(&ProjectId, since: &str) -> bool`, `view_ids(&ProjectId, &ViewId, filter: &str, known: &HashSet<ItemId>, hydrate: bool)`, `repo_projects(&RepoSlug)`, `projects(linked: Option<&RepoSlug>)`.
+  - `SyncEvent::{Project(Project), ItemsPage { items, loaded, total }, ItemsComplete { items, fetched_at, total, truncated }, ItemsUpdated { items, fetched_at }, ViewIds { view, filter, list }, Hydrated(Vec<Item>), RepoProjects(Vec<ProjectSummary>), Projects(Vec<ProjectSummary>), Rate(RateInfo), Failed { task, error }}`. (Task 21 adds `Detail`.)
+  - `sync::syncer::Syncer` with `new(Arc<Github>, mpsc::UnboundedSender<SyncEvent>, max_items: usize, IncrementalMode)` and async `resolve(&BoardRef) -> Option<Project>`, `refresh_project(&Project) -> bool`, `full_load(&ProjectId)`, `incremental(&ProjectId, since: &str) -> bool`, `view_ids(&ProjectId, &ViewId, filter: &str, known: &HashSet<ItemId>, hydrate: bool)`, `repo_projects(&RepoSlug)`, `projects(linked: Option<&RepoSlug>)`.
 
 - [ ] **Step 1: Write the failing tests for the pure parts (in `src/sync/mod.rs`)**
 
@@ -5837,7 +5845,7 @@ pub enum IncrementalMode {
 }
 
 /// Set from phase 0 finding 1 (docs/phase0-findings.md).
-pub const INCREMENTAL_MODE: IncrementalMode = IncrementalMode::DateTime;
+pub const INCREMENTAL_MODE: IncrementalMode = IncrementalMode::Date;
 
 pub fn incremental_query(mode: IncrementalMode, since: &str) -> Option<String> {
     match mode {
@@ -5866,7 +5874,7 @@ pub enum SyncEvent {
     /// The whole item set, sent only when every page arrived.
     ItemsComplete { items: Vec<Item>, fetched_at: String, total: usize, truncated: bool },
     ItemsUpdated { items: Vec<Item>, fetched_at: String },
-    ViewIds { view: ViewId, list: ViewList },
+    ViewIds { view: ViewId, filter: String, list: ViewList },
     Hydrated(Vec<Item>),
     /// The boards linked to the pane's repository, for the startup decision.
     RepoProjects(Vec<ProjectSummary>),
@@ -5882,7 +5890,7 @@ pub fn store_update(event: &SyncEvent) -> Option<StoreUpdate> {
         SyncEvent::ItemsPage { items, .. } | SyncEvent::Hydrated(items) => Some(StoreUpdate::UpsertItems(items.clone())),
         SyncEvent::ItemsComplete { items, .. } => Some(StoreUpdate::ReplaceItems(items.clone())),
         SyncEvent::ItemsUpdated { items, .. } => Some(StoreUpdate::UpsertItems(items.clone())),
-        SyncEvent::ViewIds { view, list } => Some(StoreUpdate::ViewIds { view: view.clone(), list: list.clone() }),
+        SyncEvent::ViewIds { view, list, .. } => Some(StoreUpdate::ViewIds { view: view.clone(), list: list.clone() }),
         SyncEvent::RepoProjects(_) | SyncEvent::Projects(_) | SyncEvent::Rate(_) | SyncEvent::Failed { .. } => None,
     }
 }
@@ -5895,7 +5903,7 @@ Expected: 2 tests PASS.
 
 - [ ] **Step 3: Apply phase 0 finding 1**
 
-Set `INCREMENTAL_MODE` in `src/sync/mod.rs` to the value recorded in `docs/phase0-findings.md` (`DateTime`, `Date` or `Unsupported`).
+Set `INCREMENTAL_MODE` in `src/sync/mod.rs` to the value recorded in `docs/phase0-findings.md` (`DateTime`, `Date` or `Unsupported`). Phase 0 recorded `Date`, so the constant in Step 2's code is already `IncrementalMode::Date`.
 
 - [ ] **Step 4: Write the failing syncer tests (bottom of `src/sync/syncer.rs`)**
 
@@ -6075,10 +6083,17 @@ impl Syncer {
         }
     }
 
-    pub async fn refresh_project(&self, project: &Project) {
+    /// `false` after a failure (already reported as `Failed { Resolve }`); the job must stop.
+    pub async fn refresh_project(&self, project: &Project) -> bool {
         match self.gh.fetch_project(&project.id, &project.board).await {
-            Ok(p) => self.send(SyncEvent::Project(p)),
-            Err(e) => self.fail(SyncTask::Resolve, e),
+            Ok(p) => {
+                self.send(SyncEvent::Project(p));
+                true
+            }
+            Err(e) => {
+                self.fail(SyncTask::Resolve, e);
+                false
+            }
         }
     }
 
@@ -6154,7 +6169,7 @@ impl Syncer {
         };
         ids.truncate(self.max_items);
         let missing: Vec<ItemId> = ids.iter().filter(|id| !known.contains(*id)).cloned().collect();
-        self.send(SyncEvent::ViewIds { view: view.clone(), list: ViewList { ids, total, truncated } });
+        self.send(SyncEvent::ViewIds { view: view.clone(), filter: filter.to_string(), list: ViewList { ids, total, truncated } });
         if !hydrate {
             return;
         }
@@ -8490,7 +8505,7 @@ mod tests {
         let cmds = a.handle_key(code(KeyCode::Enter));
         assert_eq!(cmds, vec![Command::FetchViewIds { view: ViewId::new("V_table"), filter: "label:bug".into() }]);
         assert_eq!(a.effective_filter(), "label:bug");
-        a.on_sync(SyncEvent::ViewIds { view: ViewId::new("V_table"), list: ViewList { ids: vec![ItemId::new("a")], total: 1, truncated: false } });
+        a.on_sync(SyncEvent::ViewIds { view: ViewId::new("V_table"), filter: "label:bug".into(), list: ViewList { ids: vec![ItemId::new("a")], total: 1, truncated: false } });
         assert_eq!(a.view_items().unwrap().len(), 1);
     }
 
@@ -8560,7 +8575,7 @@ mod tests {
         let mut a = app();
         a.select_view(&ViewId::new("V_bugs"));
         let list = ViewList { ids: vec![ItemId::new("a")], total: 1, truncated: false };
-        a.on_sync(SyncEvent::ViewIds { view: ViewId::new("V_bugs"), list });
+        a.on_sync(SyncEvent::ViewIds { view: ViewId::new("V_bugs"), filter: "label:bug".into(), list });
         let fetch = Command::FetchViewIds { view: ViewId::new("V_bugs"), filter: "label:bug".into() };
         a.handle_key(code(KeyCode::Tab));
         assert!(a.handle_key(code(KeyCode::BackTab)).contains(&fetch), "a cached list is still revalidated");
@@ -9208,7 +9223,7 @@ pub struct PickerState {
     pub input: String,
     pub selected: usize,
     pub loading: bool,
-    /// No board is open yet: cancelling quits instead of returning to a board.
+    /// No board is open yet: Esc does nothing (Ctrl+C quits), since there is no board to return to.
     pub required: bool,
 }
 
@@ -9242,6 +9257,7 @@ impl PickerState {
 
     pub fn handle(&mut self, key: &KeyEvent) -> PickerOutcome {
         match key.code {
+            KeyCode::Esc if self.required => {}
             KeyCode::Esc => return PickerOutcome::Cancel,
             KeyCode::Enter => {
                 if let Some(p) = self.visible().get(self.selected) {
@@ -9280,7 +9296,7 @@ pub fn render_picker(frame: &mut Frame, area: Rect, state: &PickerState, theme: 
         let style = if i == state.selected { theme.selected() } else { ratatui::style::Style::default() };
         lines.push(Line::styled(truncate_to_width(&format!("{}  {}", p.board, p.title), w.saturating_sub(2) as usize), style));
     }
-    let title = if state.required { " pick a board · esc quits " } else { " switch board · esc cancels " };
+    let title = if state.required { " pick a board · ctrl+c quits " } else { " switch board · esc cancels " };
     frame.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)), rect);
 }
 
@@ -9302,6 +9318,8 @@ mod tests {
         }
         assert_eq!(p.visible().len(), 1);
         assert_eq!(p.handle(&code(KeyCode::Enter)), PickerOutcome::Chosen("acme/7".parse().unwrap()));
+        assert_eq!(p.handle(&code(KeyCode::Esc)), PickerOutcome::None);
+        p.required = false;
         assert_eq!(p.handle(&code(KeyCode::Esc)), PickerOutcome::Cancel);
     }
 
@@ -9334,15 +9352,9 @@ Expected: 2 tests PASS.
                 vec![Command::PickBoard(board)]
             }
             crate::ui::picker::PickerOutcome::Cancel => {
-                let required = picker.required;
                 self.picker = None;
                 self.mode = Mode::Normal;
-                if required {
-                    self.quit = true;
-                    vec![Command::Quit]
-                } else {
-                    Vec::new()
-                }
+                Vec::new()
             }
         }
     }
@@ -9358,14 +9370,17 @@ Add this test to the App tests and run it:
 
 ```rust
     #[test]
-    fn picker_choice_becomes_a_command_and_required_cancel_quits() {
+    fn picker_choice_becomes_a_command_and_required_esc_stays_but_ctrl_c_quits() {
         let mut a = app();
         a.on_sync(SyncEvent::Projects(vec![ProjectSummary { id: ProjectId::new("x"), board: "acme/7".parse().unwrap(), title: "Sprint".into(), closed: false }]));
         assert_eq!(a.mode, Mode::Picker);
         assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::PickBoard("acme/7".parse().unwrap())]);
         let mut empty = App::new(Box::new(MemoryStore::new(None)), Keymap::defaults(), Theme::plain());
         empty.on_sync(SyncEvent::Projects(vec![]));
-        assert_eq!(empty.handle_key(code(KeyCode::Esc)), vec![Command::Quit]);
+        assert_eq!(empty.handle_key(code(KeyCode::Esc)), Vec::<Command>::new());
+        assert_eq!(empty.mode, Mode::Picker);
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(empty.handle_key(ctrl_c), vec![Command::Quit]);
     }
 ```
 
@@ -9494,6 +9509,11 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App) {
     app.detail_width = inner.width;
     let (Some(state), Some(item), Some(project)) = (app.detail.as_ref(), app.detail_item(), app.project()) else { return };
     let doc = build_doc(item, project, state, inner.width, &app.theme);
+    let max_scroll = doc.lines.len().saturating_sub(crate::ui::detail::body_height(&doc, inner.height));
+    if let Some(state) = app.detail.as_mut() {
+        state.max_scroll = max_scroll;
+    }
+    let Some(state) = app.detail.as_ref() else { return };
     frame.render_widget(Clear, area);
     frame.render_widget(Block::default().borders(Borders::LEFT), area);
     render_detail(frame, inner, &doc, state, &app.theme);
@@ -9613,6 +9633,8 @@ git commit -m "Add the screen layout, board picker and setup screen"
 
 ### Task 24: Pane controller
 
+> **As shipped:** `src/ui/controller.rs` at the commit that closes Task 24's fix rounds supersedes the code blocks below (the tests there use the old `Input::Sync(..)` / `Effect::Spawn(..)` shapes). Deltas: R30 (`Failed { Resolve }` ends the load; the Refresh job stops after a failed refresh), R31 (generation tagging: `Input::Sync { generation, event }`, `Effect::Spawn { job, generation }` tagged when produced, bump in `open_board`, which also clears `awaiting_repo_projects`), R32 (`poll` retries `Resolve` when a board has no snapshot and nothing is in flight), a failed focus of the other pane opens the board here, persistence rules (an empty `ItemsUpdated` is not saved, `Hydrated` is), and `tracing::warn!` on State/registry write errors.
+
 **Files:**
 - Create: `src/ui/controller.rs`
 - Modify: `src/ui/mod.rs`
@@ -9621,9 +9643,9 @@ git commit -m "Add the screen layout, board picker and setup screen"
 - Consumes: `App`, `Command`, `Mode`, `setup_message` (Task 22); `PickerState` (Task 23); `Scheduler`, `PollConfig`, `PollKind` (Task 15, including `in_flight()`); `SyncEvent`, `SyncTask`, `IncrementalMode` (Task 16); `first_step`, `after_repo_projects` (Task 14); `PaneRegistry`, `HerdrCli`, `focus_plugin_pane`, test-only `FakeHerdr` (Task 13); `State` (Task 12); `cache_path`, `load_cache`, `save_cache`, `MemoryStore` (Task 11); `Config` (Task 12).
 - Produces:
   - `ui::controller::PaneOptions { state_dir: PathBuf, own_pane: Option<String>, config: Config, warnings: Vec<String>, repo: Option<RepoSlug>, board: Option<BoardRef>, picker: bool }`.
-  - `ui::controller::Input::{Key(KeyEvent), Focus(bool), Tick, Sync(SyncEvent)}`.
+  - `ui::controller::Input::{Key(KeyEvent), Focus(bool), Tick, Sync { generation: u64, event: SyncEvent }}` (events whose generation is not the controller's current one are dropped; `Controller::generation() -> u64`, bumped whenever the shown board changes`.
   - `ui::controller::SyncJob::{Resolve(BoardRef), Refresh(Project), Incremental { project, since }, ViewIds { project, view, filter, known, hydrate }, Detail { item, before }, RepoProjects(RepoSlug), Projects(Option<RepoSlug>)}`.
-  - `ui::controller::Effect::{Spawn(SyncJob), OpenUrl(String), ResolveToken, Exit}`.
+  - `ui::controller::Effect::{Spawn { job: SyncJob, generation: u64 }, OpenUrl(String), ResolveToken, Exit}` (`generation` is set by the controller when it produces the effect`.
   - `ui::controller::poll_since(&str) -> String`.
   - `ui::controller::Controller` with `pub app: App`, `new(PaneOptions, Arc<dyn HerdrCli>, IncrementalMode, Instant)`, `start(Result<(), GithubError>, Instant) -> Vec<Effect>`, `handle(Input, Instant) -> Vec<Effect>`, `release()`, `board() -> Option<&BoardRef>`.
 
@@ -9865,7 +9887,8 @@ pub enum Input {
     Key(KeyEvent),
     Focus(bool),
     Tick,
-    Sync(SyncEvent),
+    /// `generation` is the controller's generation when the job was spawned.
+    Sync { generation: u64, event: SyncEvent },
 }
 
 /// One unit of network work for the shell to spawn on the Syncer.
@@ -9884,7 +9907,8 @@ pub enum SyncJob {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    Spawn(SyncJob),
+    /// `generation` is the controller's generation when the effect was produced.
+    Spawn { job: SyncJob, generation: u64 },
     OpenUrl(String),
     /// Resolve the token again and call `start` (after Retry).
     ResolveToken,
@@ -9910,6 +9934,8 @@ pub struct Controller {
     board: Option<BoardRef>,
     full_load_in_flight: bool,
     awaiting_repo_projects: bool,
+    /// Bumped whenever the shown board changes, so late events of the old board are dropped.
+    generation: u64,
 }
 
 impl Controller {
@@ -10038,7 +10064,12 @@ impl Controller {
             }
             Input::Focus(focused) => self.scheduler.on_focus(focused, now).map(|k| self.poll(k, now)).unwrap_or_default(),
             Input::Tick => self.scheduler.tick(now).map(|k| self.poll(k, now)).unwrap_or_default(),
-            Input::Sync(event) => self.on_sync(event, now),
+            Input::Sync { generation, event } => {
+                if generation != self.generation {
+                    return Vec::new();
+                }
+                self.on_sync(event, now)
+            }
         }
     }
 
@@ -10158,7 +10189,7 @@ git commit -m "Add the pane controller: startup, single instance, polling, hydra
 - Modify: `src/ui/mod.rs`, `src/commands/mod.rs`, `src/lib.rs`, `src/main.rs`
 
 **Interfaces:**
-- Consumes: `Controller`, `Input`, `Effect`, `SyncJob`, `PaneOptions` (Task 24); `chrome::draw` (Task 23); `Syncer` (Tasks 16, 21); `resolve_token_from_system`, `HttpTransport`, `Github` (Tasks 4, 8); `ProcessHerdr` (Task 13); `PluginEnv`, `detect_repo` (Task 13); `load_config` (Task 12).
+- Consumes: `Controller`, `Input` (`Sync { generation, event }`), `Effect` (`Spawn { job, generation }`), `SyncJob`, `PaneOptions` (Task 24); `chrome::draw` (Task 23); `Syncer` (Tasks 16, 21); `resolve_token_from_system`, `HttpTransport`, `Github` (Tasks 4, 8); `ProcessHerdr` (Task 13); `PluginEnv`, `detect_repo` (Task 13); `load_config` (Task 12).
 - Produces: `logging::init(state_dir: &Path) -> Option<tracing_appender::non_blocking::WorkerGuard>`; `ui::runtime::run(PaneOptions) -> anyhow::Result<()>`; `commands::pane::run_pane() -> anyhow::Result<()>`.
 
 The shell only moves data: terminal events and sync events go into the controller, and the controller's effects come out as spawned sync jobs, browser launches, token resolution and exit. It has no unit tests; every decision lives in the controller (Task 24), and the smoke checklist (Task 27) exercises the shell.
@@ -10228,23 +10259,26 @@ pub async fn run(options: PaneOptions) -> anyhow::Result<()> {
 
 async fn event_loop(terminal: &mut DefaultTerminal, options: PaneOptions, herdr: Arc<dyn HerdrCli>) -> anyhow::Result<()> {
     let max_items = options.config.max_items;
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    // Events arrive tagged with the generation of the job that produced them.
+    let (tx, mut rx) = mpsc::unbounded_channel::<(u64, crate::sync::SyncEvent)>();
     let mut controller = Controller::new(options, herdr, INCREMENTAL_MODE, Instant::now());
-    let mut syncer: Option<Arc<Syncer>> = None;
+    let mut runner: Option<Runner> = None;
     terminal.draw(|f| chrome::draw(f, &mut controller.app))?;
-    let mut pending = start(&mut controller, &mut syncer, &tx, max_items);
+    let mut pending = start(&mut controller, &mut runner, &tx, max_items);
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         while !pending.is_empty() {
             for effect in std::mem::take(&mut pending) {
                 match effect {
-                    Effect::Spawn(job) => match &syncer {
-                        Some(s) => spawn(s.clone(), job),
+                    Effect::Spawn { job, generation } => match &runner {
+                        // The effect carries the generation it was produced under; never read
+                        // controller.generation() here (a bump may have happened since).
+                        Some(r) => r.spawn(job, generation),
                         None => tracing::warn!(?job, "no GitHub client yet; job dropped"),
                     },
                     Effect::OpenUrl(url) => open_url(&url),
-                    Effect::ResolveToken => pending.extend(start(&mut controller, &mut syncer, &tx, max_items)),
+                    Effect::ResolveToken => pending.extend(start(&mut controller, &mut runner, &tx, max_items)),
                     Effect::Exit => {
                         controller.release();
                         return Ok(());
@@ -10261,50 +10295,74 @@ async fn event_loop(terminal: &mut DefaultTerminal, options: PaneOptions, herdr:
                 Event::FocusLost => controller.handle(Input::Focus(false), now),
                 _ => Vec::new(),
             },
-            Some(event) = rx.recv() => controller.handle(Input::Sync(event), now),
+            Some((generation, event)) = rx.recv() => controller.handle(Input::Sync { generation, event }, now),
             _ = tick.tick() => controller.handle(Input::Tick, now),
         };
     }
 }
 
+/// Runs sync jobs. Every job gets its own `Syncer` whose events are forwarded tagged with the
+/// controller generation the job was spawned under, so late events of a previous board are
+/// dropped by `Controller::handle`.
+struct Runner {
+    gh: Arc<Github>,
+    tx: mpsc::UnboundedSender<(u64, crate::sync::SyncEvent)>,
+    max_items: usize,
+}
+
 /// Resolves the token, builds the GitHub client, and starts the controller.
 fn start(
     controller: &mut Controller,
-    syncer: &mut Option<Arc<Syncer>>,
-    tx: &mpsc::UnboundedSender<crate::sync::SyncEvent>,
+    runner: &mut Option<Runner>,
+    tx: &mpsc::UnboundedSender<(u64, crate::sync::SyncEvent)>,
     max_items: usize,
 ) -> Vec<Effect> {
     match resolve_token_from_system() {
         Ok(token) => {
             let gh = Arc::new(Github::new(Arc::new(HttpTransport::new(token.value))));
-            *syncer = Some(Arc::new(Syncer::new(gh, tx.clone(), max_items, INCREMENTAL_MODE)));
+            *runner = Some(Runner { gh, tx: tx.clone(), max_items });
             controller.start(Ok(()), Instant::now())
         }
         Err(e) => controller.start(Err(e), Instant::now()),
     }
 }
 
-fn spawn(s: Arc<Syncer>, job: SyncJob) {
-    tokio::spawn(async move {
-        match job {
-            SyncJob::Resolve(board) => {
-                if let Some(project) = s.resolve(&board).await {
-                    s.full_load(&project.id).await;
+impl Runner {
+    fn spawn(&self, job: SyncJob, generation: u64) {
+        let (jtx, mut jrx) = mpsc::unbounded_channel();
+        let out = self.tx.clone();
+        tokio::spawn(async move {
+            while let Some(event) = jrx.recv().await {
+                if out.send((generation, event)).is_err() {
+                    break;
                 }
             }
-            SyncJob::Refresh(project) => {
-                s.refresh_project(&project).await;
-                s.full_load(&project.id).await;
+        });
+        let s = Syncer::new(self.gh.clone(), jtx, self.max_items, INCREMENTAL_MODE);
+        tokio::spawn(async move {
+            match job {
+                SyncJob::Resolve(board) => {
+                    if let Some(project) = s.resolve(&board).await {
+                        s.full_load(&project.id).await;
+                    }
+                }
+                SyncJob::Refresh(project) => {
+                    // A failed refresh has already sent Failed { Resolve }, which ends the load
+                    // for the controller; running full_load as well would double up.
+                    if s.refresh_project(&project).await {
+                        s.full_load(&project.id).await;
+                    }
+                }
+                SyncJob::Incremental { project, since } => {
+                    s.incremental(&project, &since).await;
+                }
+                SyncJob::ViewIds { project, view, filter, known, hydrate } => s.view_ids(&project, &view, &filter, &known, hydrate).await,
+                SyncJob::Detail { item, before } => s.detail(&item, before).await,
+                SyncJob::RepoProjects(repo) => s.repo_projects(&repo).await,
+                SyncJob::Projects(repo) => s.projects(repo.as_ref()).await,
             }
-            SyncJob::Incremental { project, since } => {
-                s.incremental(&project, &since).await;
-            }
-            SyncJob::ViewIds { project, view, filter, known, hydrate } => s.view_ids(&project, &view, &filter, &known, hydrate).await,
-            SyncJob::Detail { item, before } => s.detail(&item, before).await,
-            SyncJob::RepoProjects(repo) => s.repo_projects(&repo).await,
-            SyncJob::Projects(repo) => s.projects(repo.as_ref()).await,
-        }
-    });
+        });
+    }
 }
 
 fn open_url(url: &str) {
@@ -10695,7 +10753,7 @@ Setup: `cargo build --release && herdr plugin link .`, keybinding for `tviles.pr
 
 - [ ] Key opens a tab with the testbed board; header shows `stale` (second run) or `loading`, then neither.
 - [ ] Pressing the key again focuses the same tab; no second tab opens.
-- [ ] `open-picker` lists the testbed board first; `Esc` on a fresh picker quits.
+- [ ] `open-picker` lists the testbed board first; `Esc` on a fresh picker does nothing and `Ctrl+C` quits.
 - [ ] `open-overlay`, `open-split` and `open-zoomed` each open the board; quitting returns focus.
 - [ ] `Tab` reaches all four views; "Bugs" shows only bug-labelled items after a moment.
 - [ ] "Board" shows Status columns with Priority lanes and a "No Priority" lane under Todo.
@@ -10727,8 +10785,12 @@ The live suite does not run in CI (decision 9). Run it locally with your `gh` lo
 Run: `cargo test --features live --test live`
 Expected: all live tests PASS. If the testbed was reseeded or GitHub changed its responses, re-record with `PB_RECORD=1 cargo test --features live --test live`, check `git diff tests/fixtures`, commit the new fixtures, and push.
 
-Run: `gh workflow run release.yml -f dry_run=true && gh run watch`
-Expected: all four build jobs pass.
+The items fixtures (`tests/fixtures/recorded/items`, `view_ids/HydrateItems__1.json`) were converted to the content-backed response shape by script and carry a `_pending_rerecord` marker: re-record them with `PB_RECORD=1` as above (the marker disappears with the re-record).
+
+Run the `cost` and `updated_filter` live tests and keep their output: `cargo test --features live --test live -- cost updated_filter --nocapture`.
+Expected: `cost` prints the dry-run cost of a 100-item ItemsPage and passes at 10 points or fewer; `updated_filter` prints how many items `updated:>=<date>` returned and passes when items updated before that date are left out. If `updated_filter` fails, the `updated:` filter does not filter and every poll fetches the whole board; stop and decide on `INCREMENTAL_MODE` (src/sync/mod.rs) before releasing.
+
+Expected: the release build runs automatically on the PR when release.yml or Cargo files change, and the four build jobs pass. After the PR merges to main, `gh workflow run release.yml -f dry_run=true && gh run watch` works too for testing builds on-demand.
 
 - [ ] **Step 6: Release 0.1.0 (ask first)**
 

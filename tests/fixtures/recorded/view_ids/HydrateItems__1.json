@@ -1,0 +1,156 @@
+{
+  "data": {
+    "nodes": [
+      {
+        "__typename": "ProjectV2Item",
+        "content": {
+          "__typename": "Issue",
+          "assignees": {
+            "nodes": [
+              {
+                "login": "tviles"
+              }
+            ]
+          },
+          "closedByPullRequestsReferences": {
+            "nodes": []
+          },
+          "labels": {
+            "nodes": [
+              {
+                "color": "d73a4a",
+                "name": "bug"
+              }
+            ]
+          },
+          "number": 1,
+          "repository": {
+            "nameWithOwner": "tviles/project-boards-testbed"
+          },
+          "state": "OPEN",
+          "title": "Crash when board has no Status field",
+          "url": "https://github.com/tviles/project-boards-testbed/issues/1"
+        },
+        "fieldValues": {
+          "nodes": [
+            {
+              "__typename": "ProjectV2ItemFieldUserValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr3A"
+              }
+            },
+            {
+              "__typename": "ProjectV2ItemFieldRepositoryValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+              },
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              }
+            },
+            {
+              "__typename": "ProjectV2ItemFieldLabelValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
+              }
+            },
+            {
+              "__typename": "ProjectV2ItemFieldMilestoneValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr3Q"
+              },
+              "milestone": {
+                "title": "v1"
+              }
+            },
+            {
+              "__typename": "ProjectV2ItemFieldTextValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+              },
+              "text": "Crash when board has no Status field"
+            },
+            {
+              "__typename": "ProjectV2ItemFieldSingleSelectValue",
+              "field": {
+                "__typename": "ProjectV2SingleSelectField",
+                "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+              },
+              "name": "Todo",
+              "optionId": "f75ad846"
+            },
+            {
+              "__typename": "ProjectV2ItemFieldSingleSelectValue",
+              "field": {
+                "__typename": "ProjectV2SingleSelectField",
+                "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k"
+              },
+              "name": "P0",
+              "optionId": "86d2debf"
+            },
+            {
+              "__typename": "ProjectV2ItemFieldNumberValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr58"
+              },
+              "number": 3.0
+            },
+            {
+              "__typename": "ProjectV2ItemFieldDateValue",
+              "date": "2026-10-20",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr6A"
+              }
+            },
+            {
+              "__typename": "ProjectV2ItemFieldTextValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr68"
+              },
+              "text": "Needs a repro"
+            },
+            {
+              "__typename": "ProjectV2ItemFieldIterationValue",
+              "field": {
+                "__typename": "ProjectV2IterationField",
+                "id": "PVTIF_lAHOADq2Kc4Bl819zhknr7A"
+              },
+              "iterationId": "ab9993d6",
+              "startDate": "2026-10-06",
+              "title": "Sprint 1"
+            },
+            {
+              "__typename": "ProjectV2ItemFieldMultiSelectValue",
+              "field": {
+                "__typename": "ProjectV2MultiSelectField",
+                "id": "PVTMSF_lAHOADq2Kc4Bl819zhknr7E"
+              },
+              "options": [
+                {
+                  "id": "4dba8577",
+                  "name": "api"
+                },
+                {
+                  "id": "6eaf9169",
+                  "name": "ui"
+                }
+              ]
+            }
+          ]
+        },
+        "id": "PVTI_lAHOADq2Kc4Bl819zg-7fig",
+        "isArchived": false,
+        "type": "ISSUE",
+        "updatedAt": "2026-10-06T16:12:22Z"
+      }
+    ]
+  }
+}
