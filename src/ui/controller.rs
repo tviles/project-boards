@@ -101,6 +101,24 @@ pub fn poll_since(fetched_at: &str) -> String {
     }
 }
 
+/// Whether `url` may be handed to `open`/`xdg-open`. Links in issue bodies and comments are
+/// untrusted: only `http://` and `https://` URLs are opened, never relative paths, `file:`,
+/// other schemes, or text an opener would read as an option.
+pub fn is_web_link(url: &str) -> bool {
+    ["https://", "http://"]
+        .iter()
+        .find_map(|scheme| {
+            url.get(..scheme.len())
+                .filter(|s| s.eq_ignore_ascii_case(scheme))
+                .map(|_| &url[scheme.len()..])
+        })
+        .is_some_and(|rest| {
+            !rest.is_empty() && !rest.chars().any(|c| c.is_whitespace() || c.is_control())
+        })
+}
+
+pub const NOT_A_WEB_LINK: &str = "not opened: not a web link";
+
 pub struct Controller {
     pub app: App,
     options: PaneOptions,
@@ -449,7 +467,8 @@ impl Controller {
                 Command::LoadDetail { item, before } => {
                     effects.push(self.spawn(SyncJob::Detail { item, before }))
                 }
-                Command::OpenUrl(url) => effects.push(Effect::OpenUrl(url)),
+                Command::OpenUrl(url) if is_web_link(&url) => effects.push(Effect::OpenUrl(url)),
+                Command::OpenUrl(_) => self.app.status.flash = Some(NOT_A_WEB_LINK.into()),
                 Command::Refresh => {
                     if !self.scheduler.in_flight() {
                         effects.extend(self.poll(PollKind::Full, now));
@@ -791,6 +810,57 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn only_http_and_https_urls_are_web_links() {
+        for url in [
+            "https://github.com/x",
+            "http://example.com/a?b=c#d",
+            "HTTPS://GITHUB.COM/x",
+        ] {
+            assert!(is_web_link(url), "{url}");
+        }
+        for url in [
+            "docs/setup.md",
+            "../etc/passwd",
+            "file:///etc/passwd",
+            "-a Calculator",
+            "javascript:alert(1)",
+            "mailto:a@b.c",
+            "https://",
+            " https://github.com/x",
+            "https://github.com/x -a Calculator",
+            "",
+        ] {
+            assert!(!is_web_link(url), "{url:?}");
+        }
+    }
+
+    #[test]
+    fn links_that_are_not_web_links_are_not_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        for url in [
+            "file:///etc/passwd",
+            "-a Calculator",
+            "javascript:x",
+            "notes.md",
+        ] {
+            assert!(
+                c.commands(vec![Command::OpenUrl(url.into())], t0)
+                    .is_empty(),
+                "{url}"
+            );
+            assert_eq!(c.app.status.flash.as_deref(), Some(NOT_A_WEB_LINK));
+        }
+        assert_eq!(
+            c.commands(vec![Command::OpenUrl("https://github.com/x".into())], t0),
+            vec![Effect::OpenUrl("https://github.com/x".into())]
+        );
+        c.handle(Input::Key(key('j')), t0);
+        assert_eq!(c.app.status.flash, None, "the next key clears it");
     }
 
     #[test]

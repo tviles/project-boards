@@ -203,7 +203,12 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             Span::raw(app.input.clone()),
         ]),
         _ => {
-            if let Some(e) = &app.status.error {
+            if let Some(flash) = &app.status.flash {
+                Line::styled(
+                    truncate_to_width(flash, area.width as usize),
+                    app.theme.accent(),
+                )
+            } else if let Some(e) = &app.status.error {
                 Line::styled(truncate_to_width(e, area.width as usize), app.theme.error())
             } else {
                 let mut parts: Vec<String> = app.status.notes.clone();
@@ -326,6 +331,24 @@ mod tests {
         let screen = render_to_string(80, 12, |f| draw(f, &mut b));
         assert!(screen.contains("Run gh auth login first.") && screen.contains("setup"));
         render_to_string(40, 8, |f| draw(f, &mut b));
+    }
+
+    #[test]
+    fn a_flash_replaces_the_status_line_until_the_next_key() {
+        let mut a = app();
+        a.status.error = Some("refresh failed: down".into());
+        a.status.flash = Some("not opened: not a web link".into());
+        let screen = render_to_string(80, 10, |f| draw(f, &mut a));
+        assert!(
+            screen
+                .lines()
+                .last()
+                .unwrap()
+                .starts_with("not opened: not a web link")
+        );
+        a.handle_key(key('j'));
+        let screen = render_to_string(80, 10, |f| draw(f, &mut a));
+        assert!(screen.lines().last().unwrap().starts_with("refresh failed"));
     }
 
     #[test]

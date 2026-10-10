@@ -194,6 +194,11 @@ impl Runner {
 }
 
 fn open_url(url: &str) {
+    // The controller already refuses these; checked again so nothing else can reach `open`.
+    if !crate::ui::controller::is_web_link(url) {
+        tracing::warn!("refused to open a link that is not an http(s) URL");
+        return;
+    }
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else {

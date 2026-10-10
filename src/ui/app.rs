@@ -53,6 +53,9 @@ pub struct Status {
     /// Config warnings and notes such as "loaded N of M".
     pub notes: Vec<String>,
     pub rate_low: bool,
+    /// A one-off reply to the last key press, such as "not opened: not a web link". The next
+    /// key press clears it.
+    pub flash: Option<String>,
 }
 
 pub struct App {
@@ -452,6 +455,7 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Vec<Command> {
+        self.status.flash = None;
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.quit = true;
             return vec![Command::Quit];
