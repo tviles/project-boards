@@ -89,7 +89,8 @@ pub struct App {
     selected_id: Option<ItemId>,
     search: String,
     layout_toggle: HashMap<ViewId, Layout>,
-    filter_override: HashMap<ViewId, String>,
+    /// Per view, a filter the user added on top of the view's GitHub filter. Session only.
+    extra_filter: HashMap<ViewId, String>,
     /// Detail width used to number targets; kept in sync by the renderer.
     pub detail_width: u16,
 }
@@ -143,7 +144,7 @@ impl App {
             selected_id: None,
             search: String::new(),
             layout_toggle: HashMap::new(),
-            filter_override: HashMap::new(),
+            extra_filter: HashMap::new(),
             detail_width: 80,
         }
     }
@@ -175,14 +176,57 @@ impl App {
         self.layout_toggle = overrides;
     }
 
+    /// The current view's GitHub filter plus the local one, if any.
     pub fn effective_filter(&self) -> String {
-        let Some(view) = self.current_view() else {
-            return String::new();
+        self.current_view()
+            .map(|v| self.filter_for(v))
+            .unwrap_or_default()
+    }
+
+    /// The local filter of the current view, if one is set.
+    pub fn extra_filter(&self) -> Option<&str> {
+        let view = self.current_view()?;
+        self.extra_filter.get(&view.id).map(String::as_str)
+    }
+
+    fn filter_for(&self, view: &View) -> String {
+        match self.extra_filter.get(&view.id) {
+            Some(extra) => format!("{} {extra}", view.filter).trim().to_string(),
+            None => view.filter.clone(),
+        }
+    }
+
+    /// Sets (or, when empty, clears) the current view's local filter and refetches the
+    /// view's ids for the new effective filter.
+    fn set_extra_filter(&mut self, extra: &str) -> Vec<Command> {
+        let Some(view) = self.current_view().cloned() else {
+            return Vec::new();
         };
-        self.filter_override
-            .get(&view.id)
-            .cloned()
-            .unwrap_or_else(|| view.filter.clone())
+        let before = self.effective_filter();
+        let extra = extra.trim();
+        if extra.is_empty() {
+            self.extra_filter.remove(&view.id);
+        } else {
+            self.extra_filter.insert(view.id.clone(), extra.to_string());
+        }
+        let filter = self.effective_filter();
+        if filter == before {
+            // Nothing changed: keep the cached list and the cursor.
+            return self.revalidate_view().into_iter().collect();
+        }
+        // A changed filter invalidates the cached list.
+        self.store.apply(StoreUpdate::ClearViewIds(view.id.clone()));
+        self.table_selected = 0;
+        self.board_sel = BoardSelection::default();
+        self.sync_selected_id();
+        if filter.is_empty() {
+            Vec::new()
+        } else {
+            vec![Command::FetchViewIds {
+                view: view.id,
+                filter,
+            }]
+        }
     }
 
     /// Forgets what belonged to the previous board when another one opens: the quick search,
@@ -513,33 +557,8 @@ impl App {
             Mode::Filter => match self.handle_text_input(&key) {
                 Some(true) => {
                     self.mode = Mode::Normal;
-                    let filter = std::mem::take(&mut self.input).trim().to_string();
-                    let Some(view) = self.current_view().cloned() else {
-                        return Vec::new();
-                    };
-                    let before = self.effective_filter();
-                    if filter == view.filter {
-                        self.filter_override.remove(&view.id);
-                    } else {
-                        self.filter_override.insert(view.id.clone(), filter.clone());
-                    }
-                    if filter == before {
-                        // Nothing changed: keep the cached list and the cursor.
-                        return self.revalidate_view().into_iter().collect();
-                    }
-                    // A changed filter invalidates the cached list.
-                    self.store.apply(StoreUpdate::ClearViewIds(view.id.clone()));
-                    self.table_selected = 0;
-                    self.board_sel = BoardSelection::default();
-                    self.sync_selected_id();
-                    if filter.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![Command::FetchViewIds {
-                            view: view.id,
-                            filter,
-                        }]
-                    }
+                    let extra = std::mem::take(&mut self.input);
+                    self.set_extra_filter(&extra)
                 }
                 None => {
                     self.input.clear();
@@ -660,7 +679,7 @@ impl App {
                     Vec::new()
                 }
                 Some(Action::Filter) => {
-                    self.input = self.effective_filter();
+                    self.input = self.extra_filter().unwrap_or_default().to_string();
                     self.mode = Mode::Filter;
                     Vec::new()
                 }
@@ -717,12 +736,7 @@ impl App {
     /// The filter a view currently applies, looked up by id.
     fn filter_of(&self, id: &ViewId) -> Option<String> {
         let view = self.project()?.views.iter().find(|v| &v.id == id)?;
-        Some(
-            self.filter_override
-                .get(id)
-                .cloned()
-                .unwrap_or_else(|| view.filter.clone()),
-        )
+        Some(self.filter_for(view))
     }
 
     pub fn on_sync(&mut self, event: SyncEvent) -> Vec<Command> {
@@ -1072,6 +1086,72 @@ mod tests {
             },
         });
         assert_eq!(a.view_items().unwrap().len(), 1);
+    }
+
+    fn type_text(a: &mut App, text: &str) {
+        for c in text.chars() {
+            a.handle_key(key(c));
+        }
+    }
+
+    #[test]
+    fn f_edits_a_local_filter_added_to_the_github_one() {
+        let mut a = app();
+        let bugs = ViewId::new("V_bugs");
+        a.select_view(&bugs);
+        a.handle_key(key('f'));
+        assert_eq!(a.input, "", "the GitHub filter is not in the input");
+        type_text(&mut a, " assignee:x ");
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        let fetch = |filter: &str| {
+            vec![Command::FetchViewIds {
+                view: bugs.clone(),
+                filter: filter.into(),
+            }]
+        };
+        assert_eq!(cmds, fetch("label:bug assignee:x"));
+        assert_eq!(a.effective_filter(), "label:bug assignee:x");
+        assert_eq!(a.extra_filter(), Some("assignee:x"));
+
+        a.handle_key(key('f'));
+        assert_eq!(
+            a.input, "assignee:x",
+            "pre-filled with the local filter only"
+        );
+        a.handle_key(key('y'));
+        assert!(a.handle_key(code(KeyCode::Esc)).is_empty());
+        assert_eq!(a.effective_filter(), "label:bug assignee:x", "esc cancels");
+
+        a.handle_key(key('f'));
+        for _ in 0.."assignee:x".len() {
+            a.handle_key(code(KeyCode::Backspace));
+        }
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), fetch("label:bug"));
+        assert_eq!(a.effective_filter(), "label:bug");
+        assert_eq!(a.extra_filter(), None, "an empty input clears it");
+    }
+
+    #[test]
+    fn a_late_list_for_the_github_filter_alone_is_dropped_once_a_local_one_is_added() {
+        let mut a = app();
+        let bugs = ViewId::new("V_bugs");
+        a.select_view(&bugs);
+        a.handle_key(key('f'));
+        type_text(&mut a, "assignee:x");
+        a.handle_key(code(KeyCode::Enter));
+        let ids = |filter: &str, id: &str| SyncEvent::ViewIds {
+            view: bugs.clone(),
+            filter: filter.into(),
+            list: ViewList {
+                ids: vec![ItemId::new(id)],
+                total: 1,
+                truncated: false,
+            },
+        };
+        a.on_sync(ids("label:bug", "a"));
+        assert!(a.view_items().is_none(), "stale list dropped");
+        a.on_sync(ids("label:bug assignee:x", "c"));
+        assert_eq!(selected_id(&a), "c");
     }
 
     #[test]

@@ -224,10 +224,22 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("/", app.theme.accent()),
             Span::raw(app.input.clone()),
         ]),
-        Mode::Filter => Line::from(vec![
-            Span::styled("filter: ", app.theme.accent()),
-            Span::raw(app.input.clone()),
-        ]),
+        Mode::Filter => {
+            let mut spans = vec![Span::styled("filter: ", app.theme.accent())];
+            let github = app.current_view().map_or("", |v| v.filter.trim());
+            if !github.is_empty() {
+                // The GitHub filter still applies: show it dimmed, cut to leave room to type.
+                let room = (area.width as usize / 2)
+                    .saturating_sub(display_width("filter: GitHub:  + "))
+                    .max(8);
+                spans.push(Span::styled(
+                    format!("GitHub: {} + ", truncate_to_width(github, room)),
+                    app.theme.dim(),
+                ));
+            }
+            spans.push(Span::raw(app.input.clone()));
+            Line::from(spans)
+        }
         _ => {
             if let Some(flash) = &app.status.flash {
                 Line::styled(
@@ -237,7 +249,11 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             } else if let Some(e) = &app.status.error {
                 Line::styled(truncate_to_width(e, area.width as usize), app.theme.error())
             } else {
-                let mut parts: Vec<String> = app.status.notes.clone();
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(extra) = app.extra_filter() {
+                    parts.push(format!("filter: + {extra}"));
+                }
+                parts.extend(app.status.notes.iter().cloned());
                 if let Some(note) = app.layout().1 {
                     parts.push(note.to_string());
                 }
@@ -376,6 +392,54 @@ mod tests {
         a.handle_key(key('j'));
         let screen = render_to_string(80, 10, |f| draw(f, &mut a));
         assert!(screen.lines().last().unwrap().starts_with("refresh failed"));
+    }
+
+    #[test]
+    fn the_local_filter_shows_in_the_status_line_and_the_prompt_shows_githubs() {
+        let mut a = app();
+        a.select_view(&crate::model::ViewId::new("V_bugs"));
+        a.handle_key(key('f'));
+        let screen = render_to_string(80, 10, |f| draw(f, &mut a));
+        assert_eq!(
+            screen.lines().last().unwrap(),
+            "filter: GitHub: label:bug +"
+        );
+        for c in "assignee:x".chars() {
+            a.handle_key(key(c));
+        }
+        a.handle_key(code(KeyCode::Enter));
+        let screen = render_to_string(80, 10, |f| draw(f, &mut a));
+        assert!(
+            screen
+                .lines()
+                .last()
+                .unwrap()
+                .starts_with("filter: + assignee:x · "),
+            "{screen}"
+        );
+
+        // A long GitHub filter is cut so the typed text keeps its room.
+        let mut snap = snapshot();
+        snap.project.views[2].filter = format!("label:bug {}", "-label:wontfix ".repeat(10));
+        let mut b = App::new(
+            Box::new(MemoryStore::new(Some(snap))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        b.select_view(&crate::model::ViewId::new("V_bugs"));
+        b.handle_key(key('f'));
+        b.handle_key(key('z'));
+        let screen = render_to_string(60, 10, |f| draw(f, &mut b));
+        let prompt = screen.lines().last().unwrap();
+        assert!(
+            prompt.starts_with("filter: GitHub: label:bug") && prompt.ends_with("… + z"),
+            "{prompt}"
+        );
+        // Without a GitHub filter there is nothing to show.
+        let mut c = app();
+        c.handle_key(key('f'));
+        let screen = render_to_string(60, 10, |f| draw(f, &mut c));
+        assert_eq!(screen.lines().last().unwrap(), "filter:");
     }
 
     #[test]

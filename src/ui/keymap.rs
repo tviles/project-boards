@@ -91,7 +91,7 @@ impl Action {
             Action::ToggleLayout => "switch table / board",
             Action::Open => "open item detail, collapse group, follow link",
             Action::Search => "quick search",
-            Action::Filter => "edit the view filter",
+            Action::Filter => "add a filter on top of the view's GitHub filter",
             Action::Refresh => "refresh now",
             Action::OpenBrowser => "open in the browser",
             Action::Help => "this help",
