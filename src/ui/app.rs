@@ -7,6 +7,7 @@ use crate::ui::detail::{DetailOutcome, DetailState, build_doc};
 use crate::ui::keymap::{Action, Keymap};
 use crate::ui::markdown::Target;
 use crate::ui::picker::{PickerOutcome, PickerState};
+use crate::ui::pills::card_fields;
 use crate::ui::search;
 use crate::ui::table::{Row, build_rows, collapse_key};
 use crate::ui::theme::Theme;
@@ -305,6 +306,16 @@ impl App {
         let items = self.view_items().unwrap_or_default();
         let columns = build_columns(&items, field, view.group_field(&project.fields));
         constrain_columns(columns, &column_constraint(&self.effective_filter(), field))
+    }
+
+    /// The fields board cards show as pills in the current view.
+    pub fn card_fields(&self) -> Vec<&Field> {
+        let (Some(column), Some(view), Some(project)) =
+            (self.column_field(), self.current_view(), self.project())
+        else {
+            return Vec::new();
+        };
+        card_fields(view, project, column, view.group_field(&project.fields))
     }
 
     pub fn selected_item(&self) -> Option<&Item> {
@@ -1079,6 +1090,19 @@ mod tests {
         assert_eq!(titles, ["Todo", "No Status"]);
         a.handle_key(key('l'));
         assert_eq!(selected_id(&a), "e", "moves straight to No Status");
+    }
+
+    #[test]
+    fn board_cards_show_the_views_fields_but_not_its_column_or_lane_field() {
+        let mut a = App::new(
+            Box::new(MemoryStore::new(Some(snapshot()))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        a.select_view(&ViewId::new("V_board"));
+        let names: Vec<&str> = a.card_fields().iter().map(|f| f.name.as_str()).collect();
+        // Status is the column field and Priority the lane field.
+        assert_eq!(names, ["Linked pull requests", "Created"]);
     }
 
     #[test]

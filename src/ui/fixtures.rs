@@ -1,5 +1,6 @@
 //! A small board for UI tests: Status (3 options), Priority (3 options), five items covering
-//! an emoji/CJK title, a draft, and a value pointing at a deleted option.
+//! an emoji/CJK title, a draft, a value pointing at a deleted option, and (on #1) a linked
+//! pull request and a created date for the board's card pills.
 
 use crate::model::*;
 use crate::store::BoardSnapshot;
@@ -73,6 +74,12 @@ pub fn project() -> Project {
             f("F_assignees", "Assignees", FieldKind::Assignees),
             f("F_labels", "Labels", FieldKind::Labels),
             f("F_notes", "Notes", FieldKind::Text),
+            f(
+                "F_prs",
+                "Linked pull requests",
+                FieldKind::LinkedPullRequests,
+            ),
+            f("F_created", "Created", FieldKind::Created),
         ],
         views: vec![
             view(
@@ -89,7 +96,15 @@ pub fn project() -> Project {
                 "Board",
                 Layout::Board,
                 "",
-                &[],
+                &[
+                    "F_title",
+                    "F_status",
+                    "F_assignees",
+                    "F_prs",
+                    "F_created",
+                    "F_prio",
+                    "F_labels",
+                ],
                 &["F_status"],
                 &["F_prio"],
             ),
@@ -143,22 +158,32 @@ pub fn items() -> Vec<Item> {
             }]),
         )
     };
+    let mut fix_crash = issue(
+        "a",
+        1,
+        "Fix crash",
+        vec![
+            select("F_status", "o_todo", "Todo"),
+            select("F_prio", "p0", "P0"),
+            users("tviles"),
+            labels("bug"),
+        ],
+    );
+    fix_crash.content_fields = ContentFields {
+        created_at: Some("2026-08-19T10:00:00Z".into()),
+        linked_prs: vec![LinkedPullRequest {
+            number: 12,
+            state: ContentState::Open,
+            is_draft: false,
+        }],
+        ..ContentFields::default()
+    };
     let mut draft = issue("d", 0, "", vec![select("F_status", "o_done", "Done")]);
     draft.content = ItemContent::Draft {
         title: "Draft idea".into(),
     };
     vec![
-        issue(
-            "a",
-            1,
-            "Fix crash",
-            vec![
-                select("F_status", "o_todo", "Todo"),
-                select("F_prio", "p0", "P0"),
-                users("tviles"),
-                labels("bug"),
-            ],
-        ),
+        fix_crash,
         issue(
             "b",
             2,

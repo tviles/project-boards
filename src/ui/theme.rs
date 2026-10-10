@@ -67,6 +67,17 @@ impl Theme {
         Style::default().bg(bg).fg(contrast_fg(shown))
     }
 
+    /// The subtle background a card's field pill sits on. Plain without colour.
+    pub fn pill(&self) -> Style {
+        if !self.color {
+            Style::default()
+        } else if self.truecolor {
+            Style::default().bg(Color::Rgb(0x30, 0x36, 0x3d))
+        } else {
+            Style::default().bg(Color::Indexed(236))
+        }
+    }
+
     pub fn selected(&self) -> Style {
         Style::default().add_modifier(Modifier::REVERSED)
     }

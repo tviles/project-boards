@@ -173,6 +173,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
                     &app.board_columns(),
                     &app.board_sel,
                     field,
+                    &app.card_fields(),
                     &app.theme,
                 );
             }

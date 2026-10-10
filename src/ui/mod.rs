@@ -9,6 +9,7 @@ pub mod keymap;
 pub mod labels;
 pub mod markdown;
 pub mod picker;
+pub mod pills;
 pub mod runtime;
 pub mod search;
 pub mod table;
