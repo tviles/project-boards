@@ -140,7 +140,7 @@ pub fn resolve_layout(
     }
 }
 
-const MIN_COLUMN: usize = 24;
+const MIN_COLUMN: usize = 34;
 /// Rows of a bordered card: top border, title, meta, bottom border.
 const CARD_ROWS: usize = 4;
 /// Rows of the borderless card used in columns too narrow for a border.
@@ -470,7 +470,7 @@ mod tests {
             column: 0,
             index: 1,
         };
-        let screen = render_to_string(100, 10, |f| {
+        let screen = render_to_string(4 * MIN_COLUMN as u16, 10, |f| {
             render_board(f, f.area(), &cols, &sel, status, &Theme::plain())
         });
         let first = screen.lines().next().unwrap();
@@ -483,7 +483,7 @@ mod tests {
         assert!(
             screen
                 .lines()
-                .all(|l| crate::ui::text::display_width(l) <= 100)
+                .all(|l| crate::ui::text::display_width(l) <= 4 * MIN_COLUMN)
         );
         insta::assert_snapshot!(screen);
     }
@@ -498,7 +498,7 @@ mod tests {
             column: 3,
             index: 0,
         };
-        let screen = render_to_string(50, 8, |f| {
+        let screen = render_to_string(2 * MIN_COLUMN as u16 + 2, 8, |f| {
             render_board(f, f.area(), &cols, &sel, status, &Theme::plain())
         });
         assert!(
@@ -596,7 +596,7 @@ mod tests {
         );
         let sel = BoardSelection::default();
         let header = |cols: &[Column]| {
-            let screen = render_to_string(50, 6, |f| {
+            let screen = render_to_string(2 * MIN_COLUMN as u16 + 2, 6, |f| {
                 render_board(f, f.area(), cols, &sel, status, &Theme::plain())
             });
             screen.lines().next().unwrap().to_string()
@@ -647,8 +647,11 @@ mod tests {
             column: 0,
             index: 0,
         };
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 10)).unwrap();
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+            2 * MIN_COLUMN as u16 + 2,
+            10,
+        ))
+        .unwrap();
         let buf = terminal
             .draw(|f| render_board(f, f.area(), &cols, &sel, status, &theme))
             .unwrap()
@@ -751,31 +754,34 @@ mod tests {
             truecolor: true,
         };
         let sel = BoardSelection::default();
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 10)).unwrap();
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+            2 * MIN_COLUMN as u16 + 2,
+            10,
+        ))
+        .unwrap();
         let buf = terminal
             .draw(|f| render_board(f, f.area(), &cols, &sel, status, &theme))
             .unwrap()
             .buffer
             .clone();
-        // Column width 29: the selected card is rows 1..5, the next one rows 5..9.
+        // Column width 34: the selected card is rows 1..5, the next one rows 5..9.
         assert_eq!(buf[(0, 1)].symbol(), "┏");
-        assert_eq!(buf[(28, 1)].symbol(), "┓");
+        assert_eq!(buf[(33, 1)].symbol(), "┓");
         assert_eq!(buf[(0, 2)].symbol(), "┃");
-        assert_eq!(buf[(28, 3)].symbol(), "┃");
+        assert_eq!(buf[(33, 3)].symbol(), "┃");
         assert_eq!(buf[(0, 4)].symbol(), "┗");
-        assert_eq!(buf[(28, 4)].symbol(), "┛");
+        assert_eq!(buf[(33, 4)].symbol(), "┛");
         assert_eq!(buf[(5, 1)].symbol(), "━");
-        for (x, y) in [(0, 1), (5, 1), (0, 2), (28, 4)] {
+        for (x, y) in [(0, 1), (5, 1), (0, 2), (33, 4)] {
             let cell = &buf[(x, y)];
             assert_eq!(cell.fg, theme.accent().fg.unwrap(), "{x},{y}");
             assert!(cell.modifier.contains(Modifier::BOLD), "{x},{y}");
         }
         assert_eq!(cell_text(&buf, 5, 1), "╭");
-        assert_eq!(buf[(28, 5)].symbol(), "╮");
+        assert_eq!(buf[(33, 5)].symbol(), "╮");
         assert_eq!(buf[(0, 6)].symbol(), "│");
         assert_eq!(buf[(0, 8)].symbol(), "╰");
-        assert_eq!(buf[(28, 8)].symbol(), "╯");
+        assert_eq!(buf[(33, 8)].symbol(), "╯");
         assert_ne!(buf[(0, 5)].fg, theme.accent().fg.unwrap());
         assert!(!buf[(0, 5)].modifier.contains(Modifier::BOLD));
     }
