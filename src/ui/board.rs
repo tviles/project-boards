@@ -1224,7 +1224,7 @@ mod tests {
             FieldValue::Users(vec!["octocat".into(), "tviles".into()]),
         );
         let lines = card_text(&item, 34, &Theme::plain());
-        assert_eq!(lines[1], "│● t #1              @octocat +1│");
+        assert_eq!(lines[1], "│● t #1               @octocat +1│");
         let lines = card_text(&items()[1], 34, &Theme::plain());
         assert_eq!(
             lines[1], "│● t #2                          │",
@@ -1257,11 +1257,12 @@ mod tests {
             FieldValue::Users(vec!["octocat".into()]),
         );
         let header = |width: usize| card_text(&item, width, &Theme::plain())[1].clone();
-        assert_eq!(header(36), "│● a-very-long-rep… #4242 @octocat│");
-        assert_eq!(header(30), "│● a-very-lo… #4242 @octocat│");
-        assert_eq!(header(26), "│● a-ver… #4242 @octocat│");
-        assert_eq!(header(19), "│● #4242 @octocat│");
-        assert_eq!(header(14), "│● #4242 @ma…│");
+        // "@octocat" is 8 cells.
+        assert_eq!(header(35), "│● a-very-long-rep… #4242 @octocat│");
+        assert_eq!(header(29), "│● a-very-lo… #4242 @octocat│");
+        assert_eq!(header(25), "│● a-ver… #4242 @octocat│");
+        assert_eq!(header(18), "│● #4242 @octocat│");
+        assert_eq!(header(14), "│● #4242 @oc…│");
         assert_eq!(header(11), "│● #4242  │");
     }
 
