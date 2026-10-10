@@ -513,7 +513,23 @@ impl Controller {
     }
 
     fn persist_cache(&self) {
-        if let (Some(snapshot), Some(board)) = (self.app.snapshot(), &self.board)
+        let Some(snapshot) = self.app.snapshot() else {
+            return;
+        };
+        // A list fetched with a session-only local filter would reopen next time without it.
+        let mut filtered = self.app.views_with_extra_filter().peekable();
+        let trimmed;
+        let snapshot = if filtered.peek().is_some() {
+            let mut copy = snapshot.clone();
+            for view in filtered {
+                copy.views.remove(view);
+            }
+            trimmed = copy;
+            &trimmed
+        } else {
+            snapshot
+        };
+        if let Some(board) = &self.board
             && let Err(e) = save_cache(&cache_path(&self.options.state_dir, board), snapshot)
         {
             tracing::warn!(error = %e, "could not save the board cache");
@@ -1373,6 +1389,52 @@ mod tests {
         let e = at(&c, SyncEvent::Hydrated(crate::ui::fixtures::items()));
         c.handle(e, t0);
         assert!(path.exists());
+    }
+
+    #[test]
+    fn lists_fetched_with_a_local_filter_stay_out_of_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        let e = at(&c, SyncEvent::Project(crate::ui::fixtures::project()));
+        c.handle(e, t0);
+        let e = at(&c, complete("2026-10-01T12:00:00Z"));
+        c.handle(e, t0);
+        let view = c.app.current_view().unwrap().id.clone();
+        c.handle(Input::Key(key('f')), t0);
+        for ch in "label:bug".chars() {
+            c.handle(Input::Key(key(ch)), t0);
+        }
+        c.handle(
+            Input::Key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Enter,
+            )),
+            t0,
+        );
+        let filter = format!("{} label:bug", c.app.current_view().unwrap().filter)
+            .trim()
+            .to_string();
+        let e = at(
+            &c,
+            SyncEvent::ViewIds {
+                view: view.clone(),
+                filter,
+                list: crate::store::snapshot::ViewList {
+                    ids: vec![],
+                    total: 0,
+                    truncated: false,
+                },
+            },
+        );
+        c.handle(e, t0);
+        let e = at(&c, SyncEvent::Hydrated(crate::ui::fixtures::items()));
+        c.handle(e, t0);
+        let saved = load_cache(&cache_path(dir.path(), &board())).unwrap();
+        assert!(!saved.views.contains_key(&view));
+        assert!(
+            c.app.snapshot().unwrap().views.contains_key(&view),
+            "kept in memory"
+        );
     }
 
     #[test]

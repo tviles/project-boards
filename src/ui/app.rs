@@ -189,6 +189,12 @@ impl App {
         self.extra_filter.get(&view.id).map(String::as_str)
     }
 
+    /// Views with a local filter; their id lists don't match the GitHub filter, so they
+    /// are left out of the disk cache.
+    pub fn views_with_extra_filter(&self) -> impl Iterator<Item = &ViewId> {
+        self.extra_filter.keys()
+    }
+
     fn filter_for(&self, view: &View) -> String {
         match self.extra_filter.get(&view.id) {
             Some(extra) => format!("{} {extra}", view.filter).trim().to_string(),

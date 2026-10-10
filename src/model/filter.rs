@@ -108,7 +108,15 @@ fn names_field(key: &str, field: &Field) -> bool {
 /// on the field means the filter is not understood, and nothing is constrained.
 pub fn column_constraint(filter: &str, field: &Field) -> ColumnConstraint {
     let mut c = ColumnConstraint::default();
-    for token in tokens(filter) {
+    let tokens = tokens(filter);
+    // Boolean operators and grouping change what a qualifier means; don't guess.
+    if tokens
+        .iter()
+        .any(|t| t == "OR" || t == "AND" || t.starts_with('(') || t.ends_with(')'))
+    {
+        return c;
+    }
+    for token in tokens {
         let Some((negated, key, values)) = qualifier(&token) else {
             continue;
         };
@@ -154,6 +162,26 @@ pub fn column_constraint(filter: &str, field: &Field) -> ColumnConstraint {
 mod tests {
     use super::*;
 
+    use crate::model::field::{FieldKind, Iteration, OptionColor, SelectOption};
+    use crate::model::ids::{FieldId, IterationId, OptionId};
+
+    fn field(name: &str, options: &[&str]) -> Field {
+        Field {
+            id: FieldId::new("F"),
+            name: name.into(),
+            kind: FieldKind::SingleSelect {
+                options: options
+                    .iter()
+                    .map(|o| SelectOption {
+                        id: OptionId::new(*o),
+                        name: (*o).into(),
+                        color: OptionColor::Gray,
+                    })
+                    .collect(),
+            },
+        }
+    }
+
     #[test]
     fn include_terms_hide_the_no_value_column_unless_no_is_asked_for() {
         let status = crate::ui::fixtures::project()
@@ -174,23 +202,15 @@ mod tests {
         assert!(!none_only.allows("Todo", false));
         assert!(column_constraint("-status:Done", &status).allows("", true));
     }
-    use crate::model::field::{FieldKind, Iteration, OptionColor, SelectOption};
-    use crate::model::ids::{FieldId, IterationId, OptionId};
 
-    fn field(name: &str, options: &[&str]) -> Field {
-        Field {
-            id: FieldId::new("F"),
-            name: name.into(),
-            kind: FieldKind::SingleSelect {
-                options: options
-                    .iter()
-                    .map(|o| SelectOption {
-                        id: OptionId::new(*o),
-                        name: (*o).into(),
-                        color: OptionColor::Gray,
-                    })
-                    .collect(),
-            },
+    #[test]
+    fn boolean_operators_and_grouping_leave_columns_alone() {
+        for f in [
+            "status:Todo OR label:bug",
+            "(status:Todo label:bug)",
+            "status:Todo AND -status:Done",
+        ] {
+            assert!(!column_constraint(f, &status()).is_constrained(), "{f}");
         }
     }
 

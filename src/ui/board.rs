@@ -115,7 +115,12 @@ pub fn constrain_columns<'a>(
 ) -> Vec<Column<'a>> {
     let kept: Vec<Column<'a>> = columns
         .iter()
-        .filter(|c| constraint.allows(&c.bucket.title, c.bucket.key.is_none()))
+        .filter(|c| {
+            // GitHub already ran the filter, so a column it really excludes is empty. One
+            // with items means the parser misread the filter: keep it rather than hide items.
+            constraint.allows(&c.bucket.title, c.bucket.key.is_none())
+                || c.lanes.iter().any(|l| !l.items.is_empty())
+        })
         .cloned()
         .collect();
     if kept.is_empty() { columns } else { kept }
@@ -477,11 +482,32 @@ mod tests {
         assert!(header(&unfiltered).contains("1–2 of 6"));
         assert!(header(&cols).contains("1–2 of 4"), "{}", header(&cols));
 
-        // A filter that would hide every column is a parser miss: show them all.
+        // A filter that would hide every column is a parser miss: columns holding items stay,
+        // and with none left at all every column shows.
         let none = column_constraint("status:Nope -no:status", status);
-        assert_eq!(constrain_columns(unfiltered.clone(), &none).len(), 6);
+        let occupied = unfiltered.iter().filter(|c| !c.items().is_empty()).count();
+        assert_eq!(constrain_columns(unfiltered.clone(), &none).len(), occupied);
+        let empty: Vec<Column> = unfiltered
+            .iter()
+            .map(|c| Column {
+                bucket: c.bucket.clone(),
+                lanes: vec![],
+            })
+            .collect();
+        assert_eq!(constrain_columns(empty, &none).len(), 6);
         let unknown = column_constraint("label:bug", status);
-        assert_eq!(constrain_columns(unfiltered, &unknown).len(), 6);
+        assert_eq!(constrain_columns(unfiltered.clone(), &unknown).len(), 6);
+
+        // A column holding items was not excluded by GitHub, whatever the parser thinks.
+        let todo_only = column_constraint("status:Todo", status);
+        for c in constrain_columns(unfiltered.clone(), &todo_only) {
+            assert!(
+                c.bucket.title == "Todo" || !c.items().is_empty(),
+                "{}",
+                c.bucket.title
+            );
+        }
+        assert!(constrain_columns(unfiltered, &todo_only).len() >= occupied);
     }
 
     #[test]
