@@ -338,6 +338,7 @@ mod tests {
     #[test]
     fn picker_and_setup_overlays_render_and_tiny_sizes_do_not_panic() {
         let mut a = app();
+        a.picker = Some(crate::ui::picker::PickerState::loading(false)); // `B` was pressed
         a.on_sync(crate::sync::SyncEvent::Projects(vec![
             crate::model::ProjectSummary {
                 id: crate::model::ProjectId::new("x"),

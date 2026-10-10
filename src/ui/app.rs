@@ -170,6 +170,15 @@ impl App {
             .unwrap_or_else(|| view.filter.clone())
     }
 
+    /// Forgets what belonged to the previous board when another one opens: the quick search,
+    /// the error and the "loaded N of M" note. Config warnings stay.
+    pub fn reset_for_new_board(&mut self) {
+        self.search.clear();
+        self.input.clear();
+        self.status.error = None;
+        self.status.notes.retain(|n| !n.starts_with("loaded "));
+    }
+
     pub fn search_query(&self) -> &str {
         if self.mode == Mode::Search {
             &self.input
@@ -768,6 +777,11 @@ impl App {
     }
 
     fn show_projects(&mut self, list: Vec<ProjectSummary>) {
+        // No picker is waiting: the user cancelled it, or is reading a board (maybe in
+        // detail). Only with no board at all is a picker still required.
+        if self.picker.is_none() && self.snapshot().is_some() {
+            return;
+        }
         let required = self
             .picker
             .as_ref()
@@ -809,6 +823,7 @@ mod tests {
     #[test]
     fn picker_choice_becomes_a_command_and_required_esc_stays_but_ctrl_c_quits() {
         let mut a = app();
+        a.picker = Some(PickerState::loading(false)); // `B` was pressed
         a.on_sync(SyncEvent::Projects(vec![ProjectSummary {
             id: ProjectId::new("x"),
             board: "acme/7".parse().unwrap(),
@@ -830,6 +845,40 @@ mod tests {
         assert_eq!(empty.mode, Mode::Picker);
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(empty.handle_key(ctrl_c), vec![Command::Quit]);
+    }
+
+    #[test]
+    fn a_late_board_list_does_not_reopen_a_cancelled_picker_or_leave_detail() {
+        let list = || {
+            SyncEvent::Projects(vec![ProjectSummary {
+                id: ProjectId::new("x"),
+                board: "acme/7".parse().unwrap(),
+                title: "Sprint".into(),
+                closed: false,
+            }])
+        };
+        let mut a = app();
+        a.picker = Some(PickerState::loading(false));
+        a.mode = Mode::Picker;
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!((a.mode, a.picker.is_none()), (Mode::Normal, true));
+        a.on_sync(list());
+        assert_eq!(a.mode, Mode::Normal, "a cancelled picker stays closed");
+        assert!(a.picker.is_none());
+
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(a.mode, Mode::Detail);
+        a.on_sync(list());
+        assert_eq!(a.mode, Mode::Detail, "the user stays in detail");
+
+        a.picker = Some(PickerState::loading(false));
+        a.mode = Mode::Picker;
+        a.on_sync(list());
+        assert_eq!(
+            a.picker.as_ref().unwrap().visible().len(),
+            1,
+            "a waiting picker fills"
+        );
     }
 
     #[test]

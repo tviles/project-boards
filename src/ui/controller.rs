@@ -133,6 +133,8 @@ pub fn is_web_link(url: &str) -> bool {
 }
 
 pub const NOT_A_WEB_LINK: &str = "not opened: not a web link";
+/// Shown when `r` is pressed while a load or poll is already running.
+pub const REFRESHING: &str = "refreshing…";
 
 pub struct Controller {
     pub app: App,
@@ -280,6 +282,7 @@ impl Controller {
         });
 
         let cached = load_cache(&cache_path(&dir, &board)).filter(|c| c.project.board == board);
+        self.app.reset_for_new_board();
         self.app.store = Box::new(MemoryStore::new(cached.clone()));
         self.app.status.stale = cached.is_some();
         if let Some(view) = state.last_view(&board) {
@@ -436,6 +439,14 @@ impl Controller {
             }
         }
 
+        // A board list nobody waits for any more (its picker was cancelled). A picker is
+        // required only while no board is chosen; reopening one now could trap the user in it.
+        if matches!(event, SyncEvent::Projects(_))
+            && self.app.picker.is_none()
+            && self.board.is_some()
+        {
+            return Vec::new();
+        }
         let projects_failed = matches!(
             &event,
             SyncEvent::Failed {
@@ -485,7 +496,9 @@ impl Controller {
                 Command::OpenUrl(url) if is_web_link(&url) => effects.push(Effect::OpenUrl(url)),
                 Command::OpenUrl(_) => self.app.status.flash = Some(NOT_A_WEB_LINK.into()),
                 Command::Refresh => {
-                    if !self.scheduler.in_flight() {
+                    if self.scheduler.in_flight() {
+                        self.app.status.flash = Some(REFRESHING.into());
+                    } else {
                         effects.extend(self.poll(PollKind::Full, now));
                     }
                 }
@@ -516,7 +529,7 @@ mod tests {
     use super::*;
     use crate::herdr::cli::FakeHerdr;
     use crate::store::cache::{cache_path, save_cache};
-    use crate::ui::fixtures::{key, snapshot};
+    use crate::ui::fixtures::{code, key, snapshot};
     use serde_json::json;
     use std::path::Path;
 
@@ -825,6 +838,85 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn a_cancelled_picker_stays_closed_while_the_board_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        assert!(
+            c.app.snapshot().is_none(),
+            "no cache: the board is still resolving"
+        );
+        c.handle(Input::Key(key('B')), t0);
+        assert_eq!(c.app.mode, Mode::Picker);
+        c.handle(Input::Key(code(crossterm::event::KeyCode::Esc)), t0);
+        assert_eq!(c.app.mode, Mode::Normal);
+        c.handle(at(&c, SyncEvent::Projects(vec![summary("tviles/4")])), t0);
+        assert_eq!(c.app.mode, Mode::Normal);
+        assert!(c.app.picker.is_none());
+    }
+
+    #[test]
+    fn switching_boards_clears_the_old_boards_search_error_and_load_note() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        let mut opts = options(dir.path(), Some("tviles/3"));
+        opts.warnings = vec!["config: unknown key".into()];
+        let t0 = Instant::now();
+        let mut c = Controller::new(
+            opts,
+            Arc::new(FakeHerdr::default()),
+            IncrementalMode::DateTime,
+            t0,
+        );
+        c.start(Ok(()), t0);
+        for k in ['/', 'b', 'u', 'g'] {
+            c.handle(Input::Key(key(k)), t0);
+        }
+        c.handle(Input::Key(code(crossterm::event::KeyCode::Enter)), t0);
+        assert_eq!(c.app.search_query(), "bug");
+        c.handle(
+            at(
+                &c,
+                SyncEvent::ItemsComplete {
+                    items: crate::ui::fixtures::items(),
+                    fetched_at: "2026-10-01T12:00:00Z".into(),
+                    total: 9,
+                    truncated: true,
+                },
+            ),
+            t0,
+        );
+        c.handle(at(&c, fail(SyncTask::Incremental)), t0);
+        assert!(c.app.status.error.is_some());
+        assert!(c.app.status.notes.iter().any(|n| n.starts_with("loaded ")));
+
+        c.commands(vec![Command::PickBoard("tviles/4".parse().unwrap())], t0);
+        assert_eq!(
+            c.board().map(|b| b.to_string()).as_deref(),
+            Some("tviles/4")
+        );
+        assert_eq!(c.app.search_query(), "");
+        assert_eq!(c.app.status.error, None);
+        assert_eq!(c.app.status.notes, ["config: unknown key"]);
+    }
+
+    #[test]
+    fn refresh_during_a_running_poll_says_it_is_refreshing() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        assert!(c.handle(Input::Key(key('r')), t0).is_empty());
+        assert_eq!(c.app.status.flash.as_deref(), Some(REFRESHING));
+        c.handle(at(&c, complete("2026-10-01T12:00:00Z")), t0);
+        assert!(!c.handle(Input::Key(key('r')), t0).is_empty());
+        assert_eq!(
+            c.app.status.flash, None,
+            "a refresh that starts needs no note"
+        );
     }
 
     #[test]
