@@ -200,9 +200,7 @@ mod tests {
         )
         .unwrap();
         let call = open_call(&fake);
-        assert!(
-            call.contains("--placement split --workspace w1 --target-pane p1 --direction right")
-        );
+        assert!(call.contains("--placement split --target-pane p1 --direction right"));
         assert!(call.contains("--env PB_PICKER=1"));
     }
 

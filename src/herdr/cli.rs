@@ -144,7 +144,11 @@ pub fn open_plugin_pane(
         "--placement",
         req.placement.as_str(),
     ]);
-    if let Some(w) = &req.workspace {
+    // herdr 0.9.3 rejects --workspace for every placement but tab: overlay always targets
+    // the active pane, and split/zoomed target --target-pane.
+    if req.placement == Placement::Tab
+        && let Some(w) = &req.workspace
+    {
         a.extend(args(&["--workspace", w]));
     }
     if let Some(t) = &req.target_pane {
@@ -315,7 +319,33 @@ mod tests {
         let call = fake.calls()[0].join(" ");
         assert_eq!(
             call,
-            "plugin pane open --plugin tviles.project-boards --entrypoint board --placement split --workspace w1 --target-pane p1 --direction right --cwd /code --env PB_REPO=tviles/app --focus"
+            "plugin pane open --plugin tviles.project-boards --entrypoint board --placement split --target-pane p1 --direction right --cwd /code --env PB_REPO=tviles/app --focus"
         );
+    }
+
+    #[test]
+    fn only_tab_panes_name_a_workspace() {
+        for (placement, expected) in [
+            (Placement::Tab, true),
+            (Placement::Overlay, false),
+            (Placement::Split, false),
+            (Placement::Zoomed, false),
+        ] {
+            let fake = FakeHerdr::default();
+            fake.respond(
+                &["plugin", "pane", "open"],
+                Ok(json!({"plugin_pane": {"pane": {"pane_id": "new1"}}})),
+            );
+            let req = OpenRequest {
+                placement,
+                workspace: Some("w1".into()),
+                target_pane: None,
+                cwd: None,
+                env: vec![],
+            };
+            open_plugin_pane(&fake, "tviles.project-boards", &req).unwrap();
+            let call = fake.calls()[0].join(" ");
+            assert_eq!(call.contains("--workspace w1"), expected, "{call}");
+        }
     }
 }
