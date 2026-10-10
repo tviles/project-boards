@@ -134,8 +134,8 @@ pub fn project_from_wire(v: &Value, board: &BoardRef) -> Result<Project, GithubE
     })
 }
 
-fn logins(v: &Value, key: &str) -> Vec<String> {
-    nodes(v, key)
+fn logins(nodes: Vec<&Value>) -> Vec<String> {
+    nodes
         .into_iter()
         .filter_map(|n| {
             n["login"]
@@ -146,7 +146,10 @@ fn logins(v: &Value, key: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn value_from_wire(v: &Value) -> Option<(FieldId, FieldValue)> {
+/// Decodes one `fieldValues` node. Labels, assignees, reviewers and linked pull requests are
+/// read from the item's `content` (see board.graphql); for drafts and other content without
+/// them the value is empty.
+pub fn value_from_wire(v: &Value, content: &Value) -> Option<(FieldId, FieldValue)> {
     let field = FieldId::new(v["field"]["id"].as_str()?);
     let value = match typename(v) {
         "ProjectV2ItemFieldTextValue" => FieldValue::Text(v["text"].as_str()?.to_string()),
@@ -172,7 +175,7 @@ pub fn value_from_wire(v: &Value) -> Option<(FieldId, FieldValue)> {
             start_date: str_of(&v["startDate"]),
         },
         "ProjectV2ItemFieldLabelValue" => FieldValue::Labels(
-            nodes(v, "labels")
+            nodes(content, "labels")
                 .into_iter()
                 .map(|l| Label {
                     name: str_of(&l["name"]),
@@ -180,8 +183,13 @@ pub fn value_from_wire(v: &Value) -> Option<(FieldId, FieldValue)> {
                 })
                 .collect(),
         ),
-        "ProjectV2ItemFieldUserValue" => FieldValue::Users(logins(v, "users")),
-        "ProjectV2ItemFieldReviewerValue" => FieldValue::Reviewers(logins(v, "reviewers")),
+        "ProjectV2ItemFieldUserValue" => FieldValue::Users(logins(nodes(content, "assignees"))),
+        "ProjectV2ItemFieldReviewerValue" => FieldValue::Reviewers(logins(
+            nodes(content, "reviewRequests")
+                .into_iter()
+                .map(|r| &r["requestedReviewer"])
+                .collect(),
+        )),
         "ProjectV2ItemFieldMilestoneValue" => {
             FieldValue::Milestone(v["milestone"]["title"].as_str()?.to_string())
         }
@@ -189,7 +197,7 @@ pub fn value_from_wire(v: &Value) -> Option<(FieldId, FieldValue)> {
             FieldValue::Repository(v["repository"]["nameWithOwner"].as_str()?.to_string())
         }
         "ProjectV2ItemFieldPullRequestValue" => FieldValue::PullRequests(
-            nodes(v, "pullRequests")
+            nodes(content, "closedByPullRequestsReferences")
                 .into_iter()
                 .filter_map(|p| p["number"].as_u64().map(|n| n as u32))
                 .collect(),
@@ -242,7 +250,7 @@ pub fn item_from_wire(v: &Value) -> Option<Item> {
         updated_at: str_of(&v["updatedAt"]),
         values: nodes(v, "fieldValues")
             .into_iter()
-            .filter_map(value_from_wire)
+            .filter_map(|n| value_from_wire(n, &v["content"]))
             .collect(),
     })
 }
@@ -431,15 +439,19 @@ pub(crate) mod tests {
         json!({
             "id": "PVTI_1", "type": "ISSUE", "isArchived": false, "updatedAt": "2026-10-01T10:00:00Z",
             "content": {"__typename": "Issue", "number": 12, "title": "Crash 🚀", "url": "https://github.com/tviles/t/issues/12",
-                        "state": "OPEN", "repository": {"nameWithOwner": "tviles/t"}},
+                        "state": "OPEN", "repository": {"nameWithOwner": "tviles/t"},
+                        "labels": {"nodes": [{"name": "bug", "color": "d73a4a"}]},
+                        "assignees": {"nodes": [{"login": "tviles"}]},
+                        "closedByPullRequestsReferences": {"nodes": [{"number": 30}, null]}},
             "fieldValues": {"nodes": [
                 {"__typename": "ProjectV2ItemFieldTextValue", "text": "Crash 🚀", "field": {"id": "F_title"}},
                 {"__typename": "ProjectV2ItemFieldSingleSelectValue", "optionId": "o_todo", "name": "Todo", "field": {"id": "F_status"}},
                 {"__typename": "ProjectV2ItemFieldMultiSelectValue", "options": [{"id": "m_api", "name": "api"}], "field": {"id": "F_areas"}},
                 {"__typename": "ProjectV2ItemFieldIterationValue", "iterationId": "it2", "title": "Sprint 2", "startDate": "2026-10-15", "field": {"id": "F_sprint"}},
                 {"__typename": "ProjectV2ItemFieldNumberValue", "number": 3.0, "field": {"id": "F_size"}},
-                {"__typename": "ProjectV2ItemFieldUserValue", "users": {"nodes": [{"login": "tviles"}]}, "field": {"id": "F_assignees"}},
-                {"__typename": "ProjectV2ItemFieldLabelValue", "labels": {"nodes": [{"name": "bug", "color": "d73a4a"}]}, "field": {"id": "F_labels"}},
+                {"__typename": "ProjectV2ItemFieldUserValue", "field": {"id": "F_assignees"}},
+                {"__typename": "ProjectV2ItemFieldLabelValue", "field": {"id": "F_labels"}},
+                {"__typename": "ProjectV2ItemFieldPullRequestValue", "field": {"id": "F_prs"}},
                 {"__typename": "ProjectV2ItemIssueFieldValue"},
                 {"__typename": "ProjectV2ItemFieldFromTheFuture", "field": {"id": "F_future"}}
             ]}
@@ -473,7 +485,98 @@ pub(crate) mod tests {
     fn values_of_unknown_types_are_dropped() {
         let item = item_from_wire(&item_json()).unwrap();
         assert!(item.value(&FieldId::new("F_future")).is_none());
-        assert_eq!(item.values.len(), 7);
+        assert_eq!(item.values.len(), 8);
+    }
+
+    #[test]
+    fn labels_assignees_and_linked_prs_come_from_issue_content() {
+        let item = item_from_wire(&item_json()).unwrap();
+        assert_eq!(
+            item.value(&FieldId::new("F_labels")),
+            Some(&FieldValue::Labels(vec![Label {
+                name: "bug".into(),
+                color: "d73a4a".into()
+            }]))
+        );
+        assert_eq!(
+            item.value(&FieldId::new("F_assignees")),
+            Some(&FieldValue::Users(vec!["tviles".into()]))
+        );
+        assert_eq!(
+            item.value(&FieldId::new("F_prs")),
+            Some(&FieldValue::PullRequests(vec![30]))
+        );
+    }
+
+    #[test]
+    fn reviewers_come_from_pull_request_review_requests() {
+        let mut v = item_json();
+        v["content"] = json!({"__typename": "PullRequest", "number": 4, "title": "PR", "url": "u", "state": "OPEN",
+        "isDraft": false, "repository": {"nameWithOwner": "tviles/t"},
+        "labels": {"nodes": []}, "assignees": {"nodes": [{"login": "a"}]},
+        "reviewRequests": {"nodes": [
+            {"requestedReviewer": {"__typename": "User", "login": "rev"}},
+            {"requestedReviewer": {"__typename": "Team", "slug": "core"}},
+            {"requestedReviewer": {"__typename": "Bot"}},
+            {"requestedReviewer": null}
+        ]}});
+        v["fieldValues"]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"__typename": "ProjectV2ItemFieldReviewerValue", "field": {"id": "F_reviewers"}}));
+        let item = item_from_wire(&v).unwrap();
+        assert_eq!(
+            item.value(&FieldId::new("F_reviewers")),
+            Some(&FieldValue::Reviewers(vec!["rev".into(), "core".into()]))
+        );
+        assert_eq!(item.assignees(), ["a"]);
+        assert_eq!(
+            item.value(&FieldId::new("F_labels")),
+            Some(&FieldValue::Labels(vec![]))
+        );
+        assert_eq!(
+            item.value(&FieldId::new("F_prs")),
+            Some(&FieldValue::PullRequests(vec![])),
+            "a pull request has no closing-PR references"
+        );
+    }
+
+    #[test]
+    fn drafts_keep_empty_content_backed_values() {
+        let mut v = item_json();
+        v["content"] = json!({"__typename": "DraftIssue", "title": "Idea"});
+        let item = item_from_wire(&v).unwrap();
+        assert_eq!(
+            item.value(&FieldId::new("F_labels")),
+            Some(&FieldValue::Labels(vec![]))
+        );
+        assert_eq!(
+            item.value(&FieldId::new("F_assignees")),
+            Some(&FieldValue::Users(vec![]))
+        );
+        assert_eq!(
+            item.value(&FieldId::new("F_prs")),
+            Some(&FieldValue::PullRequests(vec![]))
+        );
+        assert_eq!(
+            item.value(&FieldId::new("F_status")),
+            Some(&FieldValue::SingleSelect {
+                option_id: OptionId::new("o_todo"),
+                name: "Todo".into()
+            }),
+            "ordinary values are unaffected"
+        );
+    }
+
+    #[test]
+    fn values_nested_in_field_values_are_ignored() {
+        // The old response shape: a connection inside the field value. It must not be read.
+        let v = json!({"__typename": "ProjectV2ItemFieldLabelValue",
+                       "labels": {"nodes": [{"name": "stale", "color": "fff"}]}, "field": {"id": "F_labels"}});
+        assert_eq!(
+            value_from_wire(&v, &json!({"__typename": "Issue", "labels": {"nodes": []}})),
+            Some((FieldId::new("F_labels"), FieldValue::Labels(vec![])))
+        );
     }
 
     #[test]
@@ -522,7 +625,7 @@ pub(crate) mod tests {
         let v = json!({"__typename": "ProjectV2ItemFieldTextValue", "text": "x",
                        "field": {"__typename": "ProjectV2Field", "id": "F_title"}});
         assert_eq!(
-            value_from_wire(&v),
+            value_from_wire(&v, &serde_json::Value::Null),
             Some((FieldId::new("F_title"), FieldValue::Text("x".into())))
         );
     }

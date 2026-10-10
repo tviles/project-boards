@@ -40,10 +40,24 @@ fragment ProjectSchemaFields on ProjectV2 {
 
 fragment ItemFields on ProjectV2Item {
   id type isArchived updatedAt
+  # Labels, assignees, reviewers and linked PRs come from `content`, not from `fieldValues`:
+  # GitHub scores a query by its `first:` arguments, and a connection nested inside
+  # `fieldValues(first: 50)` under `items(first: 100)` costs 5,000 requests whether or not
+  # it returns anything. One level up it costs 100.
   content {
     __typename
-    ... on Issue { number title url state repository { nameWithOwner } }
-    ... on PullRequest { number title url state isDraft repository { nameWithOwner } }
+    ... on Issue {
+      number title url state repository { nameWithOwner }
+      labels(first: 20) { nodes { name color } }
+      assignees(first: 10) { nodes { login } }
+      closedByPullRequestsReferences(first: 5) { nodes { number } }
+    }
+    ... on PullRequest {
+      number title url state isDraft repository { nameWithOwner }
+      labels(first: 20) { nodes { name color } }
+      assignees(first: 10) { nodes { login } }
+      reviewRequests(first: 10) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { slug } } } }
+    }
     ... on DraftIssue { title }
   }
   fieldValues(first: 50) {
@@ -55,15 +69,14 @@ fragment ItemFields on ProjectV2Item {
       ... on ProjectV2ItemFieldSingleSelectValue { optionId name field { ...FieldRef } }
       ... on ProjectV2ItemFieldMultiSelectValue { options { id name } field { ...FieldRef } }
       ... on ProjectV2ItemFieldIterationValue { iterationId title startDate field { ...FieldRef } }
-      ... on ProjectV2ItemFieldLabelValue { labels(first: 20) { nodes { name color } } field { ...FieldRef } }
-      ... on ProjectV2ItemFieldUserValue { users(first: 10) { nodes { login } } field { ...FieldRef } }
+      # No connection may be nested here (see above). These four only mark which field holds
+      # the value; convert.rs reads the value itself from `content`.
+      ... on ProjectV2ItemFieldLabelValue { field { ...FieldRef } }
+      ... on ProjectV2ItemFieldUserValue { field { ...FieldRef } }
       ... on ProjectV2ItemFieldMilestoneValue { milestone { title } field { ...FieldRef } }
       ... on ProjectV2ItemFieldRepositoryValue { repository { nameWithOwner } field { ...FieldRef } }
-      ... on ProjectV2ItemFieldPullRequestValue { pullRequests(first: 10) { nodes { number } } field { ...FieldRef } }
-      ... on ProjectV2ItemFieldReviewerValue {
-        reviewers(first: 10) { nodes { __typename ... on User { login } ... on Team { slug } } }
-        field { ...FieldRef }
-      }
+      ... on ProjectV2ItemFieldPullRequestValue { field { ...FieldRef } }
+      ... on ProjectV2ItemFieldReviewerValue { field { ...FieldRef } }
     }
   }
 }
@@ -82,11 +95,11 @@ query ProjectSchema($id: ID!) {
   node(id: $id) { __typename ... on ProjectV2 { ...ProjectSchemaFields } }
 }
 
-query ItemsPage($id: ID!, $after: String, $query: String!) {
+query ItemsPage($id: ID!, $first: Int!, $after: String, $query: String!) {
   node(id: $id) {
     __typename
     ... on ProjectV2 {
-      items(first: 100, after: $after, query: $query) {
+      items(first: $first, after: $after, query: $query) {
         totalCount
         pageInfo { hasNextPage endCursor }
         nodes { ...ItemFields }
@@ -95,11 +108,26 @@ query ItemsPage($id: ID!, $after: String, $query: String!) {
   }
 }
 
-query ViewItemIds($id: ID!, $after: String, $query: String!) {
+# ItemsPage plus a dry-run cost, for the live cost test only. A dry run evaluates nothing.
+query ItemsPageCost($id: ID!, $first: Int!, $after: String, $query: String!) {
+  rateLimit(dryRun: true) { cost }
   node(id: $id) {
     __typename
     ... on ProjectV2 {
-      items(first: 100, after: $after, query: $query) {
+      items(first: $first, after: $after, query: $query) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes { ...ItemFields }
+      }
+    }
+  }
+}
+
+query ViewItemIds($id: ID!, $first: Int!, $after: String, $query: String!) {
+  node(id: $id) {
+    __typename
+    ... on ProjectV2 {
+      items(first: $first, after: $after, query: $query) {
         totalCount
         pageInfo { hasNextPage endCursor }
         nodes { id }

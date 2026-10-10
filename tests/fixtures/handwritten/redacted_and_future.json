@@ -10,7 +10,9 @@
             "content": null, "fieldValues": { "nodes": [] } },
           { "id": "PVTI_future", "type": "ISSUE", "isArchived": false, "updatedAt": "2026-10-01T00:00:00Z",
             "content": { "__typename": "Issue", "number": 1, "title": "t", "url": "u", "state": "OPEN",
-                         "repository": { "nameWithOwner": "tviles/t" } },
+                         "repository": { "nameWithOwner": "tviles/t" },
+                         "labels": { "nodes": [] }, "assignees": { "nodes": [] },
+                         "closedByPullRequestsReferences": { "nodes": [] } },
             "fieldValues": { "nodes": [ { "__typename": "ProjectV2ItemFieldFromTheFuture", "field": { "id": "F" } } ] } }
         ]
       }

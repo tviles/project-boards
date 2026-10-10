@@ -2,6 +2,7 @@
 
 use crate::github::Github;
 use crate::github::GithubError;
+use crate::github::client::{FULL_PAGE, POLL_PAGE};
 use crate::model::*;
 use crate::store::ViewList;
 use crate::sync::{IncrementalMode, SyncEvent, SyncTask, incremental_query};
@@ -81,7 +82,11 @@ impl Syncer {
         let mut items: Vec<Item> = Vec::new();
         let mut after: Option<String> = None;
         let (total, truncated) = loop {
-            match self.gh.fetch_items_page(project, "", after.take()).await {
+            match self
+                .gh
+                .fetch_items_page(project, "", FULL_PAGE, after.take())
+                .await
+            {
                 Ok(page) => {
                     let total = page.total;
                     items.extend(page.nodes.iter().cloned());
@@ -122,7 +127,7 @@ impl Syncer {
         loop {
             match self
                 .gh
-                .fetch_items_page(project, &query, after.take())
+                .fetch_items_page(project, &query, POLL_PAGE, after.take())
                 .await
             {
                 Ok(page) => {
@@ -314,6 +319,7 @@ mod tests {
             matches!(&events[2], SyncEvent::ItemsComplete { items, truncated: false, .. } if items.len() == 3)
         );
         assert_eq!(t.requests()[1].variables["after"], "c1");
+        assert_eq!(t.requests()[0].variables["first"], 100);
     }
 
     /// Review Focus 1: a page failing partway never produces a replace.
@@ -434,6 +440,28 @@ mod tests {
         );
         assert!(
             matches!(&drain(&mut rx)[0], SyncEvent::ItemsUpdated { items, .. } if items.len() == 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn incremental_polls_twenty_at_a_time_and_follows_pages() {
+        let (t, s, mut rx) = setup(2000);
+        t.push("ItemsPage", page(&["a", "b"], 3, Some("c1")));
+        t.push("ItemsPage", page(&["c"], 3, None));
+        assert!(
+            s.incremental(&ProjectId::new("P"), "2026-10-01T00:00:00Z")
+                .await
+        );
+        let requests = t.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|r| r.variables["first"] == 20));
+        assert_eq!(requests[1].variables["after"], "c1");
+        assert_eq!(
+            requests[1].variables["query"],
+            "updated:>=2026-10-01T00:00:00Z"
+        );
+        assert!(
+            matches!(&drain(&mut rx)[0], SyncEvent::ItemsUpdated { items, .. } if items.len() == 3)
         );
     }
 

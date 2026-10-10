@@ -115,15 +115,24 @@ fn items_conn<'a>(
     }
 }
 
+/// Items per page for full loads and view-id fetches.
+pub const FULL_PAGE: u32 = 100;
+/// Items per page for incremental polls, which usually match a handful of items. GitHub scores
+/// a query by its `first:` arguments, so a smaller page makes each poll cheaper.
+pub const POLL_PAGE: u32 = 20;
+
 impl Github {
+    /// One page of items matching `query`, `first` at a time.
     pub async fn fetch_items_page(
         &self,
         project: &ProjectId,
         query: &str,
+        first: u32,
         after: Option<String>,
     ) -> Result<Page<Item>, GithubError> {
         let body = queries::ItemsPage::build_query(queries::items_page::Variables {
             id: project.0.clone(),
+            first: i64::from(first),
             after,
             query: query.to_string(),
         });
@@ -144,6 +153,7 @@ impl Github {
     ) -> Result<Page<ItemId>, GithubError> {
         let body = queries::ViewItemIds::build_query(queries::view_item_ids::Variables {
             id: project.0.clone(),
+            first: i64::from(FULL_PAGE),
             after,
             query: query.to_string(),
         });
@@ -154,6 +164,25 @@ impl Github {
             .filter_map(|n| n["id"].as_str().map(ItemId::new))
             .collect();
         Ok(Page { nodes, total, next })
+    }
+
+    /// The rate-limit points an `ItemsPage` request of `first` items would cost, from a dry
+    /// run that evaluates nothing. Used by the live cost test.
+    pub async fn items_page_cost(
+        &self,
+        project: &ProjectId,
+        first: u32,
+    ) -> Result<u64, GithubError> {
+        let body = queries::ItemsPageCost::build_query(queries::items_page_cost::Variables {
+            id: project.0.clone(),
+            first: i64::from(first),
+            after: None,
+            query: String::new(),
+        });
+        let data = self.run(GraphqlRequest::from_body(body)).await?.data;
+        data["rateLimit"]["cost"]
+            .as_u64()
+            .ok_or_else(|| GithubError::Decode("dry run returned no rateLimit.cost".into()))
     }
 
     /// Loads items by id. Pass at most 100 ids; ids that no longer exist are skipped.
@@ -304,7 +333,7 @@ mod tests {
             "pageInfo": {"hasNextPage": true, "endCursor": "c1"}, "nodes": [item_json(), null]}}}),
         );
         let page = gh(t.clone())
-            .fetch_items_page(&ProjectId::new("PVT_1"), "label:bug", None)
+            .fetch_items_page(&ProjectId::new("PVT_1"), "label:bug", POLL_PAGE, None)
             .await
             .unwrap();
         assert_eq!(
@@ -315,9 +344,10 @@ mod tests {
         assert_eq!(
             (
                 req.variables["id"].as_str(),
-                req.variables["query"].as_str()
+                req.variables["query"].as_str(),
+                req.variables["first"].as_u64()
             ),
-            (Some("PVT_1"), Some("label:bug"))
+            (Some("PVT_1"), Some("label:bug"), Some(20))
         );
     }
 
@@ -326,12 +356,38 @@ mod tests {
         let t = Arc::new(FixtureTransport::new());
         t.push("ViewItemIds", json!({"node": {"items": {"totalCount": 2,
             "pageInfo": {"hasNextPage": false, "endCursor": "c9"}, "nodes": [{"id": "a"}, {"id": "b"}]}}}));
-        let page = gh(t)
+        let page = gh(t.clone())
             .fetch_view_ids_page(&ProjectId::new("P"), "", Some("c8".into()))
             .await
             .unwrap();
         assert_eq!(page.nodes, vec![ItemId::new("a"), ItemId::new("b")]);
         assert_eq!(page.next, None);
+        assert_eq!(t.requests()[0].variables["first"], 100);
+    }
+
+    #[tokio::test]
+    async fn items_page_cost_reads_the_dry_run_cost() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push(
+            "ItemsPageCost",
+            json!({"rateLimit": {"cost": 7}, "node": null}),
+        );
+        let cost = gh(t.clone())
+            .items_page_cost(&ProjectId::new("PVT_1"), FULL_PAGE)
+            .await
+            .unwrap();
+        assert_eq!(cost, 7);
+        let req = &t.requests()[0];
+        assert_eq!(req.variables["first"], 100);
+        assert!(req.query.contains("dryRun: true"), "{}", req.query);
+    }
+
+    #[tokio::test]
+    async fn items_page_cost_without_a_cost_is_a_decode_error() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push("ItemsPageCost", json!({"rateLimit": null}));
+        let r = gh(t).items_page_cost(&ProjectId::new("P"), FULL_PAGE).await;
+        assert!(matches!(r, Err(GithubError::Decode(_))), "{r:?}");
     }
 
     #[tokio::test]
@@ -354,7 +410,7 @@ mod tests {
         let g = gh(t);
         let p = ProjectId::new("PVT_x");
         assert!(matches!(
-            g.fetch_items_page(&p, "", None).await,
+            g.fetch_items_page(&p, "", FULL_PAGE, None).await,
             Err(GithubError::Decode(_))
         ));
         assert!(matches!(

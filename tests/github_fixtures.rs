@@ -1,6 +1,7 @@
 //! Offline decoding tests against recorded testbed responses.
 
 use project_boards::github::Github;
+use project_boards::github::client::FULL_PAGE;
 use project_boards::github::fixture::FixtureTransport;
 use project_boards::model::*;
 use std::sync::Arc;
@@ -44,11 +45,35 @@ async fn recorded_items_decode() {
     let t = Arc::new(FixtureTransport::new());
     t.push_file("ItemsPage", format!("{REC}/items/ItemsPage__1.json"));
     let page = Github::new(t)
-        .fetch_items_page(&id, "", None)
+        .fetch_items_page(&id, "", FULL_PAGE, None)
         .await
         .unwrap();
     assert_eq!(page.nodes.len(), 13);
     assert!(page.nodes.iter().any(|i| i.title().contains('🚀')));
+    // Labels, assignees and linked PRs are read from content (R37).
+    let issue = |n: u32| page.nodes.iter().find(|i| i.number() == Some(n)).unwrap();
+    assert_eq!(issue(1).label_names(), ["bug"]);
+    assert_eq!(issue(1).assignees(), ["tviles"]);
+    assert!(
+        issue(2)
+            .values
+            .values()
+            .any(|v| *v == FieldValue::PullRequests(vec![12]))
+    );
+}
+
+#[tokio::test]
+async fn recorded_hydrate_decodes() {
+    let t = Arc::new(FixtureTransport::new());
+    t.push_file(
+        "HydrateItems",
+        format!("{REC}/view_ids/HydrateItems__1.json"),
+    );
+    let items = Github::new(t)
+        .hydrate_items(&[ItemId::new("x")])
+        .await
+        .unwrap();
+    assert!(items.iter().all(|i| i.label_names().contains(&"bug")));
 }
 
 #[tokio::test]
@@ -59,7 +84,7 @@ async fn redacted_and_future_values_degrade() {
         "tests/fixtures/handwritten/redacted_and_future.json",
     );
     let page = Github::new(t)
-        .fetch_items_page(&ProjectId::new("P"), "", None)
+        .fetch_items_page(&ProjectId::new("P"), "", FULL_PAGE, None)
         .await
         .unwrap();
     assert_eq!(page.nodes[0].content, ItemContent::Redacted);

@@ -1,10 +1,29 @@
 {
+  "_pending_rerecord": "Converted from the pre-R37 response shape by a script (labels, assignees, reviewers and linked PRs moved from fieldValues into content). Pending a re-record (Task 27 Step 5).",
   "data": {
     "nodes": [
       {
         "__typename": "ProjectV2Item",
         "content": {
           "__typename": "Issue",
+          "assignees": {
+            "nodes": [
+              {
+                "login": "tviles"
+              }
+            ]
+          },
+          "closedByPullRequestsReferences": {
+            "nodes": []
+          },
+          "labels": {
+            "nodes": [
+              {
+                "color": "d73a4a",
+                "name": "bug"
+              }
+            ]
+          },
           "number": 1,
           "repository": {
             "nameWithOwner": "tviles/project-boards-testbed"
@@ -20,13 +39,6 @@
               "field": {
                 "__typename": "ProjectV2Field",
                 "id": "PVTF_lAHOADq2Kc4Bl819zhknr3A"
-              },
-              "users": {
-                "nodes": [
-                  {
-                    "login": "tviles"
-                  }
-                ]
               }
             },
             {
@@ -44,14 +56,6 @@
               "field": {
                 "__typename": "ProjectV2Field",
                 "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
-              },
-              "labels": {
-                "nodes": [
-                  {
-                    "color": "d73a4a",
-                    "name": "bug"
-                  }
-                ]
               }
             },
             {

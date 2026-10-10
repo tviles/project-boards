@@ -25,6 +25,7 @@ operation!(
     ResolveProject,
     ProjectSchema,
     ItemsPage,
+    ItemsPageCost,
     ViewItemIds,
     HydrateItems,
     ItemDetail,

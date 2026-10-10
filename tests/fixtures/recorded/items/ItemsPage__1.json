@@ -1,4 +1,5 @@
 {
+  "_pending_rerecord": "Converted from the pre-R37 response shape by a script (labels, assignees, reviewers and linked PRs moved from fieldValues into content). Pending a re-record (Task 27 Step 5).",
   "data": {
     "node": {
       "__typename": "ProjectV2",
@@ -7,6 +8,24 @@
           {
             "content": {
               "__typename": "Issue",
+              "assignees": {
+                "nodes": [
+                  {
+                    "login": "tviles"
+                  }
+                ]
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "d73a4a",
+                    "name": "bug"
+                  }
+                ]
+              },
               "number": 1,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
@@ -22,13 +41,6 @@
                   "field": {
                     "__typename": "ProjectV2Field",
                     "id": "PVTF_lAHOADq2Kc4Bl819zhknr3A"
-                  },
-                  "users": {
-                    "nodes": [
-                      {
-                        "login": "tviles"
-                      }
-                    ]
                   }
                 },
                 {
@@ -46,14 +58,6 @@
                   "field": {
                     "__typename": "ProjectV2Field",
                     "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
-                  },
-                  "labels": {
-                    "nodes": [
-                      {
-                        "color": "d73a4a",
-                        "name": "bug"
-                      }
-                    ]
                   }
                 },
                 {
@@ -153,6 +157,24 @@
           {
             "content": {
               "__typename": "Issue",
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "number": 12
+                  }
+                ]
+              },
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "a2eeef",
+                    "name": "enhancement"
+                  }
+                ]
+              },
               "number": 2,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
@@ -178,14 +200,6 @@
                   "field": {
                     "__typename": "ProjectV2Field",
                     "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
-                  },
-                  "labels": {
-                    "nodes": [
-                      {
-                        "color": "a2eeef",
-                        "name": "enhancement"
-                      }
-                    ]
                   }
                 },
                 {
@@ -203,13 +217,6 @@
                   "field": {
                     "__typename": "ProjectV2Field",
                     "id": "PVTF_lAHOADq2Kc4Bl819zhknr3M"
-                  },
-                  "pullRequests": {
-                    "nodes": [
-                      {
-                        "number": 12
-                      }
-                    ]
                   }
                 },
                 {
@@ -258,6 +265,20 @@
           {
             "content": {
               "__typename": "Issue",
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "0075ca",
+                    "name": "docs"
+                  }
+                ]
+              },
               "number": 3,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
@@ -283,14 +304,6 @@
                   "field": {
                     "__typename": "ProjectV2Field",
                     "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
-                  },
-                  "labels": {
-                    "nodes": [
-                      {
-                        "color": "0075ca",
-                        "name": "docs"
-                      }
-                    ]
                   }
                 },
                 {
@@ -329,6 +342,24 @@
           {
             "content": {
               "__typename": "Issue",
+              "assignees": {
+                "nodes": [
+                  {
+                    "login": "tviles"
+                  }
+                ]
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "a2eeef",
+                    "name": "enhancement"
+                  }
+                ]
+              },
               "number": 4,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
@@ -344,13 +375,6 @@
                   "field": {
                     "__typename": "ProjectV2Field",
                     "id": "PVTF_lAHOADq2Kc4Bl819zhknr3A"
-                  },
-                  "users": {
-                    "nodes": [
-                      {
-                        "login": "tviles"
-                      }
-                    ]
                   }
                 },
                 {
@@ -368,14 +392,6 @@
                   "field": {
                     "__typename": "ProjectV2Field",
                     "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
-                  },
-                  "labels": {
-                    "nodes": [
-                      {
-                        "color": "a2eeef",
-                        "name": "enhancement"
-                      }
-                    ]
                   }
                 },
                 {
@@ -414,6 +430,20 @@
           {
             "content": {
               "__typename": "Issue",
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "a2eeef",
+                    "name": "enhancement"
+                  }
+                ]
+              },
               "number": 5,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
@@ -439,14 +469,6 @@
                   "field": {
                     "__typename": "ProjectV2Field",
                     "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
-                  },
-                  "labels": {
-                    "nodes": [
-                      {
-                        "color": "a2eeef",
-                        "name": "enhancement"
-                      }
-                    ]
                   }
                 },
                 {
@@ -485,6 +507,20 @@
           {
             "content": {
               "__typename": "Issue",
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "a2eeef",
+                    "name": "enhancement"
+                  }
+                ]
+              },
               "number": 6,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
@@ -510,14 +546,6 @@
                   "field": {
                     "__typename": "ProjectV2Field",
                     "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
-                  },
-                  "labels": {
-                    "nodes": [
-                      {
-                        "color": "a2eeef",
-                        "name": "enhancement"
-                      }
-                    ]
                   }
                 },
                 {
@@ -556,6 +584,20 @@
           {
             "content": {
               "__typename": "Issue",
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "a2eeef",
+                    "name": "enhancement"
+                  }
+                ]
+              },
               "number": 7,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
@@ -581,14 +623,6 @@
                   "field": {
                     "__typename": "ProjectV2Field",
                     "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
-                  },
-                  "labels": {
-                    "nodes": [
-                      {
-                        "color": "a2eeef",
-                        "name": "enhancement"
-                      }
-                    ]
                   }
                 },
                 {
@@ -627,6 +661,20 @@
           {
             "content": {
               "__typename": "Issue",
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "a2eeef",
+                    "name": "enhancement"
+                  }
+                ]
+              },
               "number": 8,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
@@ -652,14 +700,6 @@
                   "field": {
                     "__typename": "ProjectV2Field",
                     "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
-                  },
-                  "labels": {
-                    "nodes": [
-                      {
-                        "color": "a2eeef",
-                        "name": "enhancement"
-                      }
-                    ]
                   }
                 },
                 {
@@ -698,6 +738,20 @@
           {
             "content": {
               "__typename": "Issue",
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "a2eeef",
+                    "name": "enhancement"
+                  }
+                ]
+              },
               "number": 9,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
@@ -723,14 +777,6 @@
                   "field": {
                     "__typename": "ProjectV2Field",
                     "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
-                  },
-                  "labels": {
-                    "nodes": [
-                      {
-                        "color": "a2eeef",
-                        "name": "enhancement"
-                      }
-                    ]
                   }
                 },
                 {
@@ -769,6 +815,20 @@
           {
             "content": {
               "__typename": "Issue",
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "a2eeef",
+                    "name": "enhancement"
+                  }
+                ]
+              },
               "number": 10,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
@@ -794,14 +854,6 @@
                   "field": {
                     "__typename": "ProjectV2Field",
                     "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
-                  },
-                  "labels": {
-                    "nodes": [
-                      {
-                        "color": "a2eeef",
-                        "name": "enhancement"
-                      }
-                    ]
                   }
                 },
                 {
@@ -840,10 +892,19 @@
           {
             "content": {
               "__typename": "PullRequest",
+              "assignees": {
+                "nodes": []
+              },
               "isDraft": false,
+              "labels": {
+                "nodes": []
+              },
               "number": 12,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
+              },
+              "reviewRequests": {
+                "nodes": []
               },
               "state": "OPEN",
               "title": "Sample pull request",
