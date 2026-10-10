@@ -2,6 +2,7 @@
 
 pub mod detail;
 pub mod field;
+pub mod filter;
 pub mod ids;
 pub mod item;
 pub mod project;
@@ -10,6 +11,7 @@ pub mod view;
 
 pub use detail::*;
 pub use field::*;
+pub use filter::*;
 pub use ids::*;
 pub use item::*;
 pub use project::*;

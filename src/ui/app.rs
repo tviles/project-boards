@@ -2,7 +2,7 @@ use crate::github::GithubError;
 use crate::model::*;
 use crate::store::{BoardSnapshot, Store, StoreUpdate, ViewList};
 use crate::sync::{SyncEvent, SyncTask, store_update};
-use crate::ui::board::{BoardSelection, Column, build_columns, resolve_layout};
+use crate::ui::board::{BoardSelection, Column, build_columns, constrain_columns, resolve_layout};
 use crate::ui::detail::{DetailOutcome, DetailState, build_doc};
 use crate::ui::keymap::{Action, Keymap};
 use crate::ui::markdown::Target;
@@ -253,7 +253,8 @@ impl App {
             return Vec::new();
         };
         let items = self.view_items().unwrap_or_default();
-        build_columns(&items, field, view.group_field(&project.fields))
+        let columns = build_columns(&items, field, view.group_field(&project.fields));
+        constrain_columns(columns, &column_constraint(&self.effective_filter(), field))
     }
 
     pub fn selected_item(&self) -> Option<&Item> {
@@ -961,6 +962,35 @@ mod tests {
         assert_eq!(selected_id(&a), "e", "No Status column");
         a.handle_key(key('h'));
         assert_eq!(selected_id(&a), "d");
+    }
+
+    #[test]
+    fn the_board_hides_status_columns_its_filter_excludes() {
+        let mut snap = snapshot();
+        snap.project.views[1].filter = "-status:Done,\"In Progress\"".into();
+        let mut a = App::new(
+            Box::new(MemoryStore::new(Some(snap))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        a.select_view(&ViewId::new("V_board"));
+        a.on_sync(SyncEvent::ViewIds {
+            view: ViewId::new("V_board"),
+            filter: "-status:Done,\"In Progress\"".into(),
+            list: ViewList {
+                ids: vec![ItemId::new("a"), ItemId::new("c"), ItemId::new("e")],
+                total: 3,
+                truncated: false,
+            },
+        });
+        let titles: Vec<String> = a
+            .board_columns()
+            .iter()
+            .map(|c| c.bucket.title.clone())
+            .collect();
+        assert_eq!(titles, ["Todo", "No Status"]);
+        a.handle_key(key('l'));
+        assert_eq!(selected_id(&a), "e", "moves straight to No Status");
     }
 
     #[test]

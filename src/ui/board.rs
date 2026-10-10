@@ -107,6 +107,20 @@ pub fn build_columns<'a>(
         .collect()
 }
 
+/// The columns `constraint` allows, in their order. When it would leave none, all of them:
+/// a filter that hides every column is more likely misread than meant.
+pub fn constrain_columns<'a>(
+    columns: Vec<Column<'a>>,
+    constraint: &ColumnConstraint,
+) -> Vec<Column<'a>> {
+    let kept: Vec<Column<'a>> = columns
+        .iter()
+        .filter(|c| constraint.allows(&c.bucket.title, c.bucket.key.is_none()))
+        .cloned()
+        .collect();
+    if kept.is_empty() { columns } else { kept }
+}
+
 /// The layout actually drawn, and a note when it differs from the one asked for.
 pub fn resolve_layout(
     requested: Layout,
@@ -415,6 +429,59 @@ mod tests {
         );
         assert!(screen.contains("No Status"));
         assert!(!screen.contains("Todo 2"));
+    }
+
+    #[test]
+    fn columns_the_filter_excludes_are_hidden_and_not_counted() {
+        let mut p = project();
+        let status = p.fields.iter_mut().find(|f| f.name == "Status").unwrap();
+        if let FieldKind::SingleSelect { options } = &mut status.kind {
+            for (i, (id, name)) in [("o_design", "Design"), ("o_review", "Design Review")]
+                .into_iter()
+                .enumerate()
+            {
+                options.insert(
+                    1 + i,
+                    SelectOption {
+                        id: OptionId::new(id),
+                        name: name.into(),
+                        color: OptionColor::Purple,
+                    },
+                );
+            }
+        }
+        let status = field(&p, "Status");
+        let all = items();
+        let refs: Vec<&Item> = all.iter().collect();
+        let titles = |cols: &[Column]| {
+            cols.iter()
+                .map(|c| c.bucket.title.clone())
+                .collect::<Vec<_>>()
+        };
+        let unfiltered = build_columns(&refs, status, None);
+        assert_eq!(unfiltered.len(), 6);
+        let constraint = column_constraint("-status:\"Design Review\",Design", status);
+        let cols = constrain_columns(unfiltered.clone(), &constraint);
+        assert_eq!(
+            titles(&cols),
+            ["Todo", "In Progress", "Done", "No Status"],
+            "GitHub's option order"
+        );
+        let sel = BoardSelection::default();
+        let header = |cols: &[Column]| {
+            let screen = render_to_string(50, 6, |f| {
+                render_board(f, f.area(), cols, &sel, status, &Theme::plain())
+            });
+            screen.lines().next().unwrap().to_string()
+        };
+        assert!(header(&unfiltered).contains("1–2 of 6"));
+        assert!(header(&cols).contains("1–2 of 4"), "{}", header(&cols));
+
+        // A filter that would hide every column is a parser miss: show them all.
+        let none = column_constraint("status:Nope -no:status", status);
+        assert_eq!(constrain_columns(unfiltered.clone(), &none).len(), 6);
+        let unknown = column_constraint("label:bug", status);
+        assert_eq!(constrain_columns(unfiltered, &unknown).len(), 6);
     }
 
     #[test]
