@@ -1,5 +1,4 @@
 {
-  "_pending_rerecord": "Converted from the pre-R37 response shape by a script (labels, assignees, reviewers and linked PRs moved from fieldValues into content). Pending a re-record (Task 27 Step 5).",
   "data": {
     "nodes": [
       {

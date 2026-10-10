@@ -90,3 +90,41 @@ async fn redacted_and_future_values_degrade() {
     assert_eq!(page.nodes[0].content, ItemContent::Redacted);
     assert!(page.nodes[1].values.is_empty());
 }
+
+#[tokio::test]
+async fn recorded_detail_decodes() {
+    let t = Arc::new(FixtureTransport::new());
+    t.push_file("ItemDetail", format!("{REC}/detail/ItemDetail__1.json"));
+    let d = Github::new(t)
+        .fetch_item_detail(&ItemId::new("any"), None)
+        .await
+        .unwrap();
+    assert!(d.body.contains("## Steps") && d.body.contains("<details>"));
+    assert_eq!(d.comments.len(), 2);
+    assert_eq!(d.comments[0].body, "First comment with `code`.");
+    assert_eq!(d.comments[0].author, "tviles");
+    assert_eq!(d.comments_total, 2);
+    assert_eq!(d.older_cursor, None);
+}
+
+#[tokio::test]
+async fn recorded_project_lists_decode() {
+    let (board, _) = testbed();
+    let t = Arc::new(FixtureTransport::new());
+    t.push_file(
+        "RepoProjects",
+        format!("{REC}/projects/RepoProjects__1.json"),
+    );
+    t.push_file(
+        "ViewerProjects",
+        format!("{REC}/projects/ViewerProjects__1.json"),
+    );
+    let gh = Github::new(t);
+    let linked = gh
+        .list_repo_projects(&"tviles/project-boards-testbed".parse().unwrap())
+        .await
+        .unwrap();
+    assert!(linked.iter().any(|p| p.board == board));
+    let all = gh.list_viewer_projects().await.unwrap();
+    assert!(all.iter().any(|p| p.board == board));
+}
