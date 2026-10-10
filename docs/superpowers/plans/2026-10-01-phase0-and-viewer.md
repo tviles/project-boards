@@ -10785,6 +10785,11 @@ The live suite does not run in CI (decision 9). Run it locally with your `gh` lo
 Run: `cargo test --features live --test live`
 Expected: all live tests PASS. If the testbed was reseeded or GitHub changed its responses, re-record with `PB_RECORD=1 cargo test --features live --test live`, check `git diff tests/fixtures`, commit the new fixtures, and push.
 
+The items fixtures (`tests/fixtures/recorded/items`, `view_ids/HydrateItems__1.json`) were converted to the content-backed response shape by script and carry a `_pending_rerecord` marker: re-record them with `PB_RECORD=1` as above (the marker disappears with the re-record).
+
+Run the `cost` and `updated_filter` live tests and keep their output: `cargo test --features live --test live -- cost updated_filter --nocapture`.
+Expected: `cost` prints the dry-run cost of a 100-item ItemsPage and passes at 10 points or fewer; `updated_filter` prints how many items `updated:>=<date>` returned and passes when items updated before that date are left out. If `updated_filter` fails, the `updated:` filter does not filter and every poll fetches the whole board; stop and decide on `INCREMENTAL_MODE` (src/sync/mod.rs) before releasing.
+
 Expected: the release build runs automatically on the PR when release.yml or Cargo files change, and the four build jobs pass. After the PR merges to main, `gh workflow run release.yml -f dry_run=true && gh run watch` works too for testing builds on-demand.
 
 - [ ] **Step 6: Release 0.1.0 (ask first)**

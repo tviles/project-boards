@@ -12,6 +12,8 @@ Requires herdr 0.9.0 or newer, macOS or Linux, and a GitHub token with the `proj
 
     gh auth refresh -s project        # add -s repo for private repositories
 
+Releases install a prebuilt binary. Installing from `main` between releases builds from source and needs a Rust toolchain, 1.88 or newer.
+
 Bind a key in `~/.config/herdr/config.toml`, then `herdr server reload-config`:
 
     [[keys.command]]
@@ -43,9 +45,9 @@ The board opens for the repository of the focused pane (the board you last used 
 | `q` | quit |
 | `Ctrl+C` | quit (fixed, not rebindable) |
 
-In the detail: `j`/`k` scroll, `Tab` cycles links, `Enter` follows one, `m` shows the raw Markdown, `P` loads older comments.
+In the detail: `j`/`k` scroll, `Home`/`End` jump to the top or bottom, `Tab` cycles links, `Enter` follows one, `m` shows the raw Markdown, `P` loads older comments.
 
-No default key uses Ctrl (apart from the fixed `Ctrl+C` quit), so herdr's prefix and your Ctrl bindings keep working. On the first-run board picker, where there is no board to go back to, `Esc` does nothing and `Ctrl+C` quits; on a picker opened with `B`, `Esc` cancels. Run the `doctor` action to find herdr bindings that shadow board keys.
+Apart from the fixed `Ctrl+C` quit, no default key uses Ctrl, so herdr's prefix and your own Ctrl bindings keep working. On the first-run board picker, where there is no board to go back to, `Esc` does nothing and `Ctrl+C` quits; on a picker opened with `B`, `Esc` cancels. Run the `doctor` action to find herdr bindings that shadow board keys.
 
 ## Configure
 
@@ -70,7 +72,7 @@ The token comes from `GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token`, in that ord
 ## Troubleshooting
 
 - `herdr plugin log list --plugin tviles.project-boards` shows action output.
-- The pane logs to `project-boards.log` in `herdr plugin config-dir`'s sibling state directory (`~/.local/state/herdr/plugins/tviles.project-boards/`); set `RUST_LOG=debug` for more.
+- The pane logs to `project-boards.log` in its state directory (`~/.local/state/herdr/plugins/tviles.project-boards/`); set `RUST_LOG=debug` for more.
 - In overlay placement, see `docs/phase0-findings.md` finding 6 for how `Esc` behaves.
 
 ## Privacy
