@@ -15,6 +15,7 @@ pub enum Action {
     Open,
     Search,
     Filter,
+    ClearFilter,
     Refresh,
     OpenBrowser,
     Help,
@@ -27,7 +28,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 21] = [
+    pub const ALL: [Action; 22] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -40,6 +41,7 @@ impl Action {
         Action::Open,
         Action::Search,
         Action::Filter,
+        Action::ClearFilter,
         Action::Refresh,
         Action::OpenBrowser,
         Action::Help,
@@ -66,6 +68,7 @@ impl Action {
             Action::Open => "open",
             Action::Search => "search",
             Action::Filter => "filter",
+            Action::ClearFilter => "clear_filter",
             Action::Refresh => "refresh",
             Action::OpenBrowser => "open_browser",
             Action::Help => "help",
@@ -92,6 +95,7 @@ impl Action {
             Action::Open => "open item detail, collapse group, follow link",
             Action::Search => "quick search",
             Action::Filter => "add a filter on top of the view's GitHub filter",
+            Action::ClearFilter => "clear the local filter",
             Action::Refresh => "refresh now",
             Action::OpenBrowser => "open in the browser",
             Action::Help => "this help",
@@ -218,6 +222,7 @@ const DEFAULTS: &[(&str, Action)] = &[
     ("enter", Action::Open),
     ("/", Action::Search),
     ("f", Action::Filter),
+    ("x", Action::ClearFilter),
     ("r", Action::Refresh),
     ("o", Action::OpenBrowser),
     ("?", Action::Help),
@@ -336,6 +341,7 @@ mod tests {
     fn overrides_replace_defaults_and_report_problems() {
         let mut o = BTreeMap::new();
         o.insert("next_view".to_string(), "]".to_string());
+        o.insert("clear_filter".to_string(), "X".to_string());
         o.insert("teleport".to_string(), "t".to_string());
         o.insert("quit".to_string(), "ctrl+".to_string());
         let (km, warnings) = Keymap::with_overrides(&o);
@@ -344,6 +350,11 @@ mod tests {
             vec![KeySpec::parse("]").unwrap()]
         );
         assert_eq!(km.action(&ev(KeyCode::Tab, KeyModifiers::NONE)), None);
+        assert_eq!(
+            km.action(&ev(KeyCode::Char('X'), KeyModifiers::NONE)),
+            Some(Action::ClearFilter)
+        );
+        assert_eq!(km.action(&ev(KeyCode::Char('x'), KeyModifiers::NONE)), None);
         assert_eq!(
             km.keys_for(Action::Quit).len(),
             1,

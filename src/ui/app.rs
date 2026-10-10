@@ -683,6 +683,9 @@ impl App {
                     self.mode = Mode::Filter;
                     Vec::new()
                 }
+                Some(Action::ClearFilter) if self.extra_filter().is_some() => {
+                    self.set_extra_filter("")
+                }
                 Some(Action::Refresh) => vec![Command::Refresh],
                 Some(Action::OpenBrowser) => {
                     let url = self
@@ -1129,6 +1132,35 @@ mod tests {
         assert_eq!(a.handle_key(code(KeyCode::Enter)), fetch("label:bug"));
         assert_eq!(a.effective_filter(), "label:bug");
         assert_eq!(a.extra_filter(), None, "an empty input clears it");
+    }
+
+    #[test]
+    fn x_clears_the_local_filter_and_does_nothing_without_one() {
+        let mut a = app();
+        let bugs = ViewId::new("V_bugs");
+        a.select_view(&bugs);
+        assert!(a.handle_key(key('x')).is_empty());
+        assert_eq!(a.effective_filter(), "label:bug");
+        a.handle_key(key('f'));
+        type_text(&mut a, "assignee:x");
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(
+            a.handle_key(key('x')),
+            vec![Command::FetchViewIds {
+                view: bugs,
+                filter: "label:bug".into()
+            }]
+        );
+        assert_eq!(a.extra_filter(), None);
+
+        // On a view without a GitHub filter, clearing shows the whole board again.
+        let mut b = app();
+        b.handle_key(key('f'));
+        type_text(&mut b, "label:bug");
+        b.handle_key(code(KeyCode::Enter));
+        assert!(b.view_items().is_none());
+        assert!(b.handle_key(key('x')).is_empty());
+        assert_eq!(b.view_items().unwrap().len(), 5);
     }
 
     #[test]

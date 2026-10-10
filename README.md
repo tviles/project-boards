@@ -36,7 +36,8 @@ The board opens for the repository of the focused pane (the board you last used 
 | `Enter` | item detail (collapse a group in the table) |
 | `z` | collapse or expand a group |
 | `/` | quick search |
-| `f` | edit the view filter (GitHub filter syntax) |
+| `f` | add a filter on top of the view's GitHub filter (GitHub filter syntax; this session only) |
+| `x` | clear the filter added with `f` |
 | `o` | open in the browser |
 | `B` | switch board |
 | `r` | refresh |

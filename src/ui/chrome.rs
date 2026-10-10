@@ -5,6 +5,7 @@ use crate::model::Layout;
 use crate::ui::app::{App, Mode};
 use crate::ui::board::render_board;
 use crate::ui::detail::{build_doc, render_detail};
+use crate::ui::keymap::Action;
 use crate::ui::picker::render_picker;
 use crate::ui::table::{render_table, table_columns};
 use crate::ui::text::{display_width, pad_to_width, truncate_to_width};
@@ -260,7 +261,14 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
                 if let Some(list) = app.view_list().filter(|l| l.truncated) {
                     parts.push(format!("loaded {} of {}", list.ids.len(), list.total));
                 }
-                parts.push("? help · / search · f filter · L layout · q quit".into());
+                let clear = app
+                    .extra_filter()
+                    .and(app.keymap.keys_for(Action::ClearFilter).first().copied())
+                    .map(|k| format!(" · {} clear filter", k.label()))
+                    .unwrap_or_default();
+                parts.push(format!(
+                    "? help · / search · f filter{clear} · L layout · q quit"
+                ));
                 Line::styled(
                     truncate_to_width(&parts.join(" · "), area.width as usize),
                     app.theme.dim(),
@@ -272,7 +280,6 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
-    use crate::ui::keymap::Action;
     let lines: Vec<Line> = Action::ALL
         .iter()
         .map(|a| {
@@ -417,6 +424,14 @@ mod tests {
                 .starts_with("filter: + assignee:x · "),
             "{screen}"
         );
+        assert!(screen.contains("x clear filter"), "{screen}");
+        a.handle_key(key('x'));
+        let screen = render_to_string(80, 10, |f| draw(f, &mut a));
+        let hints = screen.lines().last().unwrap();
+        assert!(
+            !hints.contains("clear filter") && !hints.contains("filter: +"),
+            "{hints}"
+        );
 
         // A long GitHub filter is cut so the typed text keeps its room.
         let mut snap = snapshot();
@@ -513,6 +528,12 @@ mod tests {
         a.handle_key(key('?'));
         let screen = render_to_string(100, 30, |f| draw(f, &mut a));
         assert!(screen.contains("quick search") && screen.contains("switch table / board"));
+        assert!(
+            screen
+                .lines()
+                .any(|l| l.contains("x ") && l.contains("clear the local filter")),
+            "{screen}"
+        );
     }
 
     #[test]

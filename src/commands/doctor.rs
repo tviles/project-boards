@@ -316,6 +316,15 @@ command = "true"
     }
 
     #[test]
+    fn the_clear_filter_key_is_checked_too() {
+        let config = "[keys]\nclose_pane = \"x\"\n";
+        assert_eq!(
+            key_collisions(config, &Keymap::defaults()),
+            vec!["x (clear the local filter)".to_string()]
+        );
+    }
+
+    #[test]
     fn unparseable_herdr_config_has_no_collisions() {
         assert!(key_collisions("not = [toml", &Keymap::defaults()).is_empty());
     }
