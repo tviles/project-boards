@@ -1,4 +1,4 @@
-//! The board layout: one column per option or iteration, optional swimlanes, cards of two lines.
+//! The board layout: one column per option or iteration, optional swimlanes, bordered cards.
 
 use crate::model::*;
 use crate::ui::labels::{label_spans, spans_width};
@@ -7,7 +7,8 @@ use crate::ui::text::{display_width, pad_to_width, truncate_to_width};
 use crate::ui::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols::border;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -140,6 +141,12 @@ pub fn resolve_layout(
 }
 
 const MIN_COLUMN: usize = 24;
+/// Rows of a bordered card: top border, title, meta, bottom border.
+const CARD_ROWS: usize = 4;
+/// Rows of the borderless card used in columns too narrow for a border.
+const PLAIN_CARD_ROWS: usize = 2;
+/// Columns narrower than this draw borderless two-line cards.
+const MIN_BORDERED: usize = 10;
 
 enum Entry<'a> {
     Lane(String),
@@ -222,6 +229,63 @@ fn card_lines(
     ]
 }
 
+fn border_line(
+    left: &'static str,
+    fill: &'static str,
+    right: &'static str,
+    inner: usize,
+    style: Style,
+) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("{left}{}{right}", fill.repeat(inner)),
+        style,
+    ))
+}
+
+/// The card inside a rounded border, or a heavy accent one when `selected`. `width` is the
+/// whole card, borders included. Selection is marked by the border alone.
+fn bordered_card(
+    item: &Item,
+    field: &Field,
+    width: usize,
+    selected: bool,
+    theme: &Theme,
+) -> [Line<'static>; CARD_ROWS] {
+    let inner = width - 2;
+    let (set, style) = if selected {
+        (border::THICK, theme.accent().add_modifier(Modifier::BOLD))
+    } else if theme.color {
+        (border::ROUNDED, Style::default().fg(Color::DarkGray))
+    } else {
+        (border::ROUNDED, theme.dim())
+    };
+    let wrap = |line: Line<'static>| {
+        let mut spans = vec![Span::styled(set.vertical_left, style)];
+        spans.extend(line.spans);
+        spans.push(Span::styled(set.vertical_right, style));
+        Line::from(spans)
+    };
+    let [title, meta] = card_lines(item, field, inner, false, theme);
+    [
+        border_line(
+            set.top_left,
+            set.horizontal_top,
+            set.top_right,
+            inner,
+            style,
+        ),
+        wrap(title),
+        wrap(meta),
+        border_line(
+            set.bottom_left,
+            set.horizontal_bottom,
+            set.bottom_right,
+            inner,
+            style,
+        ),
+    ]
+}
+
 pub fn render_board(
     frame: &mut Frame,
     area: Rect,
@@ -276,6 +340,7 @@ pub fn render_board(
         let col_index = start + offset;
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut selected_line = 0;
+        let mut card_rows = PLAIN_CARD_ROWS;
         for entry in entries(column) {
             match entry {
                 Entry::Lane(title) => lines.push(Line::from(Span::styled(
@@ -287,13 +352,23 @@ pub fn render_board(
                     if is_sel {
                         selected_line = lines.len();
                     }
-                    lines.extend(card_lines(item, column_field, width, is_sel, theme));
+                    if width >= MIN_BORDERED {
+                        card_rows = CARD_ROWS;
+                        lines.extend(bordered_card(item, column_field, width, is_sel, theme));
+                    } else {
+                        card_rows = PLAIN_CARD_ROWS;
+                        lines.extend(card_lines(item, column_field, width, is_sel, theme));
+                    }
                 }
             }
         }
         let rows = grid.len();
         let scroll = if col_index == selection.column && rows > 1 {
-            (selected_line + 2).saturating_sub(rows)
+            // The selected card ends on the last visible row at the latest, but never scroll
+            // past its top.
+            (selected_line + card_rows)
+                .saturating_sub(rows)
+                .min(selected_line)
         } else {
             0
         };
@@ -573,22 +648,22 @@ mod tests {
             index: 0,
         };
         let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 6)).unwrap();
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 10)).unwrap();
         let buf = terminal
             .draw(|f| render_board(f, f.area(), &cols, &sel, status, &theme))
             .unwrap()
             .buffer
             .clone();
-        // Card "#1 Fix crash": line 2 reads "@tviles · bug" and is selected.
-        let row: String = (0..13).map(|x| buf[(x, 2)].symbol()).collect();
+        // Card "#1 Fix crash": its meta line, inside the side border, reads "@tviles · bug".
+        let row: String = (1..14).map(|x| buf[(x, 3)].symbol()).collect();
         assert_eq!(row, "@tviles · bug");
-        let pill = &buf[(10, 2)];
+        let pill = &buf[(11, 3)];
         assert_eq!(pill.symbol(), "b");
         assert_eq!(pill.bg, Color::Rgb(0xd7, 0x3a, 0x4a));
         assert!(!pill.modifier.contains(Modifier::REVERSED));
-        assert!(buf[(0, 2)].modifier.contains(Modifier::REVERSED));
+        assert!(!buf[(1, 3)].modifier.contains(Modifier::REVERSED));
         // The unselected card in the same column keeps its dim text.
-        assert!(buf[(0, 4)].modifier.contains(Modifier::DIM));
+        assert!(buf[(1, 7)].modifier.contains(Modifier::DIM));
     }
 
     #[test]
@@ -614,26 +689,21 @@ mod tests {
     }
 
     #[test]
-    fn a_selected_card_reads_as_one_bar_with_coloured_pills_in_it() {
+    fn a_selected_card_is_not_reversed_and_its_pills_keep_their_colours() {
         use ratatui::style::{Color, Modifier};
         let (p, mut all) = (project(), items());
-        let three = |names: &[&str]| {
+        all[0].values.insert(
+            FieldId::new("F_labels"),
             FieldValue::Labels(
-                names
+                ["bug", "enhancement", "documentation"]
                     .iter()
                     .map(|n| Label {
                         name: (*n).into(),
                         color: "d73a4a".into(),
                     })
                     .collect(),
-            )
-        };
-        for item in &mut all[..3] {
-            item.values.insert(
-                FieldId::new("F_labels"),
-                three(&["bug", "enhancement", "documentation"]),
-            );
-        }
+            ),
+        );
         let refs: Vec<&Item> = all.iter().collect();
         let status = field(&p, "Status");
         let cols = build_columns(&refs, status, None);
@@ -649,21 +719,143 @@ mod tests {
             .unwrap()
             .buffer
             .clone();
-        // One 29-cell column. Selected card a, line 2; card c, unselected, line 4.
-        let row = |y: u16| (0..29).map(|x| buf[(x, y)].symbol()).collect::<String>();
-        assert_eq!(row(2), "@tviles · bug enhancement +1 ");
-        assert_eq!(row(4), row(2));
-        let reversed = |x: u16, y: u16| buf[(x, y)].modifier.contains(Modifier::REVERSED);
-        // The separator after the assignees, the gaps between pills, "+1" and the padding.
-        for x in [7, 8, 9, 13, 25, 26, 27, 28] {
-            assert!(reversed(x, 2), "x {x} on the selected card");
-            assert!(!reversed(x, 4), "x {x} on the unselected card");
+        for y in 0..6 {
+            for x in 0..30 {
+                assert!(
+                    !buf[(x, y)].modifier.contains(Modifier::REVERSED),
+                    "reversed cell at {x},{y}"
+                );
+            }
         }
-        for x in [10, 14] {
-            assert!(!reversed(x, 2), "pill at x {x} keeps its colours");
-            assert_eq!(buf[(x, 2)].bg, Color::Rgb(0xd7, 0x3a, 0x4a));
+        let row: String = (0..29).map(|x| buf[(x, 3)].symbol()).collect();
+        assert_eq!(row, "┃@tviles · bug +2           ┃");
+        for x in [11, 12, 13] {
+            assert_eq!(buf[(x, 3)].bg, Color::Rgb(0xd7, 0x3a, 0x4a), "pill at {x}");
         }
-        assert!(buf[(26, 4)].modifier.contains(Modifier::DIM), "+1 dim");
-        assert!(!buf[(26, 2)].modifier.contains(Modifier::DIM));
+        assert!(buf[(2, 2)].modifier.contains(Modifier::BOLD), "title bold");
+    }
+
+    fn cell_text(buf: &ratatui::buffer::Buffer, y: u16, w: u16) -> String {
+        (0..w).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn selected_card_has_a_heavy_accent_border_and_others_rounded() {
+        use ratatui::style::Modifier;
+        let (p, all) = (project(), items());
+        let refs: Vec<&Item> = all.iter().collect();
+        let status = field(&p, "Status");
+        let cols = build_columns(&refs, status, None);
+        let theme = Theme {
+            color: true,
+            truecolor: true,
+        };
+        let sel = BoardSelection::default();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 10)).unwrap();
+        let buf = terminal
+            .draw(|f| render_board(f, f.area(), &cols, &sel, status, &theme))
+            .unwrap()
+            .buffer
+            .clone();
+        // Column width 29: the selected card is rows 1..5, the next one rows 5..9.
+        assert_eq!(buf[(0, 1)].symbol(), "┏");
+        assert_eq!(buf[(28, 1)].symbol(), "┓");
+        assert_eq!(buf[(0, 2)].symbol(), "┃");
+        assert_eq!(buf[(28, 3)].symbol(), "┃");
+        assert_eq!(buf[(0, 4)].symbol(), "┗");
+        assert_eq!(buf[(28, 4)].symbol(), "┛");
+        assert_eq!(buf[(5, 1)].symbol(), "━");
+        for (x, y) in [(0, 1), (5, 1), (0, 2), (28, 4)] {
+            let cell = &buf[(x, y)];
+            assert_eq!(cell.fg, theme.accent().fg.unwrap(), "{x},{y}");
+            assert!(cell.modifier.contains(Modifier::BOLD), "{x},{y}");
+        }
+        assert_eq!(cell_text(&buf, 5, 1), "╭");
+        assert_eq!(buf[(28, 5)].symbol(), "╮");
+        assert_eq!(buf[(0, 6)].symbol(), "│");
+        assert_eq!(buf[(0, 8)].symbol(), "╰");
+        assert_eq!(buf[(28, 8)].symbol(), "╯");
+        assert_ne!(buf[(0, 5)].fg, theme.accent().fg.unwrap());
+        assert!(!buf[(0, 5)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn plain_theme_marks_the_selected_card_by_its_heavy_border() {
+        let (p, all) = (project(), items());
+        let refs: Vec<&Item> = all.iter().collect();
+        let status = field(&p, "Status");
+        let cols = build_columns(&refs, status, None);
+        let sel = BoardSelection::default();
+        let screen = render_to_string(60, 10, |f| {
+            render_board(f, f.area(), &cols, &sel, status, &Theme::plain())
+        });
+        let rows: Vec<&str> = screen.lines().collect();
+        assert!(rows[1].starts_with("┏━"), "{screen}");
+        assert!(rows[2].starts_with("┃#1 Fix crash"), "{screen}");
+        assert!(rows[4].starts_with("┗━"), "{screen}");
+        assert!(rows[5].starts_with("╭─"), "{screen}");
+        assert_eq!(screen.matches('┏').count(), 1, "one selected card");
+    }
+
+    #[test]
+    fn scrolling_down_keeps_the_selected_card_fully_visible() {
+        let (p, all) = (project(), items());
+        let status = field(&p, "Status");
+        let mut cards = Vec::new();
+        for n in 0..10 {
+            let mut item = all[0].clone();
+            item.id = ItemId::new(format!("card{n}"));
+            cards.push(item);
+        }
+        let column = Column {
+            bucket: build_columns(&all.iter().collect::<Vec<_>>(), status, None)[0]
+                .bucket
+                .clone(),
+            lanes: vec![Lane {
+                title: None,
+                items: cards.iter().collect(),
+            }],
+        };
+        for index in 0..10 {
+            let sel = BoardSelection { column: 0, index };
+            let screen = render_to_string(30, 13, |f| {
+                render_board(
+                    f,
+                    f.area(),
+                    std::slice::from_ref(&column),
+                    &sel,
+                    status,
+                    &Theme::plain(),
+                )
+            });
+            let rows: Vec<&str> = screen.lines().collect();
+            let top = rows.iter().position(|r| r.starts_with('┏')).unwrap();
+            assert!(rows[top + 3].starts_with('┗'), "index {index}\n{screen}");
+            assert!(top >= 1 && top + 3 < 13, "index {index}\n{screen}");
+        }
+    }
+
+    #[test]
+    fn columns_narrower_than_ten_fall_back_to_two_line_cards() {
+        let (p, all) = (project(), items());
+        let refs: Vec<&Item> = all.iter().collect();
+        let status = field(&p, "Status");
+        let cols = build_columns(&refs, status, None);
+        let sel = BoardSelection::default();
+        // Area 9 gives one column with 8 cells.
+        let screen = render_to_string(9, 8, |f| {
+            render_board(f, f.area(), &cols, &sel, status, &Theme::plain())
+        });
+        assert!(
+            !screen.contains(['╭', '┏', '│', '┃']),
+            "no borders:\n{screen}"
+        );
+        let rows: Vec<&str> = screen.lines().collect();
+        assert!(rows[1].starts_with("#1 Fix …"), "{screen}");
+        assert!(
+            rows[3].starts_with("#3 Emoj"),
+            "cards two rows apart: {screen}"
+        );
     }
 }
