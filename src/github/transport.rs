@@ -173,14 +173,13 @@ impl Transport for HttpTransport {
                 return Err(GithubError::Unauthorized);
             }
             // A secondary limit says how long to wait.
-            if status == reqwest::StatusCode::FORBIDDEN
-                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            if (status == reqwest::StatusCode::FORBIDDEN
+                || status == reqwest::StatusCode::TOO_MANY_REQUESTS)
+                && let Some(secs) = header_u64(&headers, "retry-after")
             {
-                if let Some(secs) = header_u64(&headers, "retry-after") {
-                    return Err(GithubError::RateLimited {
-                        retry_after_secs: secs,
-                    });
-                }
+                return Err(GithubError::RateLimited {
+                    retry_after_secs: secs,
+                });
             }
             let primary_limited = || GithubError::RateLimited {
                 retry_after_secs: primary_wait(

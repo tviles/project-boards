@@ -192,11 +192,11 @@ fn wrap(
 
 /// Builds a line, dropping the trailing space left by word splitting.
 fn finish(mut spans: Vec<Span<'static>>) -> Line<'static> {
-    if spans.len() > 1 {
-        if let Some(last) = spans.last_mut() {
-            let trimmed = last.content.trim_end_matches(' ').to_string();
-            last.content = trimmed.into();
-        }
+    if spans.len() > 1
+        && let Some(last) = spans.last_mut()
+    {
+        let trimmed = last.content.trim_end_matches(' ').to_string();
+        last.content = trimmed.into();
     }
     Line::from(spans)
 }

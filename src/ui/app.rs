@@ -384,12 +384,12 @@ impl App {
                 break;
             }
         }
-        if let Some((index, k)) = header {
-            if !self.collapsed.remove(&k) {
-                self.collapsed.insert(k);
-                // The rows under the header vanish: land on the header, not another group.
-                self.table_selected = index;
-            }
+        if let Some((index, k)) = header
+            && !self.collapsed.remove(&k)
+        {
+            self.collapsed.insert(k);
+            // The rows under the header vanish: land on the header, not another group.
+            self.table_selected = index;
         }
         self.sync_selected_id();
         self.restore_selection();
@@ -691,13 +691,12 @@ impl App {
 
     pub fn on_sync(&mut self, event: SyncEvent) -> Vec<Command> {
         // A late answer for a filter that has since changed must not replace the list.
-        if let SyncEvent::ViewIds { view, filter, .. } = &event {
-            if self
+        if let SyncEvent::ViewIds { view, filter, .. } = &event
+            && self
                 .filter_of(view)
                 .is_some_and(|current| &current != filter)
-            {
-                return Vec::new();
-            }
+        {
+            return Vec::new();
         }
         self.sync_selected_id();
         if let Some(update) = store_update(&event) {

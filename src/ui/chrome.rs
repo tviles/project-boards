@@ -62,10 +62,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.mode == Mode::Help {
         draw_help(frame, body, app);
     }
-    if app.mode == Mode::Picker {
-        if let Some(p) = &app.picker {
-            render_picker(frame, area, p, &app.theme);
-        }
+    if app.mode == Mode::Picker
+        && let Some(p) = &app.picker
+    {
+        render_picker(frame, area, p, &app.theme);
     }
 }
 

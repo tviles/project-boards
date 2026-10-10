@@ -34,12 +34,11 @@ pub async fn run(options: PaneOptions) -> anyhow::Result<()> {
     }
     // Close our own pane so no dead tab is left behind. herdr may already be closing it;
     // `pane_not_found` then is expected.
-    if let Some(pane) = own_pane {
-        if let Err(e) = herdr.call(&["pane".into(), "close".into(), pane]) {
-            if e.code != "pane_not_found" {
-                tracing::warn!(error = %e, "could not close the board pane");
-            }
-        }
+    if let Some(pane) = own_pane
+        && let Err(e) = herdr.call(&["pane".into(), "close".into(), pane])
+        && e.code != "pane_not_found"
+    {
+        tracing::warn!(error = %e, "could not close the board pane");
     }
     result
 }

@@ -247,10 +247,10 @@ impl Controller {
         self.release();
         self.generation += 1;
         self.awaiting_repo_projects = false;
-        if let Some(own) = &own {
-            if let Err(e) = registry.register(&board, own) {
-                tracing::warn!(error = %e, "could not record this pane in the registry");
-            }
+        if let Some(own) = &own
+            && let Err(e) = registry.register(&board, own)
+        {
+            tracing::warn!(error = %e, "could not record this pane in the registry");
         }
         let dir = self.options.state_dir.clone();
         let repo = self.options.repo.clone();
@@ -286,10 +286,10 @@ impl Controller {
 
     /// Unregisters this pane from the board it shows. Called on board switch and on exit.
     pub fn release(&mut self) {
-        if let (Some(board), Some(own)) = (self.board.take(), &self.options.own_pane) {
-            if let Err(e) = PaneRegistry::new(&self.options.state_dir).unregister(&board, own) {
-                tracing::warn!(error = %e, "could not remove this pane from the registry");
-            }
+        if let (Some(board), Some(own)) = (self.board.take(), &self.options.own_pane)
+            && let Err(e) = PaneRegistry::new(&self.options.state_dir).unregister(&board, own)
+        {
+            tracing::warn!(error = %e, "could not remove this pane from the registry");
         }
     }
 
@@ -442,10 +442,10 @@ impl Controller {
     }
 
     fn persist_cache(&self) {
-        if let (Some(snapshot), Some(board)) = (self.app.snapshot(), &self.board) {
-            if let Err(e) = save_cache(&cache_path(&self.options.state_dir, board), snapshot) {
-                tracing::warn!(error = %e, "could not save the board cache");
-            }
+        if let (Some(snapshot), Some(board)) = (self.app.snapshot(), &self.board)
+            && let Err(e) = save_cache(&cache_path(&self.options.state_dir, board), snapshot)
+        {
+            tracing::warn!(error = %e, "could not save the board cache");
         }
     }
 
@@ -475,12 +475,12 @@ impl Controller {
                     }
                 }
                 Command::SaveLastView(view) => {
-                    if let Some(board) = self.board.clone() {
-                        if let Err(e) = State::update(&self.options.state_dir, |s| {
+                    if let Some(board) = self.board.clone()
+                        && let Err(e) = State::update(&self.options.state_dir, |s| {
                             s.set_last_view(&board, &view)
-                        }) {
-                            tracing::warn!(error = %e, "could not save the last view");
-                        }
+                        })
+                    {
+                        tracing::warn!(error = %e, "could not save the last view");
                     }
                 }
                 Command::PickBoard(board) => effects.extend(self.open_board(board, now)),

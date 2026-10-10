@@ -42,11 +42,11 @@ pub fn open(
         }
     });
 
-    if let (Some(board), false) = (&board, args.picker) {
-        if let Some(pane) = PaneRegistry::new(&env.state_dir).live_pane(cli, board) {
-            focus_plugin_pane(cli, &pane)?;
-            return Ok(OpenOutcome::Focused(pane));
-        }
+    if let (Some(board), false) = (&board, args.picker)
+        && let Some(pane) = PaneRegistry::new(&env.state_dir).live_pane(cli, board)
+    {
+        focus_plugin_pane(cli, &pane)?;
+        return Ok(OpenOutcome::Focused(pane));
     }
 
     let placement = args.placement.unwrap_or(config.placement);
