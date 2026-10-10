@@ -6,6 +6,7 @@ use project_boards::herdr::cli::ProcessHerdr;
 use project_boards::herdr::env::PluginEnv;
 use project_boards::herdr::repo::detect_repo;
 use project_boards::state::State;
+use std::io::Write;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -55,7 +56,7 @@ fn main() -> ExitCode {
         Command::Pane => match project_boards::commands::pane::run_pane() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("project-boards: {e:#}");
+                let _ = writeln!(std::io::stderr(), "project-boards: {e:#}");
                 ExitCode::FAILURE
             }
         },

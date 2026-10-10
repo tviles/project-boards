@@ -18,11 +18,20 @@ use tokio::sync::mpsc;
 pub async fn run(options: PaneOptions) -> anyhow::Result<()> {
     let herdr: Arc<dyn HerdrCli> = Arc::new(ProcessHerdr::from_env());
     let own_pane = options.own_pane.clone();
-    let mut terminal = ratatui::init();
+    // Handlers first, so a signal arriving during start-up still takes the clean exit path.
+    let signals = Signals {
+        term: signal(SignalKind::terminate())?,
+        hup: signal(SignalKind::hangup())?,
+    };
+    let mut terminal = ratatui::try_init()?;
     let _ = execute!(std::io::stdout(), EnableFocusChange);
-    let result = event_loop(&mut terminal, options, herdr.clone()).await;
+    let result = event_loop(&mut terminal, options, herdr.clone(), signals).await;
     let _ = execute!(std::io::stdout(), DisableFocusChange);
     ratatui::restore();
+    if let Err(e) = &result {
+        // stderr may be a closed PTY under herdr; the log is the reliable record.
+        tracing::error!(error = %e, "board pane failed");
+    }
     // Close our own pane so no dead tab is left behind. herdr may already be closing it;
     // `pane_not_found` then is expected.
     if let Some(pane) = own_pane {
@@ -35,18 +44,24 @@ pub async fn run(options: PaneOptions) -> anyhow::Result<()> {
     result
 }
 
+struct Signals {
+    term: tokio::signal::unix::Signal,
+    hup: tokio::signal::unix::Signal,
+}
+
 type Tagged = (u64, crate::sync::SyncEvent);
 
 async fn event_loop(
     terminal: &mut DefaultTerminal,
     options: PaneOptions,
     herdr: Arc<dyn HerdrCli>,
+    signals: Signals,
 ) -> anyhow::Result<()> {
     let max_items = options.config.max_items;
     // Events arrive tagged with the generation of the job that produced them.
     let (tx, rx) = mpsc::unbounded_channel::<Tagged>();
     let mut controller = Controller::new(options, herdr, INCREMENTAL_MODE, Instant::now());
-    let result = drive(terminal, &mut controller, tx, rx, max_items).await;
+    let result = drive(terminal, &mut controller, tx, rx, max_items, signals).await;
     // Every exit path (Exit effect, SIGTERM/SIGHUP, a failed draw) unregisters the pane.
     controller.release();
     result
@@ -58,10 +73,10 @@ async fn drive(
     tx: mpsc::UnboundedSender<Tagged>,
     mut rx: mpsc::UnboundedReceiver<Tagged>,
     max_items: usize,
+    mut signals: Signals,
 ) -> anyhow::Result<()> {
     let mut runner: Option<Runner> = None;
-    let mut sigterm = signal(SignalKind::terminate())?;
-    let mut sighup = signal(SignalKind::hangup())?;
+    let mut stream_error_logged = false;
     terminal.draw(|f| chrome::draw(f, &mut controller.app))?;
     let mut pending = start(controller, &mut runner, &tx, max_items);
     let mut events = EventStream::new();
@@ -87,16 +102,25 @@ async fn drive(
         terminal.draw(|f| chrome::draw(f, &mut controller.app))?;
         let now = Instant::now();
         pending = tokio::select! {
-            Some(Ok(event)) = events.next() => match event {
-                Event::Key(key) => controller.handle(Input::Key(key), now),
-                Event::FocusGained => controller.handle(Input::Focus(true), now),
-                Event::FocusLost => controller.handle(Input::Focus(false), now),
-                _ => Vec::new(),
+            next = events.next() => match next {
+                Some(Ok(Event::Key(key))) => controller.handle(Input::Key(key), now),
+                Some(Ok(Event::FocusGained)) => controller.handle(Input::Focus(true), now),
+                Some(Ok(Event::FocusLost)) => controller.handle(Input::Focus(false), now),
+                Some(Ok(_)) => Vec::new(),
+                Some(Err(e)) => {
+                    if !stream_error_logged {
+                        stream_error_logged = true;
+                        tracing::warn!(error = %e, "terminal event stream error");
+                    }
+                    Vec::new()
+                }
+                // The stream ended (terminal gone): same as Exit.
+                None => return Ok(()),
             },
             Some((generation, event)) = rx.recv() => controller.handle(Input::Sync { generation, event }, now),
             _ = tick.tick() => controller.handle(Input::Tick, now),
-            _ = sigterm.recv() => return Ok(()),
-            _ = sighup.recv() => return Ok(()),
+            _ = signals.term.recv() => return Ok(()),
+            _ = signals.hup.recv() => return Ok(()),
         };
     }
 }
