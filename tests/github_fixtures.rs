@@ -54,12 +54,10 @@ async fn recorded_items_decode() {
     let issue = |n: u32| page.nodes.iter().find(|i| i.number() == Some(n)).unwrap();
     assert_eq!(issue(1).label_names(), ["bug"]);
     assert_eq!(issue(1).assignees(), ["tviles"]);
-    assert!(
-        issue(2)
-            .values
-            .values()
-            .any(|v| *v == FieldValue::PullRequests(vec![12]))
-    );
+    assert!(issue(2).values.values().any(|v| matches!(
+        v,
+        FieldValue::PullRequests(prs) if prs.iter().map(|p| p.number).eq([12])
+    )));
 }
 
 #[tokio::test]

@@ -210,15 +210,54 @@ pub fn value_from_wire(v: &Value, content: &Value) -> Option<(FieldId, FieldValu
         "ProjectV2ItemFieldRepositoryValue" => {
             FieldValue::Repository(v["repository"]["nameWithOwner"].as_str()?.to_string())
         }
-        "ProjectV2ItemFieldPullRequestValue" => FieldValue::PullRequests(
-            nodes(content, "closedByPullRequestsReferences")
-                .into_iter()
-                .filter_map(|p| p["number"].as_u64().map(|n| n as u32))
-                .collect(),
-        ),
+        "ProjectV2ItemFieldPullRequestValue" => FieldValue::PullRequests(linked_prs(content)),
         _ => return None,
     };
     Some((field, value))
+}
+
+/// An issue's linked pull requests. Nodes recorded before state and draft were fetched
+/// decode with an unknown state.
+fn linked_prs(content: &Value) -> Vec<LinkedPullRequest> {
+    nodes(content, "closedByPullRequestsReferences")
+        .into_iter()
+        .filter_map(|p| {
+            Some(LinkedPullRequest {
+                number: p["number"].as_u64()? as u32,
+                state: ContentState::from_api(p["state"].as_str().unwrap_or("")),
+                is_draft: p["isDraft"].as_bool().unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
+/// The built-in field values an issue or pull request carries. Every key may be absent
+/// (older recordings, drafts), which decodes to `None` or empty.
+fn content_fields_from_wire(c: &Value) -> ContentFields {
+    let text = |key: &str| c[key].as_str().map(String::from);
+    let issue_type = &c["issueType"];
+    let parent = &c["parent"];
+    let subs = &c["subIssuesSummary"];
+    ContentFields {
+        created_at: text("createdAt"),
+        updated_at: text("updatedAt"),
+        closed_at: text("closedAt"),
+        state_reason: c["stateReason"].as_str().map(StateReason::from_api),
+        issue_type: issue_type["name"].as_str().map(|name| IssueType {
+            name: name.to_string(),
+            color: OptionColor::from_api(issue_type["color"].as_str().unwrap_or("")),
+        }),
+        parent: parent["number"].as_u64().map(|number| ParentIssue {
+            number: number as u32,
+            title: str_of(&parent["title"]),
+            state: ContentState::from_api(parent["state"].as_str().unwrap_or("")),
+        }),
+        sub_issues: subs["total"].as_u64().map(|total| SubIssuesSummary {
+            total: total as u32,
+            completed: subs["completed"].as_u64().unwrap_or(0) as u32,
+        }),
+        linked_prs: linked_prs(c),
+    }
 }
 
 fn content_from_wire(c: &Value) -> ItemContent {
@@ -266,6 +305,7 @@ pub fn item_from_wire(v: &Value) -> Option<Item> {
             .into_iter()
             .filter_map(|n| value_from_wire(n, &v["content"]))
             .collect(),
+        content_fields: content_fields_from_wire(&v["content"]),
     })
 }
 
@@ -538,6 +578,122 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn card_content_keys_decode() {
+        let mut v = item_json();
+        let c = &mut v["content"];
+        c["createdAt"] = json!("2026-08-19T10:00:00Z");
+        c["updatedAt"] = json!("2026-08-21T10:00:00Z");
+        c["closedAt"] = json!("2026-08-25T10:00:00Z");
+        c["stateReason"] = json!("NOT_PLANNED");
+        c["issueType"] = json!({"name": "Bug", "color": "RED"});
+        c["parent"] = json!({"number": 7, "title": "Epic", "state": "CLOSED"});
+        c["subIssuesSummary"] = json!({"total": 4, "completed": 1});
+        c["closedByPullRequestsReferences"] = json!({"nodes": [
+            {"number": 30, "state": "MERGED", "isDraft": false},
+            {"number": 31, "state": "OPEN", "isDraft": true},
+            null
+        ]});
+        let item = item_from_wire(&v).unwrap();
+        let f = &item.content_fields;
+        assert_eq!(f.created_at.as_deref(), Some("2026-08-19T10:00:00Z"));
+        assert_eq!(f.updated_at.as_deref(), Some("2026-08-21T10:00:00Z"));
+        assert_eq!(f.closed_at.as_deref(), Some("2026-08-25T10:00:00Z"));
+        assert_eq!(f.state_reason, Some(StateReason::NotPlanned));
+        assert_eq!(
+            f.issue_type,
+            Some(IssueType {
+                name: "Bug".into(),
+                color: OptionColor::Red
+            })
+        );
+        assert_eq!(
+            f.parent,
+            Some(ParentIssue {
+                number: 7,
+                title: "Epic".into(),
+                state: ContentState::Closed
+            })
+        );
+        assert_eq!(
+            f.sub_issues,
+            Some(SubIssuesSummary {
+                total: 4,
+                completed: 1
+            })
+        );
+        let prs = vec![
+            LinkedPullRequest {
+                number: 30,
+                state: ContentState::Merged,
+                is_draft: false,
+            },
+            LinkedPullRequest {
+                number: 31,
+                state: ContentState::Open,
+                is_draft: true,
+            },
+        ];
+        assert_eq!(f.linked_prs, prs);
+        assert_eq!(
+            item.value(&FieldId::new("F_prs")),
+            Some(&FieldValue::PullRequests(prs)),
+            "the PR state reaches the field value"
+        );
+    }
+
+    #[test]
+    fn pull_request_content_dates_decode() {
+        let mut v = item_json();
+        v["content"] = json!({"__typename": "PullRequest", "number": 4, "title": "PR", "url": "u",
+            "state": "CLOSED", "isDraft": false, "repository": {"nameWithOwner": "tviles/t"},
+            "createdAt": "2026-08-01T00:00:00Z", "updatedAt": "2026-08-02T00:00:00Z",
+            "closedAt": "2026-08-03T00:00:00Z"});
+        let f = item_from_wire(&v).unwrap().content_fields;
+        assert_eq!(f.created_at.as_deref(), Some("2026-08-01T00:00:00Z"));
+        assert_eq!(f.updated_at.as_deref(), Some("2026-08-02T00:00:00Z"));
+        assert_eq!(f.closed_at.as_deref(), Some("2026-08-03T00:00:00Z"));
+        assert_eq!(f.state_reason, None);
+    }
+
+    #[test]
+    fn missing_card_content_keys_decode_to_nothing() {
+        // The recorded fixtures predate these keys, and drafts never have them.
+        let item = item_from_wire(&item_json()).unwrap();
+        let f = &item.content_fields;
+        assert_eq!(
+            (&f.created_at, &f.updated_at, &f.closed_at, f.state_reason),
+            (&None, &None, &None, None)
+        );
+        assert_eq!(
+            (&f.issue_type, &f.parent, &f.sub_issues),
+            (&None, &None, &None)
+        );
+        // Old PR nodes carry only a number: state unknown, not a draft.
+        assert_eq!(
+            f.linked_prs,
+            [LinkedPullRequest {
+                number: 30,
+                state: ContentState::Unknown,
+                is_draft: false
+            }]
+        );
+        let mut v = item_json();
+        v["content"]["issueType"] = serde_json::Value::Null;
+        v["content"]["parent"] = serde_json::Value::Null;
+        v["content"]["stateReason"] = serde_json::Value::Null;
+        v["content"]["subIssuesSummary"] = json!({"total": null});
+        let f = item_from_wire(&v).unwrap().content_fields;
+        assert_eq!((f.issue_type, f.parent, f.sub_issues), (None, None, None));
+        assert_eq!(f.state_reason, None);
+        let mut v = item_json();
+        v["content"] = json!({"__typename": "DraftIssue", "title": "Idea"});
+        assert_eq!(
+            item_from_wire(&v).unwrap().content_fields,
+            ContentFields::default()
+        );
+    }
+
+    #[test]
     fn values_of_unknown_types_are_dropped() {
         let item = item_from_wire(&item_json()).unwrap();
         assert!(item.value(&FieldId::new("F_future")).is_none());
@@ -560,7 +716,11 @@ pub(crate) mod tests {
         );
         assert_eq!(
             item.value(&FieldId::new("F_prs")),
-            Some(&FieldValue::PullRequests(vec![30]))
+            Some(&FieldValue::PullRequests(vec![LinkedPullRequest {
+                number: 30,
+                state: ContentState::Unknown,
+                is_draft: false
+            }]))
         );
     }
 

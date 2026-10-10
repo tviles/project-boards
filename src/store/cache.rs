@@ -4,7 +4,7 @@ use crate::store::snapshot::BoardSnapshot;
 use std::path::{Path, PathBuf};
 
 /// Bump when `BoardSnapshot`'s serialized shape changes; older caches are discarded.
-pub const CACHE_VERSION: u32 = 1;
+pub const CACHE_VERSION: u32 = 2;
 
 pub fn cache_path(state_dir: &Path, board: &BoardRef) -> PathBuf {
     state_dir

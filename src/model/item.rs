@@ -1,3 +1,4 @@
+use crate::model::field::{Field, FieldKind, OptionColor};
 use crate::model::ids::{FieldId, ItemId, IterationId, OptionId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -31,8 +32,12 @@ pub enum FieldValue {
     Users(Vec<String>),
     Milestone(String),
     Repository(String),
-    PullRequests(Vec<u32>),
+    PullRequests(Vec<LinkedPullRequest>),
     Reviewers(Vec<String>),
+    /// Built-in fields read from the item's content (see `Item::field_value`).
+    Parent(ParentIssue),
+    SubIssues(SubIssuesSummary),
+    IssueType(IssueType),
 }
 
 impl FieldValue {
@@ -59,11 +64,14 @@ impl FieldValue {
                 .map(|u| format!("@{u}"))
                 .collect::<Vec<_>>()
                 .join(", "),
-            Self::PullRequests(numbers) => numbers
+            Self::PullRequests(prs) => prs
                 .iter()
-                .map(|n| format!("#{n}"))
+                .map(|p| format!("#{}", p.number))
                 .collect::<Vec<_>>()
                 .join(", "),
+            Self::Parent(parent) => parent.title.clone(),
+            Self::SubIssues(s) => format!("{}/{}", s.completed, s.total),
+            Self::IssueType(t) => t.name.clone(),
         }
     }
 
@@ -94,6 +102,73 @@ impl ContentState {
             _ => Self::Unknown,
         }
     }
+}
+
+/// Why an issue was closed (`Issue.stateReason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StateReason {
+    Completed,
+    NotPlanned,
+    Duplicate,
+    Reopened,
+    Unknown,
+}
+
+impl StateReason {
+    pub fn from_api(value: &str) -> Self {
+        match value {
+            "COMPLETED" => Self::Completed,
+            "NOT_PLANNED" => Self::NotPlanned,
+            "DUPLICATE" => Self::Duplicate,
+            "REOPENED" => Self::Reopened,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// A pull request linked to an issue (one that closes it when merged).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinkedPullRequest {
+    pub number: u32,
+    pub state: ContentState,
+    pub is_draft: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ParentIssue {
+    pub number: u32,
+    pub title: String,
+    pub state: ContentState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubIssuesSummary {
+    pub total: u32,
+    pub completed: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IssueType {
+    pub name: String,
+    /// GitHub's issue type colours share the option colour names.
+    pub color: OptionColor,
+}
+
+/// What an issue or pull request says about itself beyond its title and state: the values
+/// of the built-in fields GitHub derives from content. Empty for drafts and other content.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ContentFields {
+    /// RFC 3339
+    pub created_at: Option<String>,
+    /// RFC 3339
+    pub updated_at: Option<String>,
+    /// RFC 3339
+    pub closed_at: Option<String>,
+    pub state_reason: Option<StateReason>,
+    pub issue_type: Option<IssueType>,
+    pub parent: Option<ParentIssue>,
+    pub sub_issues: Option<SubIssuesSummary>,
+    pub linked_prs: Vec<LinkedPullRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -136,6 +211,8 @@ pub struct Item {
     /// RFC 3339
     pub updated_at: String,
     pub values: BTreeMap<FieldId, FieldValue>,
+    #[serde(default)]
+    pub content_fields: ContentFields,
 }
 
 impl Item {
@@ -168,6 +245,33 @@ impl Item {
 
     pub fn value(&self, field: &FieldId) -> Option<&FieldValue> {
         self.values.get(field)
+    }
+
+    /// The item's value for `field`. Built-in fields GitHub derives from content (dates,
+    /// parent, sub-issue progress, issue type, linked pull requests) are read from
+    /// `content_fields`; dates as `YYYY-MM-DD`, and no progress when there are no sub-issues.
+    /// Everything else is the stored value.
+    pub fn field_value(&self, field: &Field) -> Option<FieldValue> {
+        let c = &self.content_fields;
+        let date = |d: &Option<String>| {
+            d.as_deref()
+                .map(|d| FieldValue::Date(d.get(..10).unwrap_or(d).to_string()))
+        };
+        match &field.kind {
+            FieldKind::Created => date(&c.created_at),
+            FieldKind::Updated => date(&c.updated_at),
+            FieldKind::Closed => date(&c.closed_at),
+            FieldKind::ParentIssue => c.parent.clone().map(FieldValue::Parent),
+            FieldKind::SubIssuesProgress => c
+                .sub_issues
+                .filter(|s| s.total > 0)
+                .map(FieldValue::SubIssues),
+            FieldKind::IssueType => c.issue_type.clone().map(FieldValue::IssueType),
+            FieldKind::LinkedPullRequests if !c.linked_prs.is_empty() => {
+                Some(FieldValue::PullRequests(c.linked_prs.clone()))
+            }
+            _ => self.value(&field.id).cloned(),
+        }
     }
 
     pub fn assignees(&self) -> Vec<&str> {
@@ -218,6 +322,7 @@ pub(crate) mod tests {
             archived: false,
             updated_at: "2026-10-01T00:00:00Z".into(),
             values: BTreeMap::new(),
+            content_fields: ContentFields::default(),
         }
     }
 
@@ -241,6 +346,76 @@ pub(crate) mod tests {
             FieldValue::Labels(vec![l("bug"), l("ui")]).display(),
             "bug, ui"
         );
+    }
+
+    #[test]
+    fn built_in_fields_are_derived_from_content() {
+        let field = |kind: FieldKind| Field {
+            id: FieldId::new("F"),
+            name: "f".into(),
+            kind,
+        };
+        let mut item = issue("I", 1, "x");
+        item.content_fields = ContentFields {
+            created_at: Some("2026-08-19T23:00:00Z".into()),
+            updated_at: Some("2026-08-21".into()),
+            closed_at: None,
+            state_reason: None,
+            issue_type: Some(IssueType {
+                name: "Bug".into(),
+                color: OptionColor::Red,
+            }),
+            parent: Some(ParentIssue {
+                number: 3,
+                title: "Epic".into(),
+                state: ContentState::Open,
+            }),
+            sub_issues: Some(SubIssuesSummary {
+                total: 4,
+                completed: 1,
+            }),
+            linked_prs: vec![LinkedPullRequest {
+                number: 9,
+                state: ContentState::Merged,
+                is_draft: false,
+            }],
+        };
+        let value = |item: &Item, kind| item.field_value(&field(kind)).map(|v| v.display());
+        assert_eq!(
+            value(&item, FieldKind::Created).as_deref(),
+            Some("2026-08-19")
+        );
+        assert_eq!(
+            value(&item, FieldKind::Updated).as_deref(),
+            Some("2026-08-21")
+        );
+        assert_eq!(value(&item, FieldKind::Closed), None);
+        assert_eq!(value(&item, FieldKind::IssueType).as_deref(), Some("Bug"));
+        assert_eq!(
+            value(&item, FieldKind::ParentIssue).as_deref(),
+            Some("Epic")
+        );
+        assert_eq!(
+            value(&item, FieldKind::SubIssuesProgress).as_deref(),
+            Some("1/4")
+        );
+        assert_eq!(
+            value(&item, FieldKind::LinkedPullRequests).as_deref(),
+            Some("#9")
+        );
+        item.content_fields.sub_issues = Some(SubIssuesSummary {
+            total: 0,
+            completed: 0,
+        });
+        assert_eq!(
+            value(&item, FieldKind::SubIssuesProgress),
+            None,
+            "no sub-issues"
+        );
+        // Other kinds read the stored value.
+        item.values
+            .insert(FieldId::new("F"), FieldValue::Text("note".into()));
+        assert_eq!(value(&item, FieldKind::Text).as_deref(), Some("note"));
     }
 
     #[test]

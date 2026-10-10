@@ -135,7 +135,7 @@ pub fn cell_text(item: &Item, field: &Field) -> String {
             None => item.title().to_string(),
         };
     }
-    item.value(&field.id)
+    item.field_value(field)
         .map(|v| v.display())
         .unwrap_or_default()
 }
@@ -350,6 +350,18 @@ mod tests {
             .map(|f| f.name.clone())
             .collect();
         assert_eq!(names, ["Title", "Status"]);
+    }
+
+    #[test]
+    fn built_in_field_cells_read_the_items_content() {
+        let mut item = items()[0].clone();
+        item.content_fields.created_at = Some("2026-08-19T10:00:00Z".into());
+        let created = Field {
+            id: FieldId::new("F_created"),
+            name: "Created".into(),
+            kind: FieldKind::Created,
+        };
+        assert_eq!(cell_text(&item, &created), "2026-08-19");
     }
 
     #[test]

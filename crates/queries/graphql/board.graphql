@@ -46,14 +46,20 @@ fragment ItemFields on ProjectV2Item {
   # it returns anything. One level up it costs 100.
   content {
     __typename
+    # Card fields: plain objects, no connection, so they add nothing to the cost.
     ... on Issue {
-      number title url state repository { nameWithOwner }
+      number title url state stateReason repository { nameWithOwner }
+      createdAt updatedAt closedAt
+      issueType { name color }
+      parent { number title state }
+      subIssuesSummary { total completed }
       labels(first: 20) { nodes { name color } }
       assignees(first: 10) { nodes { login } }
-      closedByPullRequestsReferences(first: 5, includeClosedPrs: true) { nodes { number } }
+      closedByPullRequestsReferences(first: 5, includeClosedPrs: true) { nodes { number state isDraft } }
     }
     ... on PullRequest {
       number title url state isDraft repository { nameWithOwner }
+      createdAt updatedAt closedAt
       labels(first: 20) { nodes { name color } }
       assignees(first: 10) { nodes { login } }
       reviewRequests(first: 10) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { slug } } } }

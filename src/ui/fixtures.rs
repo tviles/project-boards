@@ -123,6 +123,7 @@ fn issue(id: &str, number: u32, title: &str, values: Vec<(FieldId, FieldValue)>)
         archived: false,
         updated_at: "2026-10-01T00:00:00Z".into(),
         values: values.into_iter().collect::<BTreeMap<_, _>>(),
+        content_fields: ContentFields::default(),
     }
 }
 

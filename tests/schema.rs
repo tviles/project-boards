@@ -16,6 +16,9 @@ const REQUIRED: &[&str] = &[
     "query: String = \"\"",
     "closedByPullRequestsReferences(",
     "subIssues(",
+    "subIssuesSummary: SubIssuesSummary",
+    "issueType: IssueType",
+    "stateReason: IssueStateReason",
 ];
 
 #[test]
