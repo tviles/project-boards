@@ -355,6 +355,17 @@ impl App {
         let cols = self.board_columns();
         let lens: Vec<usize> = cols.iter().map(|c| c.len()).collect();
         self.board_sel.column = self.board_sel.column.min(lens.len().saturating_sub(1));
+        // Never rest on an empty column when a populated one exists: the nearest to the
+        // right, else to the left.
+        if lens.get(self.board_sel.column) == Some(&0) {
+            let c = self.board_sel.column;
+            if let Some(n) = (c + 1..lens.len())
+                .find(|&n| lens[n] > 0)
+                .or_else(|| (0..c).rev().find(|&n| lens[n] > 0))
+            {
+                self.board_sel.column = n;
+            }
+        }
         let len = lens.get(self.board_sel.column).copied().unwrap_or(0);
         self.board_sel.index = self.board_sel.index.min(len.saturating_sub(1));
     }
@@ -422,8 +433,17 @@ impl App {
             }
             let s = &mut self.board_sel;
             match action {
-                Action::Left => s.column = s.column.saturating_sub(1),
-                Action::Right => s.column = (s.column + 1).min(lens.len() - 1),
+                // Left and right skip empty columns; at the last populated one they stay put.
+                Action::Left => {
+                    if let Some(c) = (0..s.column).rev().find(|&c| lens[c] > 0) {
+                        s.column = c;
+                    }
+                }
+                Action::Right => {
+                    if let Some(c) = (s.column + 1..lens.len()).find(|&c| lens[c] > 0) {
+                        s.column = c;
+                    }
+                }
                 Action::Up => s.index = s.index.saturating_sub(1),
                 Action::Down => s.index += 1,
                 Action::Top => s.index = 0,
@@ -985,6 +1005,51 @@ mod tests {
         assert_eq!(selected_id(&a), "e", "No Status column");
         a.handle_key(key('h'));
         assert_eq!(selected_id(&a), "d");
+    }
+
+    #[test]
+    fn left_and_right_skip_empty_board_columns() {
+        use crate::model::field::{FieldKind, OptionColor, SelectOption};
+        use crate::model::ids::OptionId;
+        // Two empty options between the first and second columns.
+        let mut snap = snapshot();
+        let status = snap
+            .project
+            .fields
+            .iter_mut()
+            .find(|f| f.name == "Status")
+            .unwrap();
+        let FieldKind::SingleSelect { options } = &mut status.kind else {
+            panic!("Status is single-select")
+        };
+        for (i, name) in ["Empty one", "Empty two"].into_iter().enumerate() {
+            options.insert(
+                1 + i,
+                SelectOption {
+                    id: OptionId::new(format!("o_empty{i}")),
+                    name: name.into(),
+                    color: OptionColor::Gray,
+                },
+            );
+        }
+        let mut a = App::new(
+            Box::new(MemoryStore::new(Some(snap))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        a.handle_key(code(KeyCode::Tab));
+        assert_eq!(a.layout().0, Layout::Board);
+        assert_eq!(selected_id(&a), "a");
+        a.handle_key(key('l'));
+        assert_eq!(selected_id(&a), "b", "skipped both empty columns");
+        a.handle_key(key('h'));
+        assert_eq!(selected_id(&a), "a", "and back over them");
+        a.handle_key(key('h'));
+        assert_eq!(
+            selected_id(&a),
+            "a",
+            "nothing populated further left: stays"
+        );
     }
 
     #[test]
