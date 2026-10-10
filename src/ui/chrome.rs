@@ -100,25 +100,51 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
     let Some(project) = app.project() else { return };
     let current = app.current_view().map(|v| v.id.clone());
+    let marker = if app.layout().0 == Layout::Board {
+        "▥ board"
+    } else {
+        "▤ table"
+    };
+    // Each tab is " name " plus a separating space. The marker always stays visible, so the
+    // tabs get the rest of the row.
+    let tab = |name: &str| format!(" {name} ");
+    let widths: Vec<usize> = project
+        .views
+        .iter()
+        .map(|v| display_width(&tab(&v.name)) + 1)
+        .collect();
+    let room = (area.width as usize).saturating_sub(display_width(marker));
+    let selected = project
+        .views
+        .iter()
+        .position(|v| Some(&v.id) == current.as_ref())
+        .unwrap_or(0);
+    // Scroll just far enough that the selected tab fits; with room to spare nothing moves.
+    let mut start = 0;
+    while start < selected && widths[start..=selected].iter().sum::<usize>() > room {
+        start += 1;
+    }
     let mut spans = Vec::new();
-    for v in &project.views {
-        let style = if Some(&v.id) == current.as_ref() {
+    let mut used = 0;
+    for (i, v) in project.views.iter().enumerate().skip(start) {
+        let text = if used + widths[i] <= room {
+            tab(&v.name)
+        } else if i == selected {
+            // Too wide on its own: shorten the name rather than hide the current view.
+            tab(&truncate_to_width(&v.name, room.saturating_sub(3)))
+        } else {
+            break;
+        };
+        used += display_width(&text) + 1;
+        let style = if i == selected {
             app.theme.selected()
         } else {
             app.theme.dim()
         };
-        spans.push(Span::styled(format!(" {} ", v.name), style));
+        spans.push(Span::styled(text, style));
         spans.push(Span::raw(" "));
     }
-    let (layout, _) = app.layout();
-    spans.push(Span::styled(
-        if layout == Layout::Board {
-            "▥ board"
-        } else {
-            "▤ table"
-        },
-        app.theme.accent(),
-    ));
+    spans.push(Span::styled(marker, app.theme.accent()));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -349,6 +375,53 @@ mod tests {
         a.handle_key(key('j'));
         let screen = render_to_string(80, 10, |f| draw(f, &mut a));
         assert!(screen.lines().last().unwrap().starts_with("refresh failed"));
+    }
+
+    #[test]
+    fn overflowing_tabs_scroll_to_keep_the_current_tab_and_layout_visible() {
+        let mut snap = snapshot();
+        let template = snap.project.views[0].clone();
+        snap.project.views = (1..=8)
+            .map(|n| crate::model::View {
+                id: crate::model::ViewId::new(format!("V{n}")),
+                name: format!("Sprint planning view {n}"),
+                ..template.clone()
+            })
+            .collect();
+        let mut a = App::new(
+            Box::new(MemoryStore::new(Some(snap))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        for n in 1..=8 {
+            a.select_view(&crate::model::ViewId::new(format!("V{n}")));
+            let screen = render_to_string(40, 10, |f| draw(f, &mut a));
+            let tabs = screen.lines().nth(1).unwrap();
+            assert!(
+                tabs.contains(&format!("Sprint planning view {n}")),
+                "view {n}: {tabs:?}"
+            );
+            assert!(tabs.contains("▤ table"), "view {n}: {tabs:?}");
+        }
+    }
+
+    #[test]
+    fn a_tab_wider_than_the_pane_is_shortened() {
+        let mut snap = snapshot();
+        snap.project.views[2].name = "An extremely long view name that cannot fit".into();
+        let mut a = App::new(
+            Box::new(MemoryStore::new(Some(snap))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        a.select_view(&crate::model::ViewId::new("V_bugs"));
+        let screen = render_to_string(40, 10, |f| draw(f, &mut a));
+        let tabs = screen.lines().nth(1).unwrap();
+        assert!(
+            tabs.starts_with(" An extremely") && tabs.contains("…"),
+            "{tabs:?}"
+        );
+        assert!(tabs.contains("▤ table"), "{tabs:?}");
     }
 
     #[test]
