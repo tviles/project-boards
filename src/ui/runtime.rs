@@ -76,7 +76,6 @@ async fn drive(
     mut signals: Signals,
 ) -> anyhow::Result<()> {
     let mut runner: Option<Runner> = None;
-    let mut stream_error_logged = false;
     terminal.draw(|f| chrome::draw(f, &mut controller.app))?;
     let mut pending = start(controller, &mut runner, &tx, max_items);
     let mut events = EventStream::new();
@@ -107,13 +106,8 @@ async fn drive(
                 Some(Ok(Event::FocusGained)) => controller.handle(Input::Focus(true), now),
                 Some(Ok(Event::FocusLost)) => controller.handle(Input::Focus(false), now),
                 Some(Ok(_)) => Vec::new(),
-                Some(Err(e)) => {
-                    if !stream_error_logged {
-                        stream_error_logged = true;
-                        tracing::warn!(error = %e, "terminal event stream error");
-                    }
-                    Vec::new()
-                }
+                // An input error is not transient: retrying would spin on the same error.
+                Some(Err(e)) => return Err(anyhow::Error::new(e).context("reading terminal input")),
                 // The stream ended (terminal gone): same as Exit.
                 None => return Ok(()),
             },
