@@ -1,4 +1,4 @@
-use crate::model::field::Field;
+use crate::model::field::{Field, find_field};
 use crate::model::ids::{FieldId, ViewId};
 use serde::{Deserialize, Serialize};
 
@@ -55,7 +55,7 @@ impl View {
     /// The field whose buckets become board columns: the view's column-by field, else a
     /// single-select called "Status", else the first field that can be a column.
     pub fn column_field<'a>(&self, fields: &'a [Field]) -> Option<&'a Field> {
-        let by_id = |id: &FieldId| fields.iter().find(|f| &f.id == id);
+        let by_id = |id: &FieldId| find_field(fields, id);
         self.vertical_group_by
             .iter()
             .filter_map(by_id)
@@ -70,9 +70,7 @@ impl View {
 
     /// The table group-by field, or the board swimlane field.
     pub fn group_field<'a>(&self, fields: &'a [Field]) -> Option<&'a Field> {
-        self.group_by
-            .first()
-            .and_then(|id| fields.iter().find(|f| &f.id == id))
+        self.group_by.first().and_then(|id| find_field(fields, id))
     }
 }
 

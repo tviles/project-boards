@@ -122,6 +122,25 @@ pub struct Field {
     pub kind: FieldKind,
 }
 
+/// The part of a field id after its first `_`. GitHub lists a single-select under
+/// `PVTSSF_…` in a project's fields but under `PVTF_…` in a view's visible fields; the part
+/// after the prefix is the same.
+fn id_suffix(id: &FieldId) -> Option<&str> {
+    id.as_str()
+        .split_once('_')
+        .map(|(_, rest)| rest)
+        .filter(|rest| !rest.is_empty())
+}
+
+/// The field with `id`, or failing that the one whose id has the same suffix after the first
+/// `_` (see `id_suffix`).
+pub fn find_field<'a>(fields: &'a [Field], id: &FieldId) -> Option<&'a Field> {
+    fields.iter().find(|f| &f.id == id).or_else(|| {
+        let suffix = id_suffix(id)?;
+        fields.iter().find(|f| id_suffix(&f.id) == Some(suffix))
+    })
+}
+
 /// One board column or table group: an option, an iteration, or "no value" (`key: None`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bucket {

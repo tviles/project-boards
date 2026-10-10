@@ -21,10 +21,18 @@ pub(crate) fn str_of(v: &Value) -> String {
     v.as_str().unwrap_or_default().to_string()
 }
 
-fn field_ids(v: &Value, key: &str) -> Vec<FieldId> {
+/// `id` as the project knows it. A view can name a field under another prefix than the
+/// project's field list (`PVTF_…` for a `PVTSSF_…` single-select); ids no field matches are
+/// kept as they are.
+fn project_field_id(id: &str, fields: &[Field]) -> FieldId {
+    let id = FieldId::new(id);
+    find_field(fields, &id).map_or(id, |f| f.id.clone())
+}
+
+fn field_ids(v: &Value, key: &str, fields: &[Field]) -> Vec<FieldId> {
     nodes(v, key)
         .into_iter()
-        .filter_map(|n| n["id"].as_str().map(FieldId::new))
+        .filter_map(|n| n["id"].as_str().map(|id| project_field_id(id, fields)))
         .collect()
 }
 
@@ -84,21 +92,22 @@ pub fn field_from_wire(v: &Value) -> Field {
     }
 }
 
-pub fn view_from_wire(v: &Value) -> View {
+/// Decodes a view, naming its fields by the ids in `fields` (the project's own).
+pub fn view_from_wire(v: &Value, fields: &[Field]) -> View {
     View {
         id: ViewId::new(str_of(&v["id"])),
         number: v["number"].as_u64().unwrap_or(0) as u32,
         name: str_of(&v["name"]),
         layout: Layout::from_api(v["layout"].as_str().unwrap_or("")),
         filter: str_of(&v["filter"]),
-        visible_fields: field_ids(v, "visibleFields"),
-        group_by: field_ids(v, "groupByFields"),
-        vertical_group_by: field_ids(v, "verticalGroupByFields"),
+        visible_fields: field_ids(v, "visibleFields", fields),
+        group_by: field_ids(v, "groupByFields", fields),
+        vertical_group_by: field_ids(v, "verticalGroupByFields", fields),
         sort_by: nodes(v, "sortByFields")
             .into_iter()
             .filter_map(|n| {
                 Some(SortSpec {
-                    field: FieldId::new(n["field"]["id"].as_str()?),
+                    field: project_field_id(n["field"]["id"].as_str()?, fields),
                     direction: if n["direction"] == "DESC" {
                         SortDirection::Desc
                     } else {
@@ -115,6 +124,14 @@ pub fn project_from_wire(v: &Value, board: &BoardRef) -> Result<Project, GithubE
     let id = v["id"]
         .as_str()
         .ok_or_else(|| GithubError::Decode("project has no id".into()))?;
+    let fields: Vec<Field> = nodes(v, "fields")
+        .into_iter()
+        .map(field_from_wire)
+        .collect();
+    let views = nodes(v, "views")
+        .into_iter()
+        .map(|view| view_from_wire(view, &fields))
+        .collect();
     Ok(Project {
         id: ProjectId::new(id),
         board: board.clone(),
@@ -126,11 +143,8 @@ pub fn project_from_wire(v: &Value, board: &BoardRef) -> Result<Project, GithubE
         title: str_of(&v["title"]),
         url: str_of(&v["url"]),
         viewer_can_update: v["viewerCanUpdate"].as_bool().unwrap_or(false),
-        fields: nodes(v, "fields")
-            .into_iter()
-            .map(field_from_wire)
-            .collect(),
-        views: nodes(v, "views").into_iter().map(view_from_wire).collect(),
+        fields,
+        views,
     })
 }
 
@@ -423,6 +437,48 @@ pub(crate) mod tests {
             (Layout::Board, "label:bug")
         );
         assert_eq!(v2.column_field(&p.fields).unwrap().name, "Status");
+    }
+
+    #[test]
+    fn view_field_ids_resolve_to_the_projects_own_ids_by_suffix() {
+        // GitHub lists a single-select under `PVTSSF_…` in `fields` but `PVTF_…` in a view.
+        let v = json!({
+            "id": "PVT_2", "number": 1, "title": "B", "url": "u", "viewerCanUpdate": false,
+            "owner": {"__typename": "User", "login": "tviles"},
+            "fields": {"nodes": [
+                {"__typename": "ProjectV2Field", "id": "PVTF_t1", "name": "Title", "dataType": "TITLE"},
+                {"__typename": "ProjectV2SingleSelectField", "id": "PVTSSF_abc123", "name": "Status",
+                 "dataType": "SINGLE_SELECT", "options": []},
+                {"__typename": "ProjectV2SingleSelectField", "id": "PVTSSF_def456", "name": "Priority",
+                 "dataType": "SINGLE_SELECT", "options": []}
+            ]},
+            "views": {"nodes": [
+                {"id": "V1", "number": 1, "name": "Board", "layout": "BOARD_LAYOUT", "filter": "",
+                 "visibleFields": {"nodes": [{"id": "PVTF_t1"}, {"id": "PVTF_abc123"}, {"id": "PVTF_zzz"}]},
+                 "groupByFields": {"nodes": [{"id": "PVTF_def456"}]},
+                 "verticalGroupByFields": {"nodes": [{"id": "PVTF_abc123"}]},
+                 "sortByFields": {"nodes": [{"direction": "ASC", "field": {"id": "PVTF_def456"}}]}}
+            ]}
+        });
+        let p = project_from_wire(&v, &board()).unwrap();
+        let view = &p.views[0];
+        let ids = |v: &[FieldId]| v.iter().map(|f| f.as_str().to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            ids(&view.visible_fields),
+            ["PVTF_t1", "PVTSSF_abc123", "PVTF_zzz"],
+            "exact ids stay; unknown ids are kept as they are"
+        );
+        assert_eq!(ids(&view.group_by), ["PVTSSF_def456"]);
+        assert_eq!(ids(&view.vertical_group_by), ["PVTSSF_abc123"]);
+        assert_eq!(view.sort_by[0].field.as_str(), "PVTSSF_def456");
+        let names: Vec<&str> = view
+            .visible_fields
+            .iter()
+            .filter_map(|id| p.field(id))
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(names, ["Title", "Status"]);
+        assert_eq!(view.column_field(&p.fields).unwrap().name, "Status");
     }
 
     #[test]

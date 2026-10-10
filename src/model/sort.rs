@@ -1,4 +1,4 @@
-use crate::model::field::{Field, FieldKind};
+use crate::model::field::{Field, FieldKind, find_field};
 use crate::model::item::{FieldValue, Item};
 use crate::model::view::{SortDirection, SortSpec};
 use std::cmp::Ordering;
@@ -33,7 +33,7 @@ pub fn sort_items(items: &mut [&Item], specs: &[SortSpec], fields: &[Field]) {
     }
     items.sort_by(|a, b| {
         for spec in specs {
-            let field = fields.iter().find(|f| f.id == spec.field);
+            let field = find_field(fields, &spec.field);
             let ka = a.value(&spec.field).map(|v| key(v, field));
             let kb = b.value(&spec.field).map(|v| key(v, field));
             let ord = match (ka, kb) {

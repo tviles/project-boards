@@ -341,6 +341,18 @@ mod tests {
     }
 
     #[test]
+    fn visible_fields_under_another_id_prefix_still_show() {
+        // A view lists Status as `PVTF_…`; the project knows it as `F_status`'s suffix twin.
+        let mut p = project();
+        p.views[0].visible_fields = vec![FieldId::new("F_title"), FieldId::new("PVTF_status")];
+        let names: Vec<String> = table_columns(&p.views[0], &p)
+            .iter()
+            .map(|f| f.name.clone())
+            .collect();
+        assert_eq!(names, ["Title", "Status"]);
+    }
+
+    #[test]
     fn cells_show_numbers_drafts_and_values() {
         let all = items();
         let p = project();
