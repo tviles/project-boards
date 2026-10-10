@@ -81,12 +81,17 @@ const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-/// `YYYY-MM-DD…` as `Mon D, YYYY`; anything else as it is.
+/// `YYYY-MM-DD…` as `Mon D, YYYY`; anything else (a month outside 1–12 or a day outside
+/// 1–31 included) as it is.
 fn format_date(date: &str) -> String {
     let parsed = (|| {
         let year = date.get(..4)?.parse::<u32>().ok()?;
         let month = date.get(5..7)?.parse::<usize>().ok()?;
-        let day = date.get(8..10)?.parse::<u32>().ok()?;
+        let day = date
+            .get(8..10)?
+            .parse::<u32>()
+            .ok()
+            .filter(|d| (1..=31).contains(d))?;
         let name = MONTHS.get(month.checked_sub(1)?)?;
         (date.as_bytes()[4] == b'-' && date.as_bytes()[7] == b'-')
             .then(|| format!("{name} {day}, {year}"))
@@ -372,6 +377,25 @@ mod tests {
                 .iter()
                 .all(|p| p.parts[0].1.add_modifier.contains(Modifier::DIM))
         );
+    }
+
+    #[test]
+    fn dates_that_do_not_parse_show_as_they_are() {
+        assert_eq!(format_date("2026-08-19"), "Aug 19, 2026");
+        assert_eq!(format_date("2026-01-01T00:00:00Z"), "Jan 1, 2026");
+        for raw in [
+            "2026-08-99",
+            "2026-08-00",
+            "2026-13-01",
+            "2026-00-10",
+            "2026/08/19",
+            "garbage",
+            "",
+            "2026-0",
+            "日本語の日付です",
+        ] {
+            assert_eq!(format_date(raw), raw);
+        }
     }
 
     #[test]

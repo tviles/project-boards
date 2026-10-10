@@ -1066,6 +1066,59 @@ mod tests {
     }
 
     #[test]
+    fn scrolling_cards_with_field_pill_lines_keeps_the_selected_card_fully_visible() {
+        let (p, all) = (project(), items());
+        let status = field(&p, "Status");
+        let pill_fields: Vec<Field> = (0..6)
+            .map(|k| Field {
+                id: FieldId::new(format!("F_pill{k}")),
+                name: format!("Pill {k}"),
+                kind: FieldKind::Text,
+            })
+            .collect();
+        let pill_refs: Vec<&Field> = pill_fields.iter().collect();
+        let mut cards = mixed_height_cards(&all);
+        // Each value needs a line of its own at 27 cells; five or six hit the 4-line cap.
+        let counts = [0, 6, 2, 5, 4, 1, 3, 6, 5, 0, 2, 4];
+        for (card, count) in cards.iter_mut().zip(counts) {
+            for k in 0..count {
+                card.values.insert(
+                    FieldId::new(format!("F_pill{k}")),
+                    FieldValue::Text(format!("pill value number {k} here")),
+                );
+            }
+        }
+        let column = one_column(&all, status, &cards);
+        let mut heights = std::collections::BTreeSet::new();
+        for height in [13u16, 16] {
+            for index in 0..cards.len() {
+                let sel = BoardSelection { column: 0, index };
+                let screen = render_to_string(30, height, |f| {
+                    render_board(
+                        f,
+                        f.area(),
+                        std::slice::from_ref(&column),
+                        &sel,
+                        status,
+                        &pill_refs,
+                        &Theme::plain(),
+                    )
+                });
+                let rows: Vec<&str> = screen.lines().collect();
+                let top = rows.iter().position(|r| r.starts_with('┏'));
+                let bottom = rows.iter().position(|r| r.starts_with('┗'));
+                let (Some(top), Some(bottom)) = (top, bottom) else {
+                    panic!("height {height} index {index}: not fully visible\n{screen}")
+                };
+                assert!(top >= 1 && bottom > top, "index {index}\n{screen}");
+                heights.insert(bottom - top + 1);
+            }
+        }
+        assert!(heights.len() >= 6, "{heights:?}");
+        assert_eq!(heights.last(), Some(&12), "the tallest card: {heights:?}");
+    }
+
+    #[test]
     fn a_card_taller_than_the_area_shows_its_top() {
         let (p, all) = (project(), items());
         let status = field(&p, "Status");
@@ -1392,6 +1445,29 @@ mod tests {
         );
         let dot = plain[1].spans.iter().find(|s| s.content == "●").unwrap();
         assert_eq!(dot.style.fg, None);
+    }
+
+    #[test]
+    fn a_pull_request_on_the_board_is_drawn_like_an_issue() {
+        let pr = |state, is_draft| {
+            with_content(ItemContent::PullRequest {
+                reference: reference("tviles/t", 1),
+                title: "Fix crash".into(),
+                state,
+                is_draft,
+            })
+        };
+        let closed = pr(ContentState::Closed, false);
+        assert_eq!(glyph(&closed).fg, Some(Color::Magenta));
+        assert_eq!(
+            glyph(&pr(ContentState::Merged, false)).fg,
+            Some(Color::Magenta)
+        );
+        assert_eq!(glyph(&pr(ContentState::Open, true)).fg, Some(Color::Green));
+        assert_eq!(
+            card_text(&closed, 34, &Theme::plain())[1],
+            "│● t #1                   @tviles│"
+        );
     }
 
     #[test]
