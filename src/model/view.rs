@@ -79,6 +79,22 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layout_reads_old_capitalised_names_and_writes_lowercase() {
+        for (old, layout) in [
+            ("\"Table\"", Layout::Table),
+            ("\"Board\"", Layout::Board),
+            ("\"Roadmap\"", Layout::Roadmap),
+        ] {
+            assert_eq!(serde_json::from_str::<Layout>(old).unwrap(), layout);
+        }
+        assert_eq!(serde_json::to_string(&Layout::Board).unwrap(), "\"board\"");
+        assert_eq!(
+            serde_json::from_str::<Layout>("\"board\"").unwrap(),
+            Layout::Board
+        );
+    }
     use crate::model::field::{FieldKind, OptionColor, SelectOption};
     use crate::model::ids::OptionId;
 
