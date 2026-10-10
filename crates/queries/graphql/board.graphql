@@ -50,7 +50,7 @@ fragment ItemFields on ProjectV2Item {
       number title url state repository { nameWithOwner }
       labels(first: 20) { nodes { name color } }
       assignees(first: 10) { nodes { login } }
-      closedByPullRequestsReferences(first: 5) { nodes { number } }
+      closedByPullRequestsReferences(first: 5, includeClosedPrs: true) { nodes { number } }
     }
     ... on PullRequest {
       number title url state isDraft repository { nameWithOwner }
@@ -151,7 +151,7 @@ query ItemDetail($id: ID!, $before: String) {
           issueType { name }
           parent { number title state }
           subIssues(first: 50) { nodes { number title state } }
-          closedByPullRequestsReferences(first: 10) { nodes { number title state } }
+          closedByPullRequestsReferences(first: 10, includeClosedPrs: true) { nodes { number title state } }
           comments(last: 20, before: $before) {
             totalCount
             pageInfo { hasPreviousPage startCursor }
