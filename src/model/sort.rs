@@ -26,22 +26,41 @@ fn key(value: &FieldValue, field: Option<&Field>) -> Key {
     }
 }
 
-/// Stable sort by the view's sort specs. Items without a value always sort last.
+/// Stable sort by the view's sort specs. Items without a value always sort last. Values are
+/// the ones cells show (`Item::field_value`), read through the field the spec resolves to.
 pub fn sort_items(items: &mut [&Item], specs: &[SortSpec], fields: &[Field]) {
     if specs.is_empty() {
         return;
     }
-    items.sort_by(|a, b| {
-        for spec in specs {
-            let field = find_field(fields, &spec.field);
-            let ka = a.value(&spec.field).map(|v| key(v, field));
-            let kb = b.value(&spec.field).map(|v| key(v, field));
+    let specs: Vec<(&SortSpec, Option<&Field>)> = specs
+        .iter()
+        .map(|spec| (spec, find_field(fields, &spec.field)))
+        .collect();
+    // Each item's keys are built once, not on every comparison.
+    let mut keyed: Vec<(Vec<Option<Key>>, &Item)> = items
+        .iter()
+        .map(|item| {
+            let keys = specs
+                .iter()
+                .map(|(spec, field)| {
+                    let value = match field {
+                        Some(f) => item.field_value(f),
+                        None => item.value(&spec.field).cloned(),
+                    };
+                    value.map(|v| key(&v, *field))
+                })
+                .collect();
+            (keys, *item)
+        })
+        .collect();
+    keyed.sort_by(|(a, _), (b, _)| {
+        for ((spec, _), (ka, kb)) in specs.iter().zip(a.iter().zip(b)) {
             let ord = match (ka, kb) {
                 (None, None) => Ordering::Equal,
                 (None, Some(_)) => Ordering::Greater,
                 (Some(_), None) => Ordering::Less,
                 (Some(x), Some(y)) => {
-                    let o = x.partial_cmp(&y).unwrap_or(Ordering::Equal);
+                    let o = x.partial_cmp(y).unwrap_or(Ordering::Equal);
                     if spec.direction == SortDirection::Desc {
                         o.reverse()
                     } else {
@@ -55,6 +74,9 @@ pub fn sort_items(items: &mut [&Item], specs: &[SortSpec], fields: &[Field]) {
         }
         Ordering::Equal
     });
+    for (slot, (_, item)) in items.iter_mut().zip(keyed) {
+        *slot = item;
+    }
 }
 
 #[cfg(test)]
@@ -136,6 +158,38 @@ mod tests {
         );
         let ids: Vec<_> = items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, ["a", "c", "b"]);
+    }
+
+    #[test]
+    fn built_in_fields_sort_by_their_derived_values() {
+        let created = Field {
+            id: FieldId::new("PVTF_created"),
+            name: "Created".into(),
+            kind: FieldKind::Created,
+        };
+        let at = |id: &str, date: Option<&str>| {
+            let mut i = issue(id, 1, id);
+            i.content_fields.created_at = date.map(String::from);
+            i
+        };
+        let (a, b, c, d) = (
+            at("a", Some("2026-09-02T00:00:00Z")),
+            at("b", None),
+            at("c", Some("2026-01-15T00:00:00Z")),
+            at("d", Some("2026-05-30T00:00:00Z")),
+        );
+        let mut items = vec![&a, &b, &c, &d];
+        // The view names the field by its other id prefix.
+        sort_items(
+            &mut items,
+            &[SortSpec {
+                field: FieldId::new("PVTSF_created"),
+                direction: SortDirection::Asc,
+            }],
+            &[created],
+        );
+        let ids: Vec<_> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["c", "d", "a", "b"]);
     }
 
     #[test]

@@ -27,14 +27,15 @@ pub fn collapse_key(key: &Option<String>) -> String {
 }
 
 /// Buckets for any field: option/iteration buckets when it has them, otherwise one bucket
-/// per distinct display value (sorted), then "No <field>".
+/// per distinct display value (sorted), then "No <field>". Values are the ones cells show
+/// (`Item::field_value`), so built-in fields group by what the item's content says.
 pub(crate) fn buckets_for(items: &[&Item], field: &Field) -> Vec<Bucket> {
     if let Some(b) = field.buckets() {
         return b;
     }
     let mut values: Vec<String> = items
         .iter()
-        .filter_map(|i| i.value(&field.id).map(|v| v.display()))
+        .filter_map(|i| i.field_value(field).map(|v| v.display()))
         .filter(|s| !s.is_empty())
         .collect();
     values.sort();
@@ -63,7 +64,7 @@ pub(crate) fn buckets_for(items: &[&Item], field: &Field) -> Vec<Bucket> {
 /// (for example an option deleted on GitHub).
 pub(crate) fn bucket_of(item: &Item, field: &Field, buckets: &[Bucket]) -> Option<String> {
     let raw = item
-        .value(&field.id)
+        .field_value(field)
         .map(|v| v.bucket_key().unwrap_or_else(|| v.display()));
     let raw = raw?;
     buckets
@@ -307,6 +308,28 @@ mod tests {
                 ("No Status", 1)
             ]
         );
+    }
+
+    #[test]
+    fn grouping_by_a_built_in_field_uses_the_items_content() {
+        let mut all = items();
+        let bug = IssueType {
+            name: "Bug".into(),
+            color: OptionColor::Red,
+        };
+        all[1].content_fields.issue_type = Some(bug);
+        let issue_type = Field {
+            id: FieldId::new("F_type"),
+            name: "Type".into(),
+            kind: FieldKind::IssueType,
+        };
+        let rows = build_rows(&refs(&all), Some(&issue_type), &HashSet::new());
+        assert!(
+            matches!(&rows[0], Row::Group { title, count: 1, .. } if title == "Bug"),
+            "{rows:?}"
+        );
+        assert!(matches!(rows[1], Row::Item(i) if i.id.as_str() == "b"));
+        assert!(matches!(&rows[2], Row::Group { title, count: 4, .. } if title == "No Type"));
     }
 
     #[test]
