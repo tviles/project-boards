@@ -59,6 +59,7 @@ Apart from the fixed `Ctrl+C` quit, no default key uses Ctrl, so herdr's prefix 
     full_refresh_mins = 10
     max_items = 2000
     placement = "tab"                  # tab | overlay | split | zoomed
+    gh_user = "my-login"               # gh account for `gh auth token --user`; default: active account
 
     [keys]
     next_view = "]"                    # action = key
@@ -67,7 +68,7 @@ Apart from the fixed `Ctrl+C` quit, no default key uses Ctrl, so herdr's prefix 
 
 ## Tokens
 
-The token comes from `GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token`, in that order. Boards owned by a user account need a classic token or the `gh` login (`gh auth login`, then `gh auth refresh -s project`): GitHub does not let fine-grained tokens read them. Fine-grained tokens work for organisation boards when they have the organisation's Projects permission.
+The token comes from `GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token`, in that order. If you have several `gh` accounts, `gh_user` in `config.toml` picks which one's token the plugin uses, without changing your active account. Boards owned by a user account need a classic token or the `gh` login (`gh auth login`, then `gh auth refresh -s project`): GitHub does not let fine-grained tokens read them. Fine-grained tokens work for organisation boards when they have the organisation's Projects permission.
 
 ## Troubleshooting
 

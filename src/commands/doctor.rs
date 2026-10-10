@@ -127,7 +127,8 @@ pub fn run_doctor(notify: bool) -> anyhow::Result<bool> {
     let env = PluginEnv::from_system();
     let mut checks = Vec::new();
 
-    let token = resolve_token_from_system();
+    let (config, warnings) = crate::config::load_config(&env.config_dir);
+    let token = resolve_token_from_system(config.gh_user.as_deref());
     match &token {
         Ok(t) => checks.push(Check {
             level: Level::Ok,
@@ -184,7 +185,6 @@ pub fn run_doctor(notify: bool) -> anyhow::Result<bool> {
     // The same directory `open` uses: herdr runs this action from the plugin root.
     checks.push(repo_check(action_cwd(&env, &herdr).as_deref(), detect_repo));
 
-    let (config, warnings) = crate::config::load_config(&env.config_dir);
     let (keymap, key_warnings) = Keymap::with_overrides(&config.keys);
     for w in warnings.into_iter().chain(key_warnings) {
         checks.push(Check {

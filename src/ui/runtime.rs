@@ -56,11 +56,14 @@ async fn event_loop(
     herdr: Arc<dyn HerdrCli>,
     signals: Signals,
 ) -> anyhow::Result<()> {
-    let max_items = options.config.max_items;
+    let settings = StartSettings {
+        max_items: options.config.max_items,
+        gh_user: options.config.gh_user.clone(),
+    };
     // Events arrive tagged with the generation of the job that produced them.
     let (tx, rx) = mpsc::unbounded_channel::<Tagged>();
     let mut controller = Controller::new(options, herdr, INCREMENTAL_MODE, Instant::now());
-    let result = drive(terminal, &mut controller, tx, rx, max_items, signals).await;
+    let result = drive(terminal, &mut controller, tx, rx, &settings, signals).await;
     // Every exit path (Exit effect, SIGTERM/SIGHUP, a failed draw) unregisters the pane.
     controller.release();
     result
@@ -71,12 +74,12 @@ async fn drive(
     controller: &mut Controller,
     tx: mpsc::UnboundedSender<Tagged>,
     mut rx: mpsc::UnboundedReceiver<Tagged>,
-    max_items: usize,
+    settings: &StartSettings,
     mut signals: Signals,
 ) -> anyhow::Result<()> {
     let mut runner: Option<Runner> = None;
     terminal.draw(|f| chrome::draw(f, &mut controller.app))?;
-    let mut pending = start(controller, &mut runner, &tx, max_items);
+    let mut pending = start(controller, &mut runner, &tx, settings);
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
@@ -93,7 +96,7 @@ async fn drive(
                     },
                     Effect::OpenUrl(url) => open_url(&url),
                     Effect::ResolveToken => {
-                        pending.extend(start(controller, &mut runner, &tx, max_items))
+                        pending.extend(start(controller, &mut runner, &tx, settings))
                     }
                     Effect::Exit => return Ok(()),
                 }
@@ -129,20 +132,26 @@ struct Runner {
     max_items: usize,
 }
 
+/// What `start` needs from the config to build the GitHub client and sync jobs.
+struct StartSettings {
+    max_items: usize,
+    gh_user: Option<String>,
+}
+
 /// Resolves the token, builds the GitHub client, and starts the controller.
 fn start(
     controller: &mut Controller,
     runner: &mut Option<Runner>,
     tx: &mpsc::UnboundedSender<Tagged>,
-    max_items: usize,
+    settings: &StartSettings,
 ) -> Vec<Effect> {
-    match resolve_token_from_system() {
+    match resolve_token_from_system(settings.gh_user.as_deref()) {
         Ok(token) => {
             let gh = Arc::new(Github::new(Arc::new(HttpTransport::new(token.value))));
             *runner = Some(Runner {
                 gh,
                 tx: tx.clone(),
-                max_items,
+                max_items: settings.max_items,
             });
             controller.start(Ok(()), Instant::now())
         }

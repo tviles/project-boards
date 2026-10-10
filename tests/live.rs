@@ -25,7 +25,7 @@ fn testbed() -> (BoardRef, ProjectId) {
 }
 
 fn http() -> Arc<dyn Transport> {
-    let token = resolve_token_from_system().expect("a token for the testbed");
+    let token = resolve_token_from_system(None).expect("a token for the testbed");
     Arc::new(HttpTransport::new(token.value))
 }
 

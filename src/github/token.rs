@@ -5,6 +5,7 @@ pub enum TokenSource {
     GhTokenEnv,
     GithubTokenEnv,
     GhCli,
+    GhCliUser,
 }
 
 impl TokenSource {
@@ -13,6 +14,7 @@ impl TokenSource {
             TokenSource::GhTokenEnv => "GH_TOKEN",
             TokenSource::GithubTokenEnv => "GITHUB_TOKEN",
             TokenSource::GhCli => "gh auth token",
+            TokenSource::GhCliUser => "gh auth token --user (config gh_user)",
         }
     }
 }
@@ -61,19 +63,27 @@ pub fn resolve_token(
     Err(GithubError::NoToken)
 }
 
-pub fn resolve_token_from_system() -> Result<Token, GithubError> {
-    resolve_token(
+/// `gh_user` (config) picks the `gh` account for the `gh auth token` fallback; the
+/// environment variables still win.
+pub fn resolve_token_from_system(gh_user: Option<&str>) -> Result<Token, GithubError> {
+    let token = resolve_token(
         |key| std::env::var(key).ok(),
         || {
-            let out = std::process::Command::new("gh")
-                .args(["auth", "token"])
-                .output()
-                .ok()?;
+            let mut args = vec!["auth", "token"];
+            if let Some(user) = gh_user {
+                args.extend(["--user", user]);
+            }
+            let out = std::process::Command::new("gh").args(args).output().ok()?;
             out.status
                 .success()
                 .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
         },
-    )
+    )?;
+    let mut token = token;
+    if token.source == TokenSource::GhCli && gh_user.is_some() {
+        token.source = TokenSource::GhCliUser;
+    }
+    Ok(token)
 }
 
 #[cfg(test)]

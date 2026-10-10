@@ -159,7 +159,7 @@ async fn main() {
         .parse()
         .unwrap();
     let project_id = testbed["project_id"].as_str().unwrap().to_string();
-    let token = resolve_token_from_system().expect("token");
+    let token = resolve_token_from_system(None).expect("token");
     let t = HttpTransport::new(token.value);
     println!("# Phase 0 API probes\n");
     probe_index_lag(&t, &project_id).await;

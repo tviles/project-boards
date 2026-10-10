@@ -15,6 +15,9 @@ pub struct Config {
     pub placement: Placement,
     /// Action name to key, e.g. `next_view = "]"`.
     pub keys: BTreeMap<String, String>,
+    /// The `gh` account whose token to use (`gh auth token --user <gh_user>`) when neither
+    /// GH_TOKEN nor GITHUB_TOKEN is set. Unset: the active `gh` account.
+    pub gh_user: Option<String>,
 }
 
 impl Default for Config {
@@ -27,6 +30,7 @@ impl Default for Config {
             max_items: 2000,
             placement: Placement::Tab,
             keys: BTreeMap::new(),
+            gh_user: None,
         }
     }
 }
@@ -111,12 +115,43 @@ pub fn load_config(dir: &Path) -> (Config, Vec<String>) {
         "max_items",
         &mut warnings,
     );
+    if let Some(user) = config.gh_user.take() {
+        if is_github_login(&user) {
+            config.gh_user = Some(user);
+        } else {
+            warnings.push(format!(
+                "gh_user = {user:?} is not a GitHub login; using the active gh account"
+            ));
+        }
+    }
     (config, warnings)
+}
+
+/// GitHub logins: 1 to 39 ASCII letters, digits or hyphens, not starting with a hyphen. Also
+/// keeps the value from being read as a `gh` option.
+fn is_github_login(s: &str) -> bool {
+    (1..=39).contains(&s.len())
+        && !s.starts_with('-')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gh_user_is_read_and_validated() {
+        assert_eq!(
+            with("gh_user = \"tviles\"").0.gh_user.as_deref(),
+            Some("tviles")
+        );
+        assert_eq!(with("").0.gh_user, None);
+        for bad in ["--hostname", "a b", "", "x;y"] {
+            let (c, w) = with(&format!("gh_user = {bad:?}"));
+            assert_eq!(c.gh_user, None, "{bad}");
+            assert_eq!(w.len(), 1, "{bad}");
+        }
+    }
 
     fn with(text: &str) -> (Config, Vec<String>) {
         let dir = tempfile::tempdir().unwrap();
