@@ -13,6 +13,9 @@ pub struct ColumnConstraint {
     exclude: BTreeSet<String>,
     /// `-no:field` or `has:field`: the "No <field>" column is hidden.
     hide_no_value: bool,
+    /// `no:field` or `-has:field`: items without a value match, so the "No <field>" column
+    /// stays even when include terms name other values.
+    show_no_value: bool,
 }
 
 impl ColumnConstraint {
@@ -24,7 +27,9 @@ impl ColumnConstraint {
     /// Whether the column titled `title` stays; `no_value` marks the "No <field>" column.
     pub fn allows(&self, title: &str, no_value: bool) -> bool {
         if no_value {
-            return !self.hide_no_value;
+            // Include terms (`status:Todo`) only match items that have one of those values,
+            // so the "No <field>" column is empty and hidden unless `no:field` asks for it.
+            return !self.hide_no_value && (self.include.is_none() || self.show_no_value);
         }
         let title = title.to_lowercase();
         let included = self.include.as_ref().is_none_or(|set| set.contains(&title));
@@ -117,6 +122,7 @@ pub fn column_constraint(filter: &str, field: &Field) -> ColumnConstraint {
             // `no:` and `-has:` keep only the "No <field>" column; `-no:` and `has:` hide it.
             if (key == "no") != negated {
                 c.include.get_or_insert_with(BTreeSet::new);
+                c.show_no_value = true;
             } else {
                 c.hide_no_value = true;
             }
@@ -147,6 +153,27 @@ pub fn column_constraint(filter: &str, field: &Field) -> ColumnConstraint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn include_terms_hide_the_no_value_column_unless_no_is_asked_for() {
+        let status = crate::ui::fixtures::project()
+            .fields
+            .iter()
+            .find(|f| f.name == "Status")
+            .unwrap()
+            .clone();
+        let todo_only = column_constraint("status:Todo", &status);
+        assert!(!todo_only.allows("", true));
+        assert!(todo_only.allows("Todo", false));
+        let with_none = column_constraint("status:Todo no:status", &status);
+        assert!(with_none.allows("", true));
+        assert!(with_none.allows("Todo", false));
+        assert!(!with_none.allows("Done", false));
+        let none_only = column_constraint("no:status", &status);
+        assert!(none_only.allows("", true));
+        assert!(!none_only.allows("Todo", false));
+        assert!(column_constraint("-status:Done", &status).allows("", true));
+    }
     use crate::model::field::{FieldKind, Iteration, OptionColor, SelectOption};
     use crate::model::ids::{FieldId, IterationId, OptionId};
 
@@ -202,20 +229,17 @@ mod tests {
         let all = "* Todo Design Design Review In Progress Done -";
         let cases: &[(&str, &str)] = &[
             ("", all),
-            ("status:Todo", "Todo -"),
-            ("status:todo,DONE", "Todo Done -"),
-            ("status:\"Design Review\"", "Design Review -"),
-            (
-                "status:Todo,\"In Progress\",Done",
-                "Todo In Progress Done -",
-            ),
+            ("status:Todo", "Todo"),
+            ("status:todo,DONE", "Todo Done"),
+            ("status:\"Design Review\"", "Design Review"),
+            ("status:Todo,\"In Progress\",Done", "Todo In Progress Done"),
             ("-status:Done", "Todo Design Design Review In Progress -"),
             (
                 "-status:\"Design Review\",Design",
                 "Todo In Progress Done -",
             ),
-            ("STATUS:Todo Status:Done", "Todo Done -"),
-            ("status:Todo,Done -status:Done", "Todo -"),
+            ("STATUS:Todo Status:Done", "Todo Done"),
+            ("status:Todo,Done -status:Done", "Todo"),
             ("no:status", "-"),
             ("no:status status:Todo", "Todo -"),
             ("-no:status", "Todo Design Design Review In Progress Done"),
@@ -226,13 +250,13 @@ mod tests {
                 "label:bug assignee:@me fix crash -status:Done is:open",
                 "Todo Design Design Review In Progress -",
             ),
-            ("priority:P0 status:Todo", "Todo -"),
+            ("priority:P0 status:Todo", "Todo"),
             ("status:@current", all),
             ("status:Todo,@next", all),
             ("status:>Todo", all),
             ("status:a..b", all),
             ("statusish:Todo", all),
-            ("status:Nope", "-"),
+            ("status:Nope", ""), // the board falls back to every column,
         ];
         for (filter, want) in cases {
             assert_eq!(shown(filter, &s).join(" "), *want, "filter {filter:?}");
@@ -242,8 +266,8 @@ mod tests {
     #[test]
     fn multi_word_fields_match_quoted_or_hyphenated() {
         let f = field("Design Stage", &["Draft", "Final"]);
-        assert_eq!(shown("design-stage:Draft", &f).join(" "), "Draft -");
-        assert_eq!(shown("\"Design Stage\":Final", &f).join(" "), "Final -");
+        assert_eq!(shown("design-stage:Draft", &f).join(" "), "Draft");
+        assert_eq!(shown("\"Design Stage\":Final", &f).join(" "), "Final");
         assert_eq!(shown("-\"design stage\":Final", &f).join(" "), "Draft -");
         assert_eq!(shown("no:design-stage", &f).join(" "), "-");
         assert_eq!(shown("-no:\"Design Stage\"", &f).join(" "), "Draft Final");
@@ -266,7 +290,7 @@ mod tests {
                 completed: vec![],
             },
         };
-        assert_eq!(shown("sprint:\"sprint 3\"", &f).join(" "), "Sprint 3 -");
+        assert_eq!(shown("sprint:\"sprint 3\"", &f).join(" "), "Sprint 3");
         assert_eq!(shown("sprint:@current", &f)[0], "*");
         assert_eq!(shown("-sprint:@previous", &f)[0], "*");
     }
