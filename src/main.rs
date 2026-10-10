@@ -60,9 +60,13 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Command::Doctor { .. } => {
-            eprintln!("project-boards: this subcommand is not built yet in this version");
-            ExitCode::FAILURE
-        }
+        Command::Doctor { notify } => match project_boards::commands::doctor::run_doctor(notify) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(e) => {
+                let _ = writeln!(std::io::stderr(), "project-boards: {e:#}");
+                ExitCode::FAILURE
+            }
+        },
     }
 }
