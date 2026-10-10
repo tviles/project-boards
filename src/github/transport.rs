@@ -128,6 +128,14 @@ fn header_u64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<u64> {
     headers.get(name)?.to_str().ok()?.trim().parse().ok()
 }
 
+/// Seconds until the primary budget resets: `x-ratelimit-reset` minus `now`, or a minute when
+/// GitHub sent no reset time.
+fn primary_wait(rate: &RateInfo, now: u64) -> u64 {
+    rate.reset_epoch
+        .map(|reset| reset.saturating_sub(now))
+        .unwrap_or(60)
+}
+
 impl Transport for HttpTransport {
     fn execute(
         &self,
@@ -164,6 +172,7 @@ impl Transport for HttpTransport {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(GithubError::Unauthorized);
             }
+            // A secondary limit says how long to wait.
             if status == reqwest::StatusCode::FORBIDDEN
                 || status == reqwest::StatusCode::TOO_MANY_REQUESTS
             {
@@ -172,21 +181,28 @@ impl Transport for HttpTransport {
                         retry_after_secs: secs,
                     });
                 }
-                if rate.remaining == Some(0) {
-                    let now = time::OffsetDateTime::now_utc().unix_timestamp().max(0) as u64;
-                    let wait = rate
-                        .reset_epoch
-                        .map(|reset| reset.saturating_sub(now))
-                        .unwrap_or(60);
-                    return Err(GithubError::RateLimited {
-                        retry_after_secs: wait,
-                    });
-                }
+            }
+            let primary_limited = || GithubError::RateLimited {
+                retry_after_secs: primary_wait(
+                    &rate,
+                    time::OffsetDateTime::now_utc().unix_timestamp().max(0) as u64,
+                ),
+            };
+            // An exhausted primary budget, whatever the status: the next request would fail.
+            if rate.remaining == Some(0) {
+                return Err(primary_limited());
             }
             let body: serde_json::Value = response
                 .json()
                 .await
                 .map_err(|e| GithubError::Decode(e.to_string()))?;
+            // GraphQL reports an exhausted primary budget as HTTP 200 with a RATE_LIMITED error.
+            if body["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.iter().any(|e| e["type"] == "RATE_LIMITED"))
+            {
+                return Err(primary_limited());
+            }
             if !status.is_success() && body.get("data").is_none() && body.get("errors").is_none() {
                 return Err(GithubError::Network(format!("HTTP {status}")));
             }
@@ -297,6 +313,70 @@ mod tests {
             t.execute(request()).await,
             Err(GithubError::Graphql(_))
         ));
+    }
+
+    fn now() -> u64 {
+        time::OffsetDateTime::now_utc().unix_timestamp() as u64
+    }
+
+    fn assert_wait_near(result: Result<GraphqlResponse, GithubError>, expected: u64) {
+        match result {
+            Err(GithubError::RateLimited { retry_after_secs }) => assert!(
+                (expected.saturating_sub(2)..=expected).contains(&retry_after_secs),
+                "waited {retry_after_secs}s, expected about {expected}s"
+            ),
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn graphql_rate_limited_error_waits_until_the_reset() {
+        let body = json!({"errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded for user ID 1."}]});
+        let (_s, t) = server_with(
+            ResponseTemplate::new(200)
+                .set_body_json(body)
+                .insert_header("x-ratelimit-reset", (now() + 300).to_string().as_str()),
+        )
+        .await;
+        assert_wait_near(t.execute(request()).await, 300);
+    }
+
+    #[tokio::test]
+    async fn graphql_rate_limited_error_without_a_reset_waits_a_minute() {
+        let body = json!({"data": null, "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]});
+        let (_s, t) = server_with(ResponseTemplate::new(200).set_body_json(body)).await;
+        assert_eq!(
+            t.execute(request()).await,
+            Err(GithubError::RateLimited {
+                retry_after_secs: 60
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_budget_is_rate_limited_whatever_the_status() {
+        for status in [200, 403, 502] {
+            let (_s, t) = server_with(
+                ResponseTemplate::new(status)
+                    .set_body_json(json!({"data": {"viewer": {"login": "tviles"}}}))
+                    .insert_header("x-ratelimit-remaining", "0")
+                    .insert_header("x-ratelimit-reset", (now() + 90).to_string().as_str()),
+            )
+            .await;
+            assert_wait_near(t.execute(request()).await, 90);
+        }
+    }
+
+    #[test]
+    fn primary_wait_counts_to_the_reset_or_defaults_to_a_minute() {
+        let rate = |reset| RateInfo {
+            remaining: Some(0),
+            limit: Some(5000),
+            reset_epoch: reset,
+        };
+        assert_eq!(primary_wait(&rate(Some(1_000_120)), 1_000_000), 120);
+        assert_eq!(primary_wait(&rate(Some(999_000)), 1_000_000), 0);
+        assert_eq!(primary_wait(&rate(None), 1_000_000), 60);
     }
 
     #[test]
