@@ -257,7 +257,11 @@ fn card_reference(
         let name = r.repo.split_once('/').map_or(r.repo.as_str(), |(_, n)| n);
         (Some(sanitize(name)), Some(format!("#{}", r.number)))
     };
-    let not_planned = item.content_fields.state_reason == Some(StateReason::NotPlanned);
+    // GitHub greys issues closed as not planned or as duplicates.
+    let not_planned = matches!(
+        item.content_fields.state_reason,
+        Some(StateReason::NotPlanned | StateReason::Duplicate)
+    );
     match &item.content {
         ItemContent::Issue {
             reference, state, ..
@@ -1364,6 +1368,11 @@ mod tests {
             "no reason reads as completed"
         );
         let not_planned = glyph(&closed_issue(Some(StateReason::NotPlanned)));
+        assert_eq!(
+            glyph(&closed_issue(Some(StateReason::Duplicate))),
+            not_planned,
+            "duplicates look like not planned"
+        );
         assert_eq!(not_planned.fg, Some(Color::Gray));
         assert!(not_planned.add_modifier.contains(Modifier::DIM));
         assert_eq!(
