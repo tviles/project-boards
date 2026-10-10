@@ -4,6 +4,7 @@ use crate::ui::text::{pad_to_width, truncate_to_width};
 use crate::ui::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::collections::HashSet;
@@ -134,17 +135,23 @@ pub fn cell_text(item: &Item, field: &Field) -> String {
 }
 
 /// One cell, exactly `width` cells wide. Labels are coloured pills (they keep their colours
-/// on the selected row); everything else is text in the row's `style`.
+/// on the selected row); everything else, the gaps between pills included, is in the row's
+/// `style`.
 fn item_cell(
     item: &Item,
     field: &Field,
     width: usize,
-    style: ratatui::style::Style,
+    selected: bool,
     theme: &Theme,
 ) -> Vec<Span<'static>> {
+    let style = if selected {
+        theme.selected()
+    } else {
+        Style::default()
+    };
     if let (true, Some(FieldValue::Labels(labels))) = (theme.color, item.value(&field.id)) {
         let labels: Vec<&Label> = labels.iter().collect();
-        let mut spans = label_spans(&labels, width, theme);
+        let mut spans = label_spans(&labels, width, theme, selected);
         let pad = width.saturating_sub(spans_width(&spans));
         spans.push(Span::styled(" ".repeat(pad), style));
         return spans;
@@ -212,10 +219,11 @@ pub fn render_table(
         selected.saturating_sub(body_height - 1)
     };
     for (index, row) in rows.iter().enumerate().skip(offset).take(body_height) {
-        let style = if index == selected {
+        let is_selected = index == selected;
+        let style = if is_selected {
             theme.selected()
         } else {
-            ratatui::style::Style::default()
+            Style::default()
         };
         let line = match row {
             Row::Group {
@@ -242,7 +250,7 @@ pub fn render_table(
                     .iter()
                     .zip(&widths)
                     .flat_map(|(f, w)| {
-                        let mut cell = item_cell(item, f, *w, style, theme);
+                        let mut cell = item_cell(item, f, *w, is_selected, theme);
                         cell.push(Span::styled(" ", style));
                         cell
                     })
@@ -381,7 +389,19 @@ mod tests {
     #[test]
     fn label_cells_are_pills_that_keep_their_colours_when_selected() {
         use ratatui::style::{Color, Modifier};
-        let all = items();
+        let mut all = items();
+        all[0].values.insert(
+            FieldId::new("F_labels"),
+            FieldValue::Labels(
+                ["bug", "ui", "docs"]
+                    .iter()
+                    .map(|n| Label {
+                        name: (*n).into(),
+                        color: "d73a4a".into(),
+                    })
+                    .collect(),
+            ),
+        );
         let p = project();
         let rows = build_rows(&refs(&all), None, &HashSet::new());
         let labels = p.fields.iter().find(|f| f.name == "Labels").unwrap();
@@ -398,12 +418,19 @@ mod tests {
             .unwrap()
             .buffer
             .clone();
-        // Row 1 is "#1 Fix crash", selected; the Labels column is the last 12 cells.
-        let pill = &buf[(30, 1)];
+        // Row 1 is "#1 Fix crash", selected; the Labels column is x 29..39: "bug ui +1 ".
+        let cells: String = (29..39).map(|x| buf[(x, 1)].symbol()).collect();
+        assert_eq!(cells, "bug ui +1 ");
+        let pill = &buf[(29, 1)];
         assert_eq!(pill.symbol(), "b");
         assert_eq!(pill.bg, Color::Rgb(0xd7, 0x3a, 0x4a));
         assert_eq!(pill.fg, Color::White);
         assert!(!pill.modifier.contains(Modifier::REVERSED));
+        assert!(!buf[(33, 1)].modifier.contains(Modifier::REVERSED));
+        // The gaps, "+1" and the padding join the selected row's bar.
+        for x in [32, 35, 36, 37, 38, 39] {
+            assert!(buf[(x, 1)].modifier.contains(Modifier::REVERSED), "x {x}");
+        }
         assert!(buf[(2, 1)].modifier.contains(Modifier::REVERSED));
         assert!(!buf[(2, 2)].modifier.contains(Modifier::REVERSED));
     }

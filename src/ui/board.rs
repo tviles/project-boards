@@ -183,20 +183,20 @@ fn card_lines(
     let meta_style = if selected { style } else { theme.dim() };
     let labels = item.labels();
     let meta = if theme.color && !labels.is_empty() {
-        // Assignees as dim text, then the pills in whatever room is left; the pills keep
-        // their own colours even on the selected card.
+        // Assignees as dim text, then the pills in whatever room is left. On the selected
+        // card everything but the pills takes the selected style, so the line is one bar.
         let mut text = truncate_to_width(&assignees.join(" · "), width);
         let mut room = width.saturating_sub(display_width(&text));
         if !text.is_empty() {
-            // The separator is only worth drawing with a whole pill (3 cells) after it.
-            if room >= 6 {
+            // The separator is only worth drawing with at least two cells of pill after it.
+            if room >= 5 {
                 text.push_str(" · ");
                 room -= 3;
             } else {
                 room = 0;
             }
         }
-        let pills = label_spans(&labels, room, theme);
+        let pills = label_spans(&labels, room, theme, selected);
         let pad = width.saturating_sub(display_width(&text) + spans_width(&pills));
         let mut spans = vec![Span::styled(text, meta_style)];
         spans.extend(pills);
@@ -507,9 +507,9 @@ mod tests {
             .buffer
             .clone();
         // Card "#1 Fix crash": line 2 reads "@tviles · bug" and is selected.
-        let row: String = (0..15).map(|x| buf[(x, 2)].symbol()).collect();
-        assert_eq!(row, "@tviles ·  bug ");
-        let pill = &buf[(11, 2)];
+        let row: String = (0..13).map(|x| buf[(x, 2)].symbol()).collect();
+        assert_eq!(row, "@tviles · bug");
+        let pill = &buf[(10, 2)];
         assert_eq!(pill.symbol(), "b");
         assert_eq!(pill.bg, Color::Rgb(0xd7, 0x3a, 0x4a));
         assert!(!pill.modifier.contains(Modifier::REVERSED));
@@ -526,17 +526,71 @@ mod tests {
             color: true,
             truecolor: true,
         };
-        // "@tviles" is 7 cells, so widths 11 and 12 leave 4 and 5 cells: under 6.
-        for width in [11, 12] {
+        // "@tviles" is 7 cells, so widths 10 and 11 leave 3 and 4 cells: under 5.
+        for width in [10, 11] {
             let [_, meta] = card_lines(&all[0], status, width, false, &theme);
             let text: String = meta.spans.iter().map(|s| s.content.as_ref()).collect();
             assert_eq!(text, format!("{:<width$}", "@tviles"), "width {width}");
         }
-        let [_, meta] = card_lines(&all[0], status, 13, false, &theme);
+        let [_, meta] = card_lines(&all[0], status, 12, false, &theme);
         let text: String = meta.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "@tviles ·  … ");
-        let [_, meta] = card_lines(&all[0], status, 15, false, &theme);
+        assert_eq!(text, "@tviles · b…");
+        let [_, meta] = card_lines(&all[0], status, 14, false, &theme);
         let text: String = meta.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "@tviles ·  bug ");
+        assert_eq!(text, "@tviles · bug ");
+    }
+
+    #[test]
+    fn a_selected_card_reads_as_one_bar_with_coloured_pills_in_it() {
+        use ratatui::style::{Color, Modifier};
+        let (p, mut all) = (project(), items());
+        let three = |names: &[&str]| {
+            FieldValue::Labels(
+                names
+                    .iter()
+                    .map(|n| Label {
+                        name: (*n).into(),
+                        color: "d73a4a".into(),
+                    })
+                    .collect(),
+            )
+        };
+        for item in &mut all[..3] {
+            item.values.insert(
+                FieldId::new("F_labels"),
+                three(&["bug", "enhancement", "documentation"]),
+            );
+        }
+        let refs: Vec<&Item> = all.iter().collect();
+        let status = field(&p, "Status");
+        let cols = build_columns(&refs, status, None);
+        let theme = Theme {
+            color: true,
+            truecolor: true,
+        };
+        let sel = BoardSelection::default();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(30, 6)).unwrap();
+        let buf = terminal
+            .draw(|f| render_board(f, f.area(), &cols, &sel, status, &theme))
+            .unwrap()
+            .buffer
+            .clone();
+        // One 29-cell column. Selected card a, line 2; card c, unselected, line 4.
+        let row = |y: u16| (0..29).map(|x| buf[(x, y)].symbol()).collect::<String>();
+        assert_eq!(row(2), "@tviles · bug enhancement +1 ");
+        assert_eq!(row(4), row(2));
+        let reversed = |x: u16, y: u16| buf[(x, y)].modifier.contains(Modifier::REVERSED);
+        // The separator after the assignees, the gaps between pills, "+1" and the padding.
+        for x in [7, 8, 9, 13, 25, 26, 27, 28] {
+            assert!(reversed(x, 2), "x {x} on the selected card");
+            assert!(!reversed(x, 4), "x {x} on the unselected card");
+        }
+        for x in [10, 14] {
+            assert!(!reversed(x, 2), "pill at x {x} keeps its colours");
+            assert_eq!(buf[(x, 2)].bg, Color::Rgb(0xd7, 0x3a, 0x4a));
+        }
+        assert!(buf[(26, 4)].modifier.contains(Modifier::DIM), "+1 dim");
+        assert!(!buf[(26, 2)].modifier.contains(Modifier::DIM));
     }
 }

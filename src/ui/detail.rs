@@ -161,7 +161,7 @@ fn field_line(item: &Item, project: &Project, width: usize, theme: &Theme) -> Li
         let value_spans = match (theme.color, value) {
             (true, FieldValue::Labels(labels)) => {
                 let labels: Vec<&Label> = labels.iter().collect();
-                label_spans(&labels, left, theme)
+                label_spans(&labels, left, theme, false)
             }
             _ => vec![Span::raw(truncate_to_width(&value.display(), left))],
         };
@@ -495,8 +495,8 @@ mod tests {
             .iter()
             .find(|l| line_text(l).contains("Labels:"))
             .unwrap();
-        assert!(line_text(line).contains("Labels:  bug "));
-        let pill = line.spans.iter().find(|s| s.content == " bug ").unwrap();
+        assert!(line_text(line).contains("Labels: bug"));
+        let pill = line.spans.iter().find(|s| s.content == "bug").unwrap();
         assert_eq!(pill.style.bg, Some(Color::Rgb(0xd7, 0x3a, 0x4a)));
         let doc = build_doc(&all[0], &p, &loaded(), 80, &Theme::plain());
         assert!(
