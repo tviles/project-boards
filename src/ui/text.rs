@@ -193,6 +193,15 @@ mod tests {
     }
 
     #[test]
+    fn wrap_keeps_text_that_fits_exactly() {
+        assert_eq!(wrap_to_width("ab cd", 5, 3), ["ab cd"]);
+        assert_eq!(wrap_to_width("abcde", 5, 1), ["abcde"]);
+        // Exactly three lines' worth: no ellipsis.
+        assert_eq!(wrap_to_width("aaa bbb ccc", 3, 3), ["aaa", "bbb", "ccc"]);
+        assert_eq!(wrap_to_width("abcdefghi", 3, 3), ["abc", "def", "ghi"]);
+    }
+
+    #[test]
     fn wrap_turns_control_characters_into_breaks() {
         assert_eq!(wrap_to_width("a\nb\tc", 10, 3), ["a b c"]);
     }

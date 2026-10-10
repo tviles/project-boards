@@ -420,6 +420,21 @@ fn bordered_card(
     lines
 }
 
+/// The first line of a column shown in `rows` rows. The selected card, at `(top, height)`
+/// in the column's lines, ends on the last visible row at the latest, but the column never
+/// scrolls past its top: a card taller than the area shows its top.
+fn column_scroll(selected_span: Option<(usize, usize)>, rows: usize) -> usize {
+    selected_span.map_or(0, |(top, height)| {
+        (top + height).saturating_sub(rows).min(top)
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Cards built by `render_board` on this thread, so tests can check it skips hidden ones.
+    static CARDS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub fn render_board(
     frame: &mut Frame,
     area: Rect,
@@ -473,9 +488,18 @@ pub fn render_board(
     for (offset, column) in columns[start..start + visible].iter().enumerate() {
         let col_index = start + offset;
         // Each card is built (and its title wrapped) once; its height is the lines it took.
+        // Only the cards the column can show are built: in the selected column everything
+        // through the selected card (its place sets the scroll), then until the rows below
+        // the scroll are filled.
+        let rows = grid.len();
+        let wants_selected = col_index == selection.column && selection.index < column.len();
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut selected_span = None;
         for entry in entries(column) {
+            let scroll_known = !wants_selected || selected_span.is_some();
+            if scroll_known && lines.len() >= column_scroll(selected_span, rows) + rows {
+                break;
+            }
             match entry {
                 Entry::Lane(title) => lines.push(Line::from(Span::styled(
                     pad_to_width(&truncate_to_width(&format!("── {title} "), width), width),
@@ -488,6 +512,8 @@ pub fn render_board(
                     } else {
                         card_lines(item, column_field, width, is_sel, theme).into()
                     };
+                    #[cfg(test)]
+                    CARDS_BUILT.with(|n| n.set(n.get() + 1));
                     if is_sel {
                         selected_span = Some((lines.len(), card.len()));
                     }
@@ -495,11 +521,7 @@ pub fn render_board(
                 }
             }
         }
-        // The selected card ends on the last visible row at the latest, but never scroll past
-        // its top: a card taller than the area shows its top.
-        let scroll = selected_span.map_or(0, |(top, height)| {
-            (top + height).saturating_sub(grid.len()).min(top)
-        });
+        let scroll = column_scroll(selected_span, rows);
         for (row, cells) in grid.iter_mut().enumerate() {
             let line = lines
                 .get(row + scroll)
@@ -1032,6 +1054,79 @@ mod tests {
         let rows: Vec<&str> = screen.lines().collect();
         assert!(rows[1].starts_with("┏"), "{screen}");
         assert!(rows[2].starts_with("┃● t #1"), "{screen}");
+    }
+
+    fn render_one(column: &Column, status: &Field, index: usize, height: u16) -> String {
+        let sel = BoardSelection { column: 0, index };
+        render_to_string(30, height, |f| {
+            render_board(
+                f,
+                f.area(),
+                std::slice::from_ref(column),
+                &sel,
+                status,
+                &Theme::plain(),
+            )
+        })
+    }
+
+    #[test]
+    fn a_long_column_draws_exactly_as_its_first_cards_and_builds_only_those() {
+        let (p, all) = (project(), items());
+        let status = field(&p, "Status");
+        let cards: Vec<Item> = (0..42)
+            .flat_map(|_| mixed_height_cards(&all))
+            .take(500)
+            .collect();
+        let bucket = build_columns(&all.iter().collect::<Vec<_>>(), status, None)[0]
+            .bucket
+            .clone();
+        let column = |n: usize| Column {
+            bucket: bucket.clone(),
+            lanes: vec![Lane {
+                title: None,
+                items: cards[..n].iter().collect(),
+            }],
+        };
+        let full = column(500);
+        // Without the header, whose count differs.
+        let body = |s: String| s.lines().skip(1).collect::<Vec<_>>().join("\n");
+        for index in [0, 1, 7, 250, 499] {
+            // Twenty more cards are at least 80 rows: more than the area shows.
+            let first = column((index + 20).min(500));
+            assert_eq!(
+                body(render_one(&full, status, index, 13)),
+                body(render_one(&first, status, index, 13)),
+                "index {index}"
+            );
+            CARDS_BUILT.with(|n| n.set(0));
+            render_one(&full, status, index, 13);
+            let built = CARDS_BUILT.with(|n| n.get());
+            // Through the selected card, then at most the 12 rows below the header (cards
+            // are at least 4 rows): never the whole column.
+            assert!(built <= index + 4, "index {index}: built {built}");
+        }
+    }
+
+    #[test]
+    fn tiny_areas_do_not_panic() {
+        let (p, all) = (project(), items());
+        let refs: Vec<&Item> = all.iter().collect();
+        let status = field(&p, "Status");
+        let cols = build_columns(&refs, status, None);
+        for width in [0, 1, 5, 9, 12] {
+            for height in [0, 1, 2] {
+                for index in [0, 1] {
+                    let sel = BoardSelection { column: 0, index };
+                    let mut terminal =
+                        ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                            .unwrap();
+                    terminal
+                        .draw(|f| render_board(f, f.area(), &cols, &sel, status, &Theme::plain()))
+                        .unwrap();
+                }
+            }
+        }
     }
 
     fn with_content(content: ItemContent) -> Item {
