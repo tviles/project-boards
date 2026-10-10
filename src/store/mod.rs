@@ -22,6 +22,29 @@ pub enum StoreUpdate {
     FetchedAt(String),
 }
 
+impl StoreUpdate {
+    /// The kind of update and the ids it touches, for logs. Never titles or field values:
+    /// board content stays out of the log file.
+    pub fn summary(&self) -> String {
+        let ids = |items: &[Item]| {
+            items
+                .iter()
+                .map(|i| i.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match self {
+            Self::Replace(s) => format!("Replace({} items)", s.items.len()),
+            Self::Project(p) => format!("Project({})", p.id),
+            Self::UpsertItems(items) => format!("UpsertItems({})", ids(items)),
+            Self::ReplaceItems(items) => format!("ReplaceItems({})", ids(items)),
+            Self::ViewIds { view, list } => format!("ViewIds({view}, {} ids)", list.ids.len()),
+            Self::ClearViewIds(view) => format!("ClearViewIds({view})"),
+            Self::FetchedAt(t) => format!("FetchedAt({t})"),
+        }
+    }
+}
+
 /// What the UI reads the board through. A later milestone adds the pending-edit layer and
 /// may move this behind a daemon; callers only see this trait.
 pub trait Store: Send {
@@ -56,9 +79,10 @@ impl Store for MemoryStore {
                 s.views.remove(&view);
             }
             (StoreUpdate::FetchedAt(t), Some(s)) => s.fetched_at = Some(t),
-            (other, None) => {
-                tracing::warn!(?other, "store update before the project was known; ignored")
-            }
+            (other, None) => tracing::warn!(
+                update = %other.summary(),
+                "store update before the project was known; ignored"
+            ),
         }
     }
 }
@@ -77,6 +101,21 @@ mod tests {
         store.apply(StoreUpdate::Project(project()));
         store.apply(StoreUpdate::UpsertItems(vec![issue("a", 1, "A")]));
         assert_eq!(store.snapshot().unwrap().all_items().len(), 1);
+    }
+
+    #[test]
+    fn update_summaries_name_item_ids_but_no_content() {
+        let mut secret = issue("PVTI_a", 1, "Secret launch plan");
+        secret.values.insert(
+            crate::model::FieldId::new("F"),
+            crate::model::FieldValue::Text("private note".into()),
+        );
+        let summary = StoreUpdate::UpsertItems(vec![secret, issue("PVTI_b", 2, "x")]).summary();
+        assert_eq!(summary, "UpsertItems(PVTI_a, PVTI_b)");
+        assert_eq!(
+            StoreUpdate::Project(project()).summary(),
+            format!("Project({})", project().id)
+        );
     }
 
     #[test]

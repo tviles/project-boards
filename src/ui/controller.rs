@@ -75,6 +75,21 @@ pub enum SyncJob {
     Projects(Option<RepoSlug>),
 }
 
+impl SyncJob {
+    /// The job's name, for logs; `Refresh` carries the whole board schema.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Resolve(_) => "Resolve",
+            Self::Refresh(_) => "Refresh",
+            Self::Incremental { .. } => "Incremental",
+            Self::ViewIds { .. } => "ViewIds",
+            Self::Detail { .. } => "Detail",
+            Self::RepoProjects(_) => "RepoProjects",
+            Self::Projects(_) => "Projects",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// `generation` is the controller's generation when the effect was produced; the shell
@@ -810,6 +825,13 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn job_kinds_name_the_job_without_its_payload() {
+        let job = SyncJob::Refresh(snapshot().project);
+        assert_eq!(job.kind(), "Refresh");
+        assert_eq!(SyncJob::Resolve(board()).kind(), "Resolve");
     }
 
     #[test]

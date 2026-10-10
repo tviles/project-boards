@@ -87,7 +87,9 @@ async fn drive(
                         // The effect carries the generation it was produced under; never read
                         // controller.generation() here (a bump may have happened since).
                         Some(r) => r.spawn(job, generation),
-                        None => tracing::warn!(?job, "no GitHub client yet; job dropped"),
+                        None => {
+                            tracing::warn!(job = job.kind(), "no GitHub client yet; job dropped")
+                        }
                     },
                     Effect::OpenUrl(url) => open_url(&url),
                     Effect::ResolveToken => {

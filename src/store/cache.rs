@@ -52,6 +52,12 @@ mod tests {
         save_cache(&path, &s).unwrap();
         assert_eq!(load_cache(&path), Some(s));
         assert!(path.ends_with("cache/tviles__3.json"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the cache holds private board content");
+        }
     }
 
     #[test]
