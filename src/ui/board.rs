@@ -3,7 +3,7 @@
 use crate::model::*;
 use crate::ui::labels::{label_spans, spans_width};
 use crate::ui::table::{bucket_of, buckets_for};
-use crate::ui::text::{display_width, pad_to_width, truncate_to_width};
+use crate::ui::text::{display_width, pad_to_width, sanitize, truncate_to_width, wrap_to_width};
 use crate::ui::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -141,12 +141,10 @@ pub fn resolve_layout(
 }
 
 const MIN_COLUMN: usize = 34;
-/// Rows of a bordered card: top border, title, meta, bottom border.
-const CARD_ROWS: usize = 4;
-/// Rows of the borderless card used in columns too narrow for a border.
-const PLAIN_CARD_ROWS: usize = 2;
 /// Columns narrower than this draw borderless two-line cards.
 const MIN_BORDERED: usize = 10;
+/// Most lines a bordered card's title wraps to.
+const MAX_TITLE_LINES: usize = 3;
 
 enum Entry<'a> {
     Lane(String),
@@ -242,15 +240,134 @@ fn border_line(
     ))
 }
 
+/// The state dot's style, then the dim reference after it: the repo's short name and
+/// `#number` for issues and pull requests, `Draft` for a draft. Redacted and unknown content
+/// have neither.
+fn card_reference(item: &Item, theme: &Theme) -> (Style, Option<String>, Option<String>) {
+    let grey = theme.option(OptionColor::Gray).patch(theme.dim());
+    let short = |r: &ContentRef| {
+        let name = r.repo.split_once('/').map_or(r.repo.as_str(), |(_, n)| n);
+        (Some(sanitize(name)), Some(format!("#{}", r.number)))
+    };
+    match &item.content {
+        ItemContent::Issue {
+            reference, state, ..
+        } => {
+            let color = match state {
+                ContentState::Open => OptionColor::Green,
+                ContentState::Closed | ContentState::Merged => OptionColor::Purple,
+                ContentState::Unknown => OptionColor::Unknown,
+            };
+            let (name, number) = short(reference);
+            (theme.option(color), name, number)
+        }
+        ItemContent::PullRequest {
+            reference,
+            state,
+            is_draft,
+            ..
+        } => {
+            let style = match state {
+                ContentState::Open if *is_draft => grey,
+                ContentState::Open => theme.option(OptionColor::Green),
+                ContentState::Merged => theme.option(OptionColor::Purple),
+                ContentState::Closed => theme.option(OptionColor::Red),
+                ContentState::Unknown => theme.option(OptionColor::Unknown),
+            };
+            let (name, number) = short(reference);
+            (style, name, number)
+        }
+        ItemContent::Draft { .. } => (grey, Some("Draft".into()), None),
+        ItemContent::Redacted | ItemContent::Unknown { .. } => (Style::default(), None, None),
+    }
+}
+
+/// `name #number` in at most `room` cells: the name is cut first so the number stays.
+fn fit_reference(name: Option<&str>, number: Option<&str>, room: usize) -> String {
+    let full = [name, number]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if display_width(&full) <= room {
+        return full;
+    }
+    match (name, number) {
+        (Some(name), Some(number)) if display_width(number) <= room => {
+            let name_room = room.saturating_sub(display_width(number) + 1);
+            // A name cut to fewer than two cells says nothing.
+            if name_room >= 2 {
+                format!("{} {number}", truncate_to_width(name, name_room))
+            } else {
+                number.to_string()
+            }
+        }
+        _ => truncate_to_width(&full, room),
+    }
+}
+
+/// A bordered card's first line, exactly `width` cells: the unknown-option marker, the state
+/// dot and the reference on the left; the first assignee (and `+N` more) at the right edge.
+/// When both do not fit the reference is cut first, keeping `#number`, then the assignee.
+fn card_header(item: &Item, field: &Field, width: usize, theme: &Theme) -> Line<'static> {
+    let marker = if has_unknown_option(item, field) {
+        "? "
+    } else {
+        ""
+    };
+    let (dot, name, number) = card_reference(item, theme);
+    let mut right = match item.assignees().split_first() {
+        None => String::new(),
+        Some((first, [])) => sanitize(&format!("@{first}")),
+        Some((first, rest)) => sanitize(&format!("@{first} +{}", rest.len())),
+    };
+    // The marker and the dot; a reference follows after a space.
+    let lead = display_width(marker) + 1;
+    let least = number
+        .as_deref()
+        .or(name.as_deref())
+        .map_or(0, display_width);
+    let least_left = if least > 0 { lead + 1 + least } else { lead };
+    if !right.is_empty() && least_left + 1 + display_width(&right) > width {
+        let room = width.saturating_sub(least_left + 1);
+        right = if room >= 2 {
+            truncate_to_width(&right, room)
+        } else {
+            String::new()
+        };
+    }
+    let right_w = display_width(&right);
+    let gap = if right_w > 0 { right_w + 1 } else { 0 };
+    let body = fit_reference(
+        name.as_deref(),
+        number.as_deref(),
+        width.saturating_sub(lead + 1 + gap),
+    );
+    let mut spans = vec![Span::raw(marker), Span::styled("●", dot)];
+    let mut used = lead;
+    if !body.is_empty() {
+        used += 1 + display_width(&body);
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(body, theme.dim()));
+    }
+    spans.push(Span::raw(" ".repeat(width.saturating_sub(used + right_w))));
+    if right_w > 0 {
+        spans.push(Span::styled(right, theme.dim()));
+    }
+    Line::from(spans)
+}
+
 /// The card inside a rounded border, or a heavy accent one when `selected`. `width` is the
-/// whole card, borders included. Selection is marked by the border alone.
+/// whole card, borders included. Inside: the header, the title wrapped to at most
+/// `MAX_TITLE_LINES` lines (bold when selected), then the label pills when there are any, so
+/// a card is 4 to 7 rows. Selection is marked by the border and the bold title alone.
 fn bordered_card(
     item: &Item,
     field: &Field,
     width: usize,
     selected: bool,
     theme: &Theme,
-) -> [Line<'static>; CARD_ROWS] {
+) -> Vec<Line<'static>> {
     let inner = width - 2;
     let (set, style) = if selected {
         (border::THICK, theme.accent().add_modifier(Modifier::BOLD))
@@ -265,8 +382,12 @@ fn bordered_card(
         spans.push(Span::styled(set.vertical_right, style));
         Line::from(spans)
     };
-    let [title, meta] = card_lines(item, field, inner, false, theme);
-    [
+    let title_style = if selected {
+        theme.bold()
+    } else {
+        Style::default()
+    };
+    let mut lines = vec![
         border_line(
             set.top_left,
             set.horizontal_top,
@@ -274,16 +395,29 @@ fn bordered_card(
             inner,
             style,
         ),
-        wrap(title),
-        wrap(meta),
-        border_line(
-            set.bottom_left,
-            set.horizontal_bottom,
-            set.bottom_right,
-            inner,
-            style,
-        ),
-    ]
+        wrap(card_header(item, field, inner, theme)),
+    ];
+    for title in wrap_to_width(item.title(), inner, MAX_TITLE_LINES) {
+        lines.push(wrap(Line::from(Span::styled(
+            pad_to_width(&title, inner),
+            title_style,
+        ))));
+    }
+    let labels = item.labels();
+    if !labels.is_empty() {
+        let mut pills = label_spans(&labels, inner, theme, false);
+        let pad = inner.saturating_sub(spans_width(&pills));
+        pills.push(Span::raw(" ".repeat(pad)));
+        lines.push(wrap(Line::from(pills)));
+    }
+    lines.push(border_line(
+        set.bottom_left,
+        set.horizontal_bottom,
+        set.bottom_right,
+        inner,
+        style,
+    ));
+    lines
 }
 
 pub fn render_board(
@@ -338,9 +472,9 @@ pub fn render_board(
     let mut grid: Vec<Vec<Span<'static>>> = vec![Vec::new(); height.saturating_sub(1)];
     for (offset, column) in columns[start..start + visible].iter().enumerate() {
         let col_index = start + offset;
+        // Each card is built (and its title wrapped) once; its height is the lines it took.
         let mut lines: Vec<Line<'static>> = Vec::new();
-        let mut selected_line = 0;
-        let mut card_rows = PLAIN_CARD_ROWS;
+        let mut selected_span = None;
         for entry in entries(column) {
             match entry {
                 Entry::Lane(title) => lines.push(Line::from(Span::styled(
@@ -349,29 +483,23 @@ pub fn render_board(
                 ))),
                 Entry::Card { item, index } => {
                     let is_sel = col_index == selection.column && index == selection.index;
-                    if is_sel {
-                        selected_line = lines.len();
-                    }
-                    if width >= MIN_BORDERED {
-                        card_rows = CARD_ROWS;
-                        lines.extend(bordered_card(item, column_field, width, is_sel, theme));
+                    let card = if width >= MIN_BORDERED {
+                        bordered_card(item, column_field, width, is_sel, theme)
                     } else {
-                        card_rows = PLAIN_CARD_ROWS;
-                        lines.extend(card_lines(item, column_field, width, is_sel, theme));
+                        card_lines(item, column_field, width, is_sel, theme).into()
+                    };
+                    if is_sel {
+                        selected_span = Some((lines.len(), card.len()));
                     }
+                    lines.extend(card);
                 }
             }
         }
-        let rows = grid.len();
-        let scroll = if col_index == selection.column && rows > 1 {
-            // The selected card ends on the last visible row at the latest, but never scroll
-            // past its top.
-            (selected_line + card_rows)
-                .saturating_sub(rows)
-                .min(selected_line)
-        } else {
-            0
-        };
+        // The selected card ends on the last visible row at the latest, but never scroll past
+        // its top: a card taller than the area shows its top.
+        let scroll = selected_span.map_or(0, |(top, height)| {
+            (top + height).saturating_sub(grid.len()).min(top)
+        });
         for (row, cells) in grid.iter_mut().enumerate() {
             let line = lines
                 .get(row + scroll)
@@ -470,7 +598,7 @@ mod tests {
             column: 0,
             index: 1,
         };
-        let screen = render_to_string(4 * MIN_COLUMN as u16, 10, |f| {
+        let screen = render_to_string(4 * MIN_COLUMN as u16, 14, |f| {
             render_board(f, f.area(), &cols, &sel, status, &Theme::plain())
         });
         let first = screen.lines().next().unwrap();
@@ -478,8 +606,9 @@ mod tests {
             first.contains("Todo 2") && first.contains("No Status 1"),
             "{screen}"
         );
-        assert!(screen.contains("? #5 Old option"));
-        assert!(screen.contains("#3 Emoji 🚀"));
+        assert!(screen.contains("│? ● t #5"), "{screen}");
+        assert!(screen.contains("│Old option"), "{screen}");
+        assert!(screen.contains("┃Emoji 🚀"), "{screen}");
         assert!(
             screen
                 .lines()
@@ -633,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn card_labels_are_pills_after_the_assignees_and_keep_colours_when_selected() {
+    fn pills_keep_their_colours_on_their_own_line() {
         use ratatui::style::{Color, Modifier};
         let (p, all) = (project(), items());
         let refs: Vec<&Item> = all.iter().collect();
@@ -649,7 +778,7 @@ mod tests {
         };
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
             2 * MIN_COLUMN as u16 + 2,
-            10,
+            12,
         ))
         .unwrap();
         let buf = terminal
@@ -657,16 +786,15 @@ mod tests {
             .unwrap()
             .buffer
             .clone();
-        // Card "#1 Fix crash": its meta line, inside the side border, reads "@tviles · bug".
-        let row: String = (1..14).map(|x| buf[(x, 3)].symbol()).collect();
-        assert_eq!(row, "@tviles · bug");
-        let pill = &buf[(11, 3)];
-        assert_eq!(pill.symbol(), "b");
+        // Card "#1 Fix crash": border, header, title, then the pill line inside the border.
+        assert_eq!(cell_text(&buf, 4, 5), "┃bug ");
+        let pill = &buf[(1, 4)];
         assert_eq!(pill.bg, Color::Rgb(0xd7, 0x3a, 0x4a));
         assert!(!pill.modifier.contains(Modifier::REVERSED));
-        assert!(!buf[(1, 3)].modifier.contains(Modifier::REVERSED));
-        // The unselected card in the same column keeps its dim text.
-        assert!(buf[(1, 7)].modifier.contains(Modifier::DIM));
+        assert_eq!(buf[(4, 4)].bg, Color::Reset, "only the pill is coloured");
+        // The next card (rows 6..) is not selected: its title (row 8) is not bold.
+        assert_eq!(cell_text(&buf, 8, 6), "│Emoji");
+        assert!(!buf[(1, 8)].modifier.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -716,13 +844,13 @@ mod tests {
         };
         let sel = BoardSelection::default();
         let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(30, 6)).unwrap();
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(30, 7)).unwrap();
         let buf = terminal
             .draw(|f| render_board(f, f.area(), &cols, &sel, status, &theme))
             .unwrap()
             .buffer
             .clone();
-        for y in 0..6 {
+        for y in 0..7 {
             for x in 0..30 {
                 assert!(
                     !buf[(x, y)].modifier.contains(Modifier::REVERSED),
@@ -730,12 +858,17 @@ mod tests {
                 );
             }
         }
-        let row: String = (0..29).map(|x| buf[(x, 3)].symbol()).collect();
-        assert_eq!(row, "┃@tviles · bug +2           ┃");
-        for x in [11, 12, 13] {
-            assert_eq!(buf[(x, 3)].bg, Color::Rgb(0xd7, 0x3a, 0x4a), "pill at {x}");
+        // Column width 30: the card is 29 cells, 27 inside the border.
+        assert_eq!(cell_text(&buf, 2, 29), "┃● t #1              @tviles┃");
+        assert_eq!(cell_text(&buf, 3, 29), "┃Fix crash                  ┃");
+        assert_eq!(cell_text(&buf, 4, 29), "┃bug enhancement +1         ┃");
+        for x in [1, 2, 3] {
+            assert_eq!(buf[(x, 4)].bg, Color::Rgb(0xd7, 0x3a, 0x4a), "pill at {x}");
         }
-        assert!(buf[(2, 2)].modifier.contains(Modifier::BOLD), "title bold");
+        assert!(
+            buf[(1, 3)].modifier.contains(Modifier::BOLD),
+            "selected title bold"
+        );
     }
 
     fn cell_text(buf: &ratatui::buffer::Buffer, y: u16, w: u16) -> String {
@@ -756,7 +889,7 @@ mod tests {
         let sel = BoardSelection::default();
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
             2 * MIN_COLUMN as u16 + 2,
-            10,
+            12,
         ))
         .unwrap();
         let buf = terminal
@@ -764,26 +897,25 @@ mod tests {
             .unwrap()
             .buffer
             .clone();
-        // Column width 34: the selected card is rows 1..5, the next one rows 5..9.
+        // Column width 34: the selected card (header, title, pills) is rows 1..6, the next
+        // one starts at row 6.
         assert_eq!(buf[(0, 1)].symbol(), "┏");
         assert_eq!(buf[(33, 1)].symbol(), "┓");
         assert_eq!(buf[(0, 2)].symbol(), "┃");
-        assert_eq!(buf[(33, 3)].symbol(), "┃");
-        assert_eq!(buf[(0, 4)].symbol(), "┗");
-        assert_eq!(buf[(33, 4)].symbol(), "┛");
+        assert_eq!(buf[(33, 4)].symbol(), "┃");
+        assert_eq!(buf[(0, 5)].symbol(), "┗");
+        assert_eq!(buf[(33, 5)].symbol(), "┛");
         assert_eq!(buf[(5, 1)].symbol(), "━");
-        for (x, y) in [(0, 1), (5, 1), (0, 2), (33, 4)] {
+        for (x, y) in [(0, 1), (5, 1), (0, 2), (33, 5)] {
             let cell = &buf[(x, y)];
             assert_eq!(cell.fg, theme.accent().fg.unwrap(), "{x},{y}");
             assert!(cell.modifier.contains(Modifier::BOLD), "{x},{y}");
         }
-        assert_eq!(cell_text(&buf, 5, 1), "╭");
-        assert_eq!(buf[(33, 5)].symbol(), "╮");
-        assert_eq!(buf[(0, 6)].symbol(), "│");
-        assert_eq!(buf[(0, 8)].symbol(), "╰");
-        assert_eq!(buf[(33, 8)].symbol(), "╯");
-        assert_ne!(buf[(0, 5)].fg, theme.accent().fg.unwrap());
-        assert!(!buf[(0, 5)].modifier.contains(Modifier::BOLD));
+        assert_eq!(cell_text(&buf, 6, 1), "╭");
+        assert_eq!(buf[(33, 6)].symbol(), "╮");
+        assert_eq!(buf[(0, 7)].symbol(), "│");
+        assert_ne!(buf[(0, 6)].fg, theme.accent().fg.unwrap());
+        assert!(!buf[(0, 6)].modifier.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -793,53 +925,319 @@ mod tests {
         let status = field(&p, "Status");
         let cols = build_columns(&refs, status, None);
         let sel = BoardSelection::default();
-        let screen = render_to_string(60, 10, |f| {
+        let screen = render_to_string(60, 12, |f| {
             render_board(f, f.area(), &cols, &sel, status, &Theme::plain())
         });
         let rows: Vec<&str> = screen.lines().collect();
         assert!(rows[1].starts_with("┏━"), "{screen}");
-        assert!(rows[2].starts_with("┃#1 Fix crash"), "{screen}");
-        assert!(rows[4].starts_with("┗━"), "{screen}");
-        assert!(rows[5].starts_with("╭─"), "{screen}");
+        assert!(rows[2].starts_with("┃● t #1"), "{screen}");
+        assert!(rows[3].starts_with("┃Fix crash"), "{screen}");
+        assert!(rows[4].starts_with("┃bug"), "{screen}");
+        assert!(rows[5].starts_with("┗━"), "{screen}");
+        assert!(rows[6].starts_with("╭─"), "{screen}");
         assert_eq!(screen.matches('┏').count(), 1, "one selected card");
     }
 
-    #[test]
-    fn scrolling_down_keeps_the_selected_card_fully_visible() {
-        let (p, all) = (project(), items());
-        let status = field(&p, "Status");
-        let mut cards = Vec::new();
-        for n in 0..10 {
-            let mut item = all[0].clone();
-            item.id = ItemId::new(format!("card{n}"));
-            cards.push(item);
-        }
-        let column = Column {
+    /// Cards of 4, 5, 6 and 7 rows: titles of one to three lines, with and without labels.
+    fn mixed_height_cards(all: &[Item]) -> Vec<Item> {
+        let long = "word ".repeat(30);
+        let titles = ["short", "two lines of title text here", long.as_str()];
+        (0..12)
+            .map(|n| {
+                let mut item = all[0].clone();
+                item.id = ItemId::new(format!("card{n}"));
+                if n % 2 == 1 {
+                    item.values.remove(&FieldId::new("F_labels"));
+                }
+                if let ItemContent::Issue { title, .. } = &mut item.content {
+                    *title = titles[n % 3].into();
+                }
+                item
+            })
+            .collect()
+    }
+
+    fn one_column<'a>(all: &[Item], status: &Field, cards: &'a [Item]) -> Column<'a> {
+        Column {
             bucket: build_columns(&all.iter().collect::<Vec<_>>(), status, None)[0]
                 .bucket
                 .clone(),
-            lanes: vec![Lane {
-                title: None,
-                items: cards.iter().collect(),
-            }],
-        };
-        for index in 0..10 {
-            let sel = BoardSelection { column: 0, index };
-            let screen = render_to_string(30, 13, |f| {
-                render_board(
-                    f,
-                    f.area(),
-                    std::slice::from_ref(&column),
-                    &sel,
-                    status,
-                    &Theme::plain(),
-                )
-            });
-            let rows: Vec<&str> = screen.lines().collect();
-            let top = rows.iter().position(|r| r.starts_with('┏')).unwrap();
-            assert!(rows[top + 3].starts_with('┗'), "index {index}\n{screen}");
-            assert!(top >= 1 && top + 3 < 13, "index {index}\n{screen}");
+            lanes: vec![
+                Lane {
+                    title: Some("P0".into()),
+                    items: cards[..5].iter().collect(),
+                },
+                Lane {
+                    title: Some("P1".into()),
+                    items: cards[5..].iter().collect(),
+                },
+            ],
         }
+    }
+
+    #[test]
+    fn scrolling_mixed_height_cards_keeps_the_selected_card_fully_visible() {
+        let (p, all) = (project(), items());
+        let status = field(&p, "Status");
+        let cards = mixed_height_cards(&all);
+        let column = one_column(&all, status, &cards);
+        let mut heights = std::collections::BTreeSet::new();
+        for height in [9u16, 13] {
+            for index in 0..cards.len() {
+                let sel = BoardSelection { column: 0, index };
+                let screen = render_to_string(30, height, |f| {
+                    render_board(
+                        f,
+                        f.area(),
+                        std::slice::from_ref(&column),
+                        &sel,
+                        status,
+                        &Theme::plain(),
+                    )
+                });
+                let rows: Vec<&str> = screen.lines().collect();
+                let top = rows.iter().position(|r| r.starts_with('┏'));
+                let bottom = rows.iter().position(|r| r.starts_with('┗'));
+                let (Some(top), Some(bottom)) = (top, bottom) else {
+                    panic!("height {height} index {index}: not fully visible\n{screen}")
+                };
+                assert!(top >= 1 && bottom > top, "index {index}\n{screen}");
+                heights.insert(bottom - top + 1);
+            }
+        }
+        assert_eq!(heights.into_iter().collect::<Vec<_>>(), [4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn a_card_taller_than_the_area_shows_its_top() {
+        let (p, all) = (project(), items());
+        let status = field(&p, "Status");
+        let cards = mixed_height_cards(&all);
+        let column = one_column(&all, status, &cards);
+        // Card 2 has three title lines and pills: 7 rows, in a 4-row area under the header.
+        let sel = BoardSelection {
+            column: 0,
+            index: 2,
+        };
+        let screen = render_to_string(30, 5, |f| {
+            render_board(
+                f,
+                f.area(),
+                std::slice::from_ref(&column),
+                &sel,
+                status,
+                &Theme::plain(),
+            )
+        });
+        let rows: Vec<&str> = screen.lines().collect();
+        assert!(rows[1].starts_with("┏"), "{screen}");
+        assert!(rows[2].starts_with("┃● t #1"), "{screen}");
+    }
+
+    fn with_content(content: ItemContent) -> Item {
+        let mut item = items()[0].clone();
+        item.content = content;
+        item
+    }
+
+    fn reference(repo: &str, number: u32) -> ContentRef {
+        ContentRef {
+            repo: repo.into(),
+            number,
+            url: String::new(),
+        }
+    }
+
+    fn issue_in(state: ContentState) -> Item {
+        with_content(ItemContent::Issue {
+            reference: reference("tviles/t", 1),
+            title: "Fix crash".into(),
+            state,
+        })
+    }
+
+    fn pr_in(state: ContentState, is_draft: bool) -> Item {
+        with_content(ItemContent::PullRequest {
+            reference: reference("tviles/t", 1),
+            title: "Fix crash".into(),
+            state,
+            is_draft,
+        })
+    }
+
+    /// The card's lines as text, borders included.
+    fn card_text(item: &Item, width: usize, theme: &Theme) -> Vec<String> {
+        let p = project();
+        bordered_card(item, field(&p, "Status"), width, false, theme)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    fn colour() -> Theme {
+        Theme {
+            color: true,
+            truecolor: true,
+        }
+    }
+
+    #[test]
+    fn header_has_the_reference_left_and_the_assignees_at_the_right_inner_edge() {
+        let mut item = items()[0].clone();
+        item.values.insert(
+            FieldId::new("F_assignees"),
+            FieldValue::Users(vec!["octocat".into(), "tviles".into()]),
+        );
+        let lines = card_text(&item, 34, &Theme::plain());
+        assert_eq!(lines[1], "│● t #1              @octocat +1│");
+        let lines = card_text(&items()[1], 34, &Theme::plain());
+        assert_eq!(
+            lines[1], "│● t #2                          │",
+            "no assignee"
+        );
+        // Header text is dim; the dot carries the state colour.
+        let p = project();
+        let header = &bordered_card(&item, field(&p, "Status"), 34, false, &colour())[1];
+        let styled = |text: &str| {
+            header
+                .spans
+                .iter()
+                .find(|s| s.content == text)
+                .unwrap()
+                .style
+        };
+        assert!(styled("@octocat +1").add_modifier.contains(Modifier::DIM));
+        assert!(styled("t #1").add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn a_header_that_does_not_fit_cuts_the_repo_then_the_assignee_but_keeps_the_number() {
+        let mut item = with_content(ItemContent::Issue {
+            reference: reference("tviles/a-very-long-repository-name", 4242),
+            title: "x".into(),
+            state: ContentState::Open,
+        });
+        item.values.insert(
+            FieldId::new("F_assignees"),
+            FieldValue::Users(vec!["octocat".into()]),
+        );
+        let header = |width: usize| card_text(&item, width, &Theme::plain())[1].clone();
+        assert_eq!(header(36), "│● a-very-long-rep… #4242 @octocat│");
+        assert_eq!(header(30), "│● a-very-lo… #4242 @octocat│");
+        assert_eq!(header(26), "│● a-ver… #4242 @octocat│");
+        assert_eq!(header(19), "│● #4242 @octocat│");
+        assert_eq!(header(14), "│● #4242 @ma…│");
+        assert_eq!(header(11), "│● #4242  │");
+    }
+
+    #[test]
+    fn a_long_title_wraps_to_three_lines_and_ends_with_an_ellipsis() {
+        let item = with_content(ItemContent::Issue {
+            reference: reference("tviles/t", 1),
+            title: "feat(widgets): Widget list shipped coverage gaps — empty, loading, error/retry, delete, offline"
+                .into(),
+            state: ContentState::Open,
+        });
+        let lines = card_text(&item, 35, &Theme::plain());
+        assert_eq!(
+            lines[2..5],
+            [
+                "│feat(widgets): Widget list       │",
+                "│shipped coverage gaps — empty,   │",
+                "│loading, error/retry, delete, of…│",
+            ]
+        );
+        assert_eq!(
+            lines.len(),
+            7,
+            "border, header, three title lines, pills, border"
+        );
+    }
+
+    #[test]
+    fn a_short_title_takes_one_line_and_a_card_without_labels_has_no_pill_line() {
+        let with_labels = card_text(&items()[0], 34, &Theme::plain());
+        assert_eq!(with_labels.len(), 5);
+        assert_eq!(with_labels[2], "│Fix crash                       │");
+        assert_eq!(with_labels[3], "│bug                             │");
+        let without = card_text(&items()[1], 34, &Theme::plain());
+        assert_eq!(without.len(), 4, "{without:?}");
+        assert_eq!(without[2], "│Add iteration columns           │");
+        assert!(without[3].starts_with('╰'));
+    }
+
+    fn glyph(item: &Item) -> Style {
+        let p = project();
+        let header = &bordered_card(item, field(&p, "Status"), 34, false, &colour())[1];
+        header
+            .spans
+            .iter()
+            .find(|s| s.content == "●")
+            .unwrap()
+            .style
+    }
+
+    #[test]
+    fn the_state_dot_follows_github_colours() {
+        assert_eq!(glyph(&issue_in(ContentState::Open)).fg, Some(Color::Green));
+        assert_eq!(
+            glyph(&issue_in(ContentState::Closed)).fg,
+            Some(Color::Magenta)
+        );
+        assert_eq!(
+            glyph(&pr_in(ContentState::Open, false)).fg,
+            Some(Color::Green)
+        );
+        assert_eq!(
+            glyph(&pr_in(ContentState::Merged, false)).fg,
+            Some(Color::Magenta)
+        );
+        assert_eq!(
+            glyph(&pr_in(ContentState::Closed, false)).fg,
+            Some(Color::Red)
+        );
+        let draft = glyph(&pr_in(ContentState::Open, true));
+        assert_eq!(draft.fg, Some(Color::Gray));
+        assert!(draft.add_modifier.contains(Modifier::DIM));
+        assert_eq!(
+            glyph(&issue_in(ContentState::Unknown)).fg,
+            Some(Color::Reset)
+        );
+        // Without colour the dot is still there, just uncoloured.
+        let p = project();
+        let plain = bordered_card(
+            &issue_in(ContentState::Closed),
+            field(&p, "Status"),
+            34,
+            false,
+            &Theme::plain(),
+        );
+        let dot = plain[1].spans.iter().find(|s| s.content == "●").unwrap();
+        assert_eq!(dot.style.fg, None);
+    }
+
+    #[test]
+    fn a_draft_item_header_says_draft_with_a_grey_dot() {
+        let draft = &items()[3];
+        let lines = card_text(draft, 34, &Theme::plain());
+        assert_eq!(lines[1], "│● Draft                         │");
+        assert_eq!(lines[2], "│Draft idea                      │");
+        assert_eq!(lines.len(), 4);
+        let dot = glyph(draft);
+        assert_eq!(dot.fg, Some(Color::Gray));
+        assert!(dot.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn redacted_items_keep_their_text_and_the_unknown_option_marker() {
+        let unknown = &items()[4];
+        let lines = card_text(unknown, 34, &Theme::plain());
+        assert_eq!(lines[1], "│? ● t #5                        │");
+        let mut redacted = unknown.clone();
+        redacted.content = ItemContent::Redacted;
+        let lines = card_text(&redacted, 34, &Theme::plain());
+        assert_eq!(lines[1], "│? ●                             │");
+        assert_eq!(lines[2], "│Private item                    │");
     }
 
     #[test]

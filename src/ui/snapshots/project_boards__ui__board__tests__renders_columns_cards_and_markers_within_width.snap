@@ -1,14 +1,17 @@
 ---
 source: src/ui/board.rs
-assertion_line: 488
+assertion_line: 610
 expression: screen
 ---
 Todo 2                            In Progress 1                     Done 1                            No Status 1
 ╭───────────────────────────────╮ ╭───────────────────────────────╮ ╭───────────────────────────────╮ ╭───────────────────────────────╮
-│#1 Fix crash                   │ │#2 Add iteration columns       │ │Draft idea                     │ │? #5 Old option                │
-│@tviles · bug                  │ │                               │ │                               │ │                               │
-╰───────────────────────────────╯ ╰───────────────────────────────╯ ╰───────────────────────────────╯ ╰───────────────────────────────╯
+│● t #1                  @tviles│ │● t #2                         │ │● Draft                        │ │? ● t #5                       │
+│Fix crash                      │ │Add iteration columns          │ │Draft idea                     │ │Old option                     │
+│bug                            │ ╰───────────────────────────────╯ ╰───────────────────────────────╯ ╰───────────────────────────────╯
+╰───────────────────────────────╯
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃#3 Emoji 🚀 title 中文 that is…┃
-┃@tviles · enhancement          ┃
+┃● t #3                  @tviles┃
+┃Emoji 🚀 title 中文 that is    ┃
+┃quite long                     ┃
+┃enhancement                    ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
