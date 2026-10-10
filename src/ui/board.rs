@@ -54,9 +54,7 @@ pub fn has_unknown_option(item: &Item, field: &Field) -> bool {
         item.value(&field.id).and_then(|v| v.bucket_key()),
         field.buckets(),
     ) {
-        (Some(key), Some(buckets)) => !buckets
-            .iter()
-            .any(|b| b.key.as_deref() == Some(key.as_str())),
+        (Some(key), Some(buckets)) => !buckets.iter().any(|b| b.matches(&key)),
         _ => false,
     }
 }
@@ -434,6 +432,55 @@ mod tests {
         );
         assert!(screen.contains("No Status"));
         assert!(!screen.contains("Todo 2"));
+    }
+
+    #[test]
+    fn items_on_either_of_two_same_named_options_share_one_column() {
+        let mut p = project();
+        let status = p.fields.iter_mut().find(|f| f.name == "Status").unwrap();
+        let FieldKind::SingleSelect { options } = &mut status.kind else {
+            panic!("Status is single-select")
+        };
+        let first = options[0].clone();
+        options.push(SelectOption {
+            id: OptionId::new("o_dup"),
+            name: first.name.clone(),
+            color: first.color,
+        });
+        let status = field(&p, "Status").clone();
+        let all = items();
+        let on_first: Vec<&Item> = all
+            .iter()
+            .filter(|i| {
+                matches!(i.value(&status.id), Some(FieldValue::SingleSelect { option_id, .. }) if *option_id == first.id)
+            })
+            .collect();
+        assert!(
+            !on_first.is_empty(),
+            "fixture has items on the first option"
+        );
+        let mut moved = on_first[0].clone();
+        moved.values.insert(
+            status.id.clone(),
+            FieldValue::SingleSelect {
+                option_id: OptionId::new("o_dup"),
+                name: first.name.clone(),
+            },
+        );
+        let mut refs: Vec<&Item> = all.iter().collect();
+        refs.push(&moved);
+        let cols = build_columns(&refs, &status, None);
+        let named: Vec<&Column> = cols
+            .iter()
+            .filter(|c| c.bucket.title == first.name)
+            .collect();
+        assert_eq!(named.len(), 1, "one column per name");
+        assert_eq!(named[0].items().len(), on_first.len() + 1);
+        assert_eq!(
+            cols[cols.len() - 2].bucket.title,
+            first.name,
+            "at the later option's place, before No Status"
+        );
     }
 
     #[test]

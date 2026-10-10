@@ -46,6 +46,7 @@ pub(crate) fn buckets_for(items: &[&Item], field: &Field) -> Vec<Bucket> {
             title: v,
             color: OptionColor::Gray,
             completed: false,
+            aliases: Vec::new(),
         })
         .collect();
     out.push(Bucket {
@@ -53,6 +54,7 @@ pub(crate) fn buckets_for(items: &[&Item], field: &Field) -> Vec<Bucket> {
         title: format!("No {}", field.name),
         color: OptionColor::Gray,
         completed: false,
+        aliases: Vec::new(),
     });
     out
 }
@@ -63,7 +65,11 @@ pub(crate) fn bucket_of(item: &Item, field: &Field, buckets: &[Bucket]) -> Optio
     let raw = item
         .value(&field.id)
         .map(|v| v.bucket_key().unwrap_or_else(|| v.display()));
-    raw.filter(|k| buckets.iter().any(|b| b.key.as_deref() == Some(k.as_str())))
+    let raw = raw?;
+    buckets
+        .iter()
+        .find(|b| b.matches(&raw))
+        .and_then(|b| b.key.clone())
 }
 
 pub fn build_rows<'a>(

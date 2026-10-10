@@ -130,6 +130,16 @@ pub struct Bucket {
     pub color: OptionColor,
     /// A completed iteration; boards hide these when empty.
     pub completed: bool,
+    /// Other option ids shown as this bucket: GitHub shows options that share a name as one
+    /// column.
+    pub aliases: Vec<String>,
+}
+
+impl Bucket {
+    /// Whether an item's bucket key (an option or iteration id) belongs in this bucket.
+    pub fn matches(&self, key: &str) -> bool {
+        self.key.as_deref() == Some(key) || self.aliases.iter().any(|a| a == key)
+    }
 }
 
 impl Field {
@@ -137,13 +147,22 @@ impl Field {
     /// "No <field>". `None` for fields that cannot group a board.
     pub fn buckets(&self) -> Option<Vec<Bucket>> {
         let mut out: Vec<Bucket> = match &self.kind {
+            // Options sharing a name become one bucket, at the last one's place: that is how
+            // GitHub's board shows them.
             FieldKind::SingleSelect { options } => options
                 .iter()
-                .map(|o| Bucket {
+                .enumerate()
+                .filter(|(i, o)| !options[i + 1..].iter().any(|later| later.name == o.name))
+                .map(|(_, o)| Bucket {
                     key: Some(o.id.0.clone()),
                     title: o.name.clone(),
                     color: o.color,
                     completed: false,
+                    aliases: options
+                        .iter()
+                        .filter(|other| other.name == o.name && other.id != o.id)
+                        .map(|other| other.id.0.clone())
+                        .collect(),
                 })
                 .collect(),
             FieldKind::Iteration {
@@ -160,6 +179,7 @@ impl Field {
                         title: i.title.clone(),
                         color: OptionColor::Gray,
                         completed,
+                        aliases: Vec::new(),
                     })
                     .collect()
             }
@@ -170,6 +190,7 @@ impl Field {
             title: format!("No {}", self.name),
             color: OptionColor::Gray,
             completed: false,
+            aliases: Vec::new(),
         });
         Some(out)
     }
@@ -213,6 +234,27 @@ mod tests {
         };
         let titles: Vec<_> = f.buckets().unwrap().into_iter().map(|b| b.title).collect();
         assert_eq!(titles, ["Todo", "Done", "No Status"]);
+    }
+
+    #[test]
+    fn options_sharing_a_name_are_one_bucket_at_the_last_ones_place() {
+        let f = Field {
+            id: FieldId::new("F"),
+            name: "Status".into(),
+            kind: FieldKind::SingleSelect {
+                options: vec![
+                    opt("a", "Todo"),
+                    opt("d1", "Done"),
+                    opt("r", "Review"),
+                    opt("d2", "Done"),
+                ],
+            },
+        };
+        let b = f.buckets().unwrap();
+        let titles: Vec<_> = b.iter().map(|b| b.title.as_str()).collect();
+        assert_eq!(titles, ["Todo", "Review", "Done", "No Status"]);
+        let done = &b[2];
+        assert!(done.matches("d1") && done.matches("d2") && !done.matches("r"));
     }
 
     #[test]
