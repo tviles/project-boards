@@ -16,11 +16,10 @@ on:
         type: boolean
         default: true
 
-permissions:
-  contents: write
-
 jobs:
   build:
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
@@ -49,6 +48,9 @@ jobs:
   publish:
     if: github.event_name == 'push'
     needs: build
+    # Only this job writes: it creates the GitHub release.
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
