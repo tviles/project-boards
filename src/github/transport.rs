@@ -58,6 +58,9 @@ pub struct GraphqlResponse {
     pub rate: RateInfo,
     /// `X-OAuth-Scopes`, present for classic and OAuth tokens only.
     pub scopes: Option<Vec<String>>,
+    /// Errors GitHub sent alongside usable data (NOT_FOUND, FORBIDDEN). A mutation whose
+    /// payload is null is explained by these.
+    pub errors: Vec<GraphqlErrorEntry>,
 }
 
 pub trait Transport: Send + Sync {
@@ -70,6 +73,13 @@ pub trait Transport: Send + Sync {
 /// Turns a GraphQL response body into its data, or the error it describes.
 /// Data with only NOT_FOUND/FORBIDDEN errors is kept; those mark nodes the viewer cannot see.
 pub fn interpret_body(body: serde_json::Value) -> Result<serde_json::Value, GithubError> {
+    interpret_body_keeping_errors(body).map(|(data, _)| data)
+}
+
+/// `interpret_body`, also returning the tolerated errors that came with the data.
+pub fn interpret_body_keeping_errors(
+    body: serde_json::Value,
+) -> Result<(serde_json::Value, Vec<GraphqlErrorEntry>), GithubError> {
     let errors: Vec<GraphqlErrorEntry> = match body.get("errors") {
         Some(e) => {
             serde_json::from_value(e.clone()).map_err(|e| GithubError::Decode(e.to_string()))?
@@ -94,7 +104,7 @@ pub fn interpret_body(body: serde_json::Value) -> Result<serde_json::Value, Gith
             "kept data with tolerable GraphQL errors"
         );
     }
-    Ok(data)
+    Ok((data, errors))
 }
 
 pub struct HttpTransport {
@@ -205,10 +215,12 @@ impl Transport for HttpTransport {
             if !status.is_success() && body.get("data").is_none() && body.get("errors").is_none() {
                 return Err(GithubError::Network(format!("HTTP {status}")));
             }
+            let (data, errors) = interpret_body_keeping_errors(body)?;
             Ok(GraphqlResponse {
-                data: interpret_body(body)?,
+                data,
                 rate,
                 scopes,
+                errors,
             })
         })
     }
@@ -388,5 +400,27 @@ mod tests {
         assert!(r(400, 5000).is_low());
         assert!(!r(600, 5000).is_low());
         assert!(!RateInfo::default().is_low());
+    }
+
+    #[tokio::test]
+    async fn tolerated_errors_are_kept_with_the_data() {
+        let body = json!({"data": {"addLabelsToLabelable": null},
+                          "errors": [{"type": "FORBIDDEN", "message": "Resource not accessible by integration"}]});
+        let (_s, t) = server_with(ResponseTemplate::new(200).set_body_json(body)).await;
+        let r = t.execute(request()).await.unwrap();
+        assert!(r.data["addLabelsToLabelable"].is_null());
+        assert_eq!(r.errors.len(), 1);
+        assert_eq!(
+            r.errors[0].message,
+            "Resource not accessible by integration"
+        );
+    }
+
+    #[test]
+    fn interpret_body_still_drops_tolerated_errors() {
+        let body = json!({"data": {"x": 1}, "errors": [{"type": "NOT_FOUND", "message": "gone"}]});
+        assert_eq!(interpret_body(body.clone()).unwrap()["x"], 1);
+        let (data, errors) = interpret_body_keeping_errors(body).unwrap();
+        assert_eq!((data["x"].as_i64(), errors.len()), (Some(1), 1));
     }
 }

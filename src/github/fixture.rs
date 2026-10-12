@@ -1,20 +1,21 @@
 //! A Transport that replays queued responses. Used by every offline test.
 
-use crate::github::GithubError;
 use crate::github::transport::{
-    BoxFuture, GraphqlRequest, GraphqlResponse, RateInfo, Transport, interpret_body,
+    BoxFuture, GraphqlRequest, GraphqlResponse, RateInfo, Transport, interpret_body_keeping_errors,
 };
+use crate::github::{GithubError, GraphqlErrorEntry};
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Mutex;
 
-type Queue = VecDeque<Result<serde_json::Value, GithubError>>;
+type Queue = VecDeque<Result<(serde_json::Value, Vec<GraphqlErrorEntry>), GithubError>>;
 
 #[derive(Default)]
 pub struct FixtureTransport {
     queues: Mutex<HashMap<String, Queue>>,
     log: Mutex<Vec<GraphqlRequest>>,
     rate: Mutex<RateInfo>,
+    scopes: Mutex<Option<Vec<String>>>,
 }
 
 impl FixtureTransport {
@@ -24,11 +25,17 @@ impl FixtureTransport {
 
     /// Queues `data` as the next response to `operation`.
     pub fn push(&self, operation: &str, data: serde_json::Value) {
-        self.queue(operation, Ok(data));
+        self.queue(operation, Ok((data, Vec::new())));
     }
 
     pub fn push_error(&self, operation: &str, error: GithubError) {
         self.queue(operation, Err(error));
+    }
+
+    /// Queues a full GraphQL body (`{"data": ..., "errors": [...]}`), interpreted the way
+    /// the HTTP transport interprets one.
+    pub fn push_body(&self, operation: &str, body: serde_json::Value) {
+        self.queue(operation, interpret_body_keeping_errors(body));
     }
 
     /// Queues a recorded file: a full GraphQL body (`{"data": ...}`) or bare data.
@@ -37,12 +44,16 @@ impl FixtureTransport {
         let text = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("fixture {}: {e}", path.display()));
         let value: serde_json::Value = serde_json::from_str(&text).expect("fixture is JSON");
-        let result = if value.get("data").is_some() || value.get("errors").is_some() {
-            interpret_body(value)
+        if value.get("data").is_some() || value.get("errors").is_some() {
+            self.push_body(operation, value);
         } else {
-            Ok(value)
-        };
-        self.queue(operation, result);
+            self.push(operation, value);
+        }
+    }
+
+    /// The `X-OAuth-Scopes` every later response reports.
+    pub fn set_scopes(&self, scopes: Option<Vec<String>>) {
+        *self.scopes.lock().unwrap() = scopes;
     }
 
     pub fn set_rate(&self, rate: RateInfo) {
@@ -54,7 +65,11 @@ impl FixtureTransport {
         self.log.lock().unwrap().clone()
     }
 
-    fn queue(&self, operation: &str, result: Result<serde_json::Value, GithubError>) {
+    fn queue(
+        &self,
+        operation: &str,
+        result: Result<(serde_json::Value, Vec<GraphqlErrorEntry>), GithubError>,
+    ) {
         self.queues
             .lock()
             .unwrap()
@@ -78,12 +93,14 @@ impl Transport for FixtureTransport {
             .get_mut(&operation)
             .and_then(|q| q.pop_front());
         let rate = self.rate.lock().unwrap().clone();
+        let scopes = self.scopes.lock().unwrap().clone();
         Box::pin(async move {
             match next {
-                Some(Ok(data)) => Ok(GraphqlResponse {
+                Some(Ok((data, errors))) => Ok(GraphqlResponse {
                     data,
                     rate,
-                    scopes: None,
+                    scopes,
+                    errors,
                 }),
                 Some(Err(e)) => Err(e),
                 None => Err(GithubError::Network(format!(

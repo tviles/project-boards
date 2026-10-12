@@ -18,6 +18,7 @@ pub struct ViewerCheck {
 pub struct Github {
     transport: Arc<dyn Transport>,
     rate: Mutex<RateInfo>,
+    scopes: Mutex<Option<Vec<String>>>,
 }
 
 impl Github {
@@ -25,7 +26,14 @@ impl Github {
         Self {
             transport,
             rate: Mutex::new(RateInfo::default()),
+            scopes: Mutex::new(None),
         }
+    }
+
+    /// The classic token scopes the latest response that reported any listed. `None` until
+    /// then, and always for fine-grained tokens, which report none.
+    pub fn scopes(&self) -> Option<Vec<String>> {
+        self.scopes.lock().unwrap().clone()
     }
 
     /// The rate-limit budget reported by the most recent response.
@@ -39,6 +47,9 @@ impl Github {
     ) -> Result<GraphqlResponse, GithubError> {
         let response = self.transport.execute(request).await?;
         *self.rate.lock().unwrap() = response.rate.clone();
+        if response.scopes.is_some() {
+            *self.scopes.lock().unwrap() = response.scopes.clone();
+        }
         Ok(response)
     }
 
