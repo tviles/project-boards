@@ -12,9 +12,12 @@
               }
             ]
           },
+          "closedAt": null,
           "closedByPullRequestsReferences": {
             "nodes": []
           },
+          "createdAt": "2026-10-05T13:51:55Z",
+          "issueType": null,
           "labels": {
             "nodes": [
               {
@@ -24,11 +27,18 @@
             ]
           },
           "number": 1,
+          "parent": null,
           "repository": {
             "nameWithOwner": "tviles/project-boards-testbed"
           },
           "state": "OPEN",
+          "stateReason": null,
+          "subIssuesSummary": {
+            "completed": 0,
+            "total": 0
+          },
           "title": "Crash when board has no Status field",
+          "updatedAt": "2026-10-05T13:52:15Z",
           "url": "https://github.com/tviles/project-boards-testbed/issues/1"
         },
         "fieldValues": {
@@ -149,7 +159,7 @@
         "id": "PVTI_lAHOADq2Kc4Bl819zg-7fig",
         "isArchived": false,
         "type": "ISSUE",
-        "updatedAt": "2026-10-06T16:12:22Z"
+        "updatedAt": "2026-10-10T04:28:19Z"
       }
     ]
   }

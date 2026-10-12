@@ -14,9 +14,12 @@
                   }
                 ]
               },
+              "closedAt": null,
               "closedByPullRequestsReferences": {
                 "nodes": []
               },
+              "createdAt": "2026-10-05T13:51:55Z",
+              "issueType": null,
               "labels": {
                 "nodes": [
                   {
@@ -26,11 +29,18 @@
                 ]
               },
               "number": 1,
+              "parent": null,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
               },
               "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
               "title": "Crash when board has no Status field",
+              "updatedAt": "2026-10-05T13:52:15Z",
               "url": "https://github.com/tviles/project-boards-testbed/issues/1"
             },
             "fieldValues": {
@@ -151,7 +161,7 @@
             "id": "PVTI_lAHOADq2Kc4Bl819zg-7fig",
             "isArchived": false,
             "type": "ISSUE",
-            "updatedAt": "2026-10-06T16:12:22Z"
+            "updatedAt": "2026-10-10T04:28:19Z"
           },
           {
             "content": {
@@ -159,13 +169,18 @@
               "assignees": {
                 "nodes": []
               },
+              "closedAt": null,
               "closedByPullRequestsReferences": {
                 "nodes": [
                   {
-                    "number": 12
+                    "isDraft": false,
+                    "number": 12,
+                    "state": "OPEN"
                   }
                 ]
               },
+              "createdAt": "2026-10-05T13:51:58Z",
+              "issueType": null,
               "labels": {
                 "nodes": [
                   {
@@ -175,11 +190,18 @@
                 ]
               },
               "number": 2,
+              "parent": null,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
               },
               "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
               "title": "Support iteration columns",
+              "updatedAt": "2026-10-05T13:51:58Z",
               "url": "https://github.com/tviles/project-boards-testbed/issues/2"
             },
             "fieldValues": {
@@ -267,9 +289,12 @@
               "assignees": {
                 "nodes": []
               },
+              "closedAt": null,
               "closedByPullRequestsReferences": {
                 "nodes": []
               },
+              "createdAt": "2026-10-05T13:51:59Z",
+              "issueType": null,
               "labels": {
                 "nodes": [
                   {
@@ -279,11 +304,18 @@
                 ]
               },
               "number": 3,
+              "parent": null,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
               },
               "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
               "title": "Document fine-grained tokens",
+              "updatedAt": "2026-10-05T13:51:59Z",
               "url": "https://github.com/tviles/project-boards-testbed/issues/3"
             },
             "fieldValues": {
@@ -348,9 +380,12 @@
                   }
                 ]
               },
+              "closedAt": null,
               "closedByPullRequestsReferences": {
                 "nodes": []
               },
+              "createdAt": "2026-10-05T13:52:01Z",
+              "issueType": null,
               "labels": {
                 "nodes": [
                   {
@@ -360,11 +395,18 @@
                 ]
               },
               "number": 4,
+              "parent": null,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
               },
               "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
               "title": "Emoji title 🚀 with 中文 characters that is long enough to truncate",
+              "updatedAt": "2026-10-05T13:52:01Z",
               "url": "https://github.com/tviles/project-boards-testbed/issues/4"
             },
             "fieldValues": {
@@ -432,9 +474,12 @@
               "assignees": {
                 "nodes": []
               },
+              "closedAt": "2026-10-06T16:11:59Z",
               "closedByPullRequestsReferences": {
                 "nodes": []
               },
+              "createdAt": "2026-10-05T13:52:02Z",
+              "issueType": null,
               "labels": {
                 "nodes": [
                   {
@@ -444,11 +489,18 @@
                 ]
               },
               "number": 5,
+              "parent": null,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
               },
               "state": "CLOSED",
+              "stateReason": "COMPLETED",
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
               "title": "Filler issue 5",
+              "updatedAt": "2026-10-06T16:11:59Z",
               "url": "https://github.com/tviles/project-boards-testbed/issues/5"
             },
             "fieldValues": {
@@ -509,9 +561,12 @@
               "assignees": {
                 "nodes": []
               },
+              "closedAt": null,
               "closedByPullRequestsReferences": {
                 "nodes": []
               },
+              "createdAt": "2026-10-05T13:52:04Z",
+              "issueType": null,
               "labels": {
                 "nodes": [
                   {
@@ -521,11 +576,18 @@
                 ]
               },
               "number": 6,
+              "parent": null,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
               },
               "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
               "title": "Filler issue 6",
+              "updatedAt": "2026-10-05T13:52:04Z",
               "url": "https://github.com/tviles/project-boards-testbed/issues/6"
             },
             "fieldValues": {
@@ -586,9 +648,12 @@
               "assignees": {
                 "nodes": []
               },
+              "closedAt": null,
               "closedByPullRequestsReferences": {
                 "nodes": []
               },
+              "createdAt": "2026-10-05T13:52:05Z",
+              "issueType": null,
               "labels": {
                 "nodes": [
                   {
@@ -598,11 +663,18 @@
                 ]
               },
               "number": 7,
+              "parent": null,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
               },
               "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
               "title": "Filler issue 7",
+              "updatedAt": "2026-10-05T13:52:05Z",
               "url": "https://github.com/tviles/project-boards-testbed/issues/7"
             },
             "fieldValues": {
@@ -663,9 +735,12 @@
               "assignees": {
                 "nodes": []
               },
+              "closedAt": null,
               "closedByPullRequestsReferences": {
                 "nodes": []
               },
+              "createdAt": "2026-10-05T13:52:06Z",
+              "issueType": null,
               "labels": {
                 "nodes": [
                   {
@@ -675,11 +750,18 @@
                 ]
               },
               "number": 8,
+              "parent": null,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
               },
               "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
               "title": "Filler issue 8",
+              "updatedAt": "2026-10-05T13:52:06Z",
               "url": "https://github.com/tviles/project-boards-testbed/issues/8"
             },
             "fieldValues": {
@@ -740,9 +822,12 @@
               "assignees": {
                 "nodes": []
               },
+              "closedAt": null,
               "closedByPullRequestsReferences": {
                 "nodes": []
               },
+              "createdAt": "2026-10-05T13:52:08Z",
+              "issueType": null,
               "labels": {
                 "nodes": [
                   {
@@ -752,11 +837,18 @@
                 ]
               },
               "number": 9,
+              "parent": null,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
               },
               "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
               "title": "Filler issue 9",
+              "updatedAt": "2026-10-05T13:52:08Z",
               "url": "https://github.com/tviles/project-boards-testbed/issues/9"
             },
             "fieldValues": {
@@ -817,9 +909,12 @@
               "assignees": {
                 "nodes": []
               },
+              "closedAt": null,
               "closedByPullRequestsReferences": {
                 "nodes": []
               },
+              "createdAt": "2026-10-05T13:52:10Z",
+              "issueType": null,
               "labels": {
                 "nodes": [
                   {
@@ -829,11 +924,18 @@
                 ]
               },
               "number": 10,
+              "parent": null,
               "repository": {
                 "nameWithOwner": "tviles/project-boards-testbed"
               },
               "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
               "title": "Filler issue 10",
+              "updatedAt": "2026-10-05T13:52:10Z",
               "url": "https://github.com/tviles/project-boards-testbed/issues/10"
             },
             "fieldValues": {
@@ -894,6 +996,8 @@
               "assignees": {
                 "nodes": []
               },
+              "closedAt": null,
+              "createdAt": "2026-10-05T13:52:20Z",
               "isDraft": false,
               "labels": {
                 "nodes": []
@@ -907,6 +1011,7 @@
               },
               "state": "OPEN",
               "title": "Sample pull request",
+              "updatedAt": "2026-10-05T13:52:20Z",
               "url": "https://github.com/tviles/project-boards-testbed/pull/12"
             },
             "fieldValues": {
