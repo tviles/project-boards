@@ -1,0 +1,44 @@
+{
+  "data": {
+    "node": {
+      "__typename": "ProjectV2Item",
+      "content": {
+        "__typename": "Issue",
+        "body": "## Steps\n\n1. Open the board\n2. Press `L`\n\n- [x] done item\n- [ ] open item\n\n```rust\nfn main() {}\n```\n\n<details><summary>More</summary>hidden</details>\n\nSee #1 and https://example.com.",
+        "closedByPullRequestsReferences": {
+          "nodes": []
+        },
+        "comments": {
+          "nodes": [
+            {
+              "author": {
+                "__typename": "User",
+                "login": "tviles"
+              },
+              "body": "First comment with `code`.",
+              "createdAt": "2026-10-05T13:52:14Z"
+            },
+            {
+              "author": {
+                "__typename": "User",
+                "login": "tviles"
+              },
+              "body": "Second comment.",
+              "createdAt": "2026-10-05T13:52:15Z"
+            }
+          ],
+          "pageInfo": {
+            "hasPreviousPage": false,
+            "startCursor": "Y3Vyc29yOnYyOpHPAAAAAWVhouw="
+          },
+          "totalCount": 2
+        },
+        "issueType": null,
+        "parent": null,
+        "subIssues": {
+          "nodes": []
+        }
+      }
+    }
+  }
+}

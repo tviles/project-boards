@@ -1,0 +1,28 @@
+name: schema-drift
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sh scripts/update-schema.sh
+      - id: test
+        run: cargo test --all-targets
+        continue-on-error: true
+      - if: steps.test.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "GitHub GraphQL schema drift broke the build ($(date -u +%F))" \
+            --body "The weekly schema refresh made \`cargo test\` fail. Run \`sh scripts/update-schema.sh && cargo test\` locally to see the errors. Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

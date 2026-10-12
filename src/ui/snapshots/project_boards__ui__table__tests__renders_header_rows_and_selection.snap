@@ -1,0 +1,10 @@
+---
+source: src/ui/table.rs
+expression: screen
+---
+Title                                Status     Assignees
+#1 Fix crash                         Todo       @tviles
+#2 Add iteration columns             In Progre…
+#3 Emoji 🚀 title 中文 that is quit… Todo       @tviles
+Draft idea                           Done
+#5 Old option                        Blocked
