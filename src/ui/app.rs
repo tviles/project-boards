@@ -15,6 +15,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::{HashMap, HashSet};
 
 mod edit;
+pub use edit::ago as edit_ago;
 mod popups;
 
 use crate::ops::OpId;
@@ -34,6 +35,8 @@ pub enum Mode {
     Confirm,
     /// A popover editing a field of the item.
     Popup,
+    /// The list of failed edits, drawn over the board (and the detail, if one is open).
+    ErrorLog,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -120,6 +123,8 @@ pub struct App {
     pending_kinds: HashMap<OpId, OpKind>,
     /// Failed edits, oldest first.
     pub errors: Vec<FailedEdit>,
+    /// The error log's selected row; 0 is the newest failure.
+    pub error_sel: usize,
     /// The question `Mode::Confirm` asks.
     pub confirm: Option<Confirm>,
     /// The popover `Mode::Popup` shows.
@@ -189,6 +194,7 @@ impl App {
             refused_scopes: Vec::new(),
             pending_kinds: HashMap::new(),
             errors: Vec::new(),
+            error_sel: 0,
             confirm: None,
             popup: None,
             utc_offset: time::UtcOffset::UTC,
@@ -711,6 +717,7 @@ impl App {
             Mode::Picker => self.handle_picker_key(key),
             Mode::Confirm => self.handle_confirm_key(&key),
             Mode::Popup => self.handle_popup_key(key),
+            Mode::ErrorLog => self.handle_error_log_key(action),
             Mode::Detail => {
                 if let Some(a) = action
                     && let Some(cmds) = self.edit_key(a)

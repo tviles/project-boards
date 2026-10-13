@@ -75,6 +75,66 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.mode == Mode::Popup {
         draw_popup(frame, body, app);
     }
+    if app.mode == Mode::ErrorLog {
+        draw_error_log(frame, body, app);
+    }
+}
+
+/// The failed edits, newest first, over the board (and the detail, if one is open).
+fn draw_error_log(frame: &mut Frame, area: Rect, app: &App) {
+    let rows = app.errors.len().max(1) as u16;
+    let rect = crate::ui::popup::centered(
+        area,
+        area.width.saturating_sub(4).min(100),
+        (rows + 2).min(area.height),
+    );
+    let inner = rect.width.saturating_sub(2) as usize;
+    let visible = rect.height.saturating_sub(2) as usize;
+    let start = (app.error_sel + 1).saturating_sub(visible.max(1));
+    let now = std::time::Instant::now();
+    let mut lines: Vec<Line> = Vec::new();
+    if app.errors.is_empty() {
+        lines.push(Line::styled("No failed edits", app.theme.dim()));
+    }
+    for (row, failed) in app
+        .errors
+        .iter()
+        .rev()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+    {
+        let text = format!(
+            "{:>7}  Could not {}: {}",
+            crate::ui::app::edit_ago(now.saturating_duration_since(failed.at)),
+            failed.what,
+            failed.message
+        );
+        let style = if row == app.error_sel {
+            app.theme.selected()
+        } else {
+            ratatui::style::Style::default()
+        };
+        lines.push(Line::styled(
+            pad_to_width(&truncate_to_width(&text, inner), inner),
+            style,
+        ));
+    }
+    let retry = app
+        .keymap
+        .keys_for(Action::Retry)
+        .first()
+        .map(|k| k.label())
+        .unwrap_or_default();
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" failed edits · {retry} retry · esc close ")),
+        ),
+        rect,
+    );
 }
 
 fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
@@ -362,7 +422,12 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
                     app.theme.accent(),
                 )
             } else if let Some(e) = &app.status.error {
-                Line::styled(truncate_to_width(e, area.width as usize), app.theme.error())
+                Line::styled(
+                    truncate_keeping_hint(app, e, area.width as usize),
+                    app.theme.error(),
+                )
+            } else if app.mode == Mode::ErrorLog {
+                Line::styled(error_log_hints(app, area.width as usize), app.theme.dim())
             } else {
                 let mut parts: Vec<String> = Vec::new();
                 if let Some(extra) = app.extra_filter() {
@@ -380,6 +445,11 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
                     .and(app.keymap.keys_for(Action::ClearFilter).first().copied())
                     .map(|k| format!(" · {} clear filter", k.label()))
                     .unwrap_or_default();
+                if !app.errors.is_empty()
+                    && let Some(k) = app.keymap.keys_for(Action::ErrorLog).first()
+                {
+                    parts.push(format!("{} {} failed", k.label(), app.errors.len()));
+                }
                 parts.extend(app.edit_hints());
                 parts.push(format!("/ search · f filter{clear} · L layout · q quit"));
                 // The reminder outranks the hints: they are cut for it, but only when what
@@ -398,6 +468,41 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
         }
     };
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// The error line cut to `width`, keeping its closing `· E error log` pointer.
+fn truncate_keeping_hint(app: &App, error: &str, width: usize) -> String {
+    let hint = app
+        .keymap
+        .keys_for(Action::ErrorLog)
+        .first()
+        .map(|k| format!(" · {} error log", k.label()));
+    match hint {
+        Some(hint) if error.ends_with(&hint) && display_width(error) > width => {
+            let head = error.trim_end_matches(hint.as_str());
+            let room = width.saturating_sub(display_width(&hint));
+            format!("{}{hint}", truncate_to_width(head, room))
+        }
+        _ => truncate_to_width(error, width),
+    }
+}
+
+/// The hint line while the error log is open.
+fn error_log_hints(app: &App, width: usize) -> String {
+    let key = |a: Action| {
+        app.keymap
+            .keys_for(a)
+            .first()
+            .map(|k| k.label())
+            .unwrap_or_default()
+    };
+    let text = format!(
+        "{} {} select · {} retry · esc close",
+        key(Action::Down),
+        key(Action::Up),
+        key(Action::Retry)
+    );
+    truncate_to_width(&text, width)
 }
 
 /// The least room the hints keep when the unmatched reminder is shown.
@@ -994,5 +1099,104 @@ mod tests {
             );
             assert!(line.ends_with("? help"), "{width}: {line}");
         }
+    }
+
+    fn failed_app() -> App {
+        use crate::model::{FieldId, FieldValue, ItemId, OpKind, OptionId};
+        let mut a = app();
+        a.submit(
+            OpKind::Move,
+            crate::ops::Op::SetField {
+                item: ItemId::new("a"),
+                field: FieldId::new("F_status"),
+                value: FieldValue::SingleSelect {
+                    option_id: OptionId::new("o_done"),
+                    name: "Done".into(),
+                },
+            },
+        );
+        a.on_sync(crate::sync::SyncEvent::OpDone {
+            id: 1,
+            result: Err(crate::github::GithubError::Network(
+                "connection reset".into(),
+            )),
+        });
+        a
+    }
+
+    #[test]
+    fn the_error_log_lists_failures_with_their_messages() {
+        let mut a = failed_app();
+        let screen = render_to_string(100, 12, |f| draw(f, &mut a));
+        let last = screen.lines().last().unwrap().to_string();
+        assert!(
+            last.starts_with("Could not set Status to Done on 'Fix crash'"),
+            "{last}"
+        );
+        assert!(
+            last.ends_with("· E error log"),
+            "the error line points to the log: {last}"
+        );
+        a.status.error = None;
+        let screen = render_to_string(100, 12, |f| draw(f, &mut a));
+        let last = screen.lines().last().unwrap().to_string();
+        assert!(
+            last.starts_with("E 1 failed · "),
+            "the hint line counts failures: {last}"
+        );
+        assert!(last.ends_with("· ? help"), "{last}");
+        a.handle_key(key('E'));
+        let screen = render_to_string(100, 12, |f| draw(f, &mut a));
+        assert!(screen.contains("failed edits"), "{screen}");
+        assert!(
+            screen.contains("set Status to Done on 'Fix crash'"),
+            "{screen}"
+        );
+        assert!(screen.contains("connection reset"), "{screen}");
+        assert!(screen.contains("0s ago"), "{screen}");
+        let last = screen.lines().last().unwrap().trim_end().to_string();
+        assert_eq!(last, "j k select · R retry · esc close");
+    }
+
+    #[test]
+    fn the_error_line_keeps_its_pointer_when_the_pane_is_narrow() {
+        let mut a = failed_app();
+        let screen = render_to_string(50, 12, |f| draw(f, &mut a));
+        let last = screen.lines().last().unwrap().trim_end().to_string();
+        assert!(
+            last.ends_with("… · E error log") || last.ends_with("· E error log"),
+            "{last}"
+        );
+        assert!(last.chars().count() <= 50, "{last}");
+    }
+
+    #[test]
+    fn a_refused_retry_shows_its_reason_in_the_log() {
+        let mut a = failed_app();
+        a.on_sync(crate::sync::SyncEvent::Access {
+            scopes: Some(vec!["repo".into()]),
+        });
+        a.handle_key(key('E'));
+        a.handle_key(key('R'));
+        let screen = render_to_string(100, 12, |f| draw(f, &mut a));
+        let last = screen.lines().last().unwrap().to_string();
+        assert!(last.contains("project scope"), "{last}");
+        assert!(
+            screen.contains("connection reset"),
+            "the entry stays: {screen}"
+        );
+    }
+
+    #[test]
+    fn the_error_log_is_drawn_over_the_open_detail() {
+        let mut a = failed_app();
+        a.status.error = None;
+        a.handle_key(code(KeyCode::Enter));
+        a.handle_key(key('E'));
+        let screen = render_to_string(100, 20, |f| draw(f, &mut a));
+        assert!(screen.contains("failed edits"), "{screen}");
+        assert!(screen.contains("connection reset"), "{screen}");
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!(a.mode, Mode::Detail);
     }
 }

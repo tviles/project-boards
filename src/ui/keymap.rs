@@ -31,6 +31,8 @@ pub enum Action {
     ReorderDown,
     EditField,
     ActionMenu,
+    ErrorLog,
+    Retry,
 }
 
 use crate::model::OpKind;
@@ -55,7 +57,7 @@ impl Action {
             .find(|a| a.kinds().contains(&kind))
     }
 
-    pub const ALL: [Action; 28] = [
+    pub const ALL: [Action; 30] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -84,6 +86,8 @@ impl Action {
         Action::ReorderDown,
         Action::EditField,
         Action::ActionMenu,
+        Action::ErrorLog,
+        Action::Retry,
     ];
 
     /// The name used in `[keys]` of config.toml.
@@ -117,6 +121,8 @@ impl Action {
             Action::ReorderDown => "reorder_down",
             Action::EditField => "edit_field",
             Action::ActionMenu => "action_menu",
+            Action::ErrorLog => "error_log",
+            Action::Retry => "retry",
         }
     }
 
@@ -150,6 +156,8 @@ impl Action {
             Action::ReorderDown => "move the item down (reorder)",
             Action::EditField => "edit a field of the item",
             Action::ActionMenu => "actions: every operation the item allows",
+            Action::ErrorLog => "error log: failed edits",
+            Action::Retry => "error log: retry the selected edit",
         }
     }
 
@@ -283,6 +291,8 @@ const DEFAULTS: &[(&str, Action)] = &[
     ("J", Action::ReorderDown),
     ("e", Action::EditField),
     ("space", Action::ActionMenu),
+    ("E", Action::ErrorLog),
+    ("R", Action::Retry),
 ];
 
 impl Keymap {
@@ -468,5 +478,28 @@ mod tests {
                 action.name()
             );
         }
+    }
+
+    #[test]
+    fn e_opens_the_error_log_and_r_retries() {
+        let km = Keymap::defaults();
+        assert_eq!(
+            km.action(&ev(KeyCode::Char('E'), KeyModifiers::SHIFT)),
+            Some(Action::ErrorLog)
+        );
+        assert_eq!(
+            km.action(&ev(KeyCode::Char('R'), KeyModifiers::NONE)),
+            Some(Action::Retry)
+        );
+        assert_eq!(
+            km.action(&ev(KeyCode::Char('r'), KeyModifiers::NONE)),
+            Some(Action::Refresh),
+            "lowercase r still refreshes"
+        );
+        assert_eq!(
+            km.action(&ev(KeyCode::Char('e'), KeyModifiers::NONE)),
+            Some(Action::EditField)
+        );
+        assert_eq!(Action::ALL.len(), 30);
     }
 }

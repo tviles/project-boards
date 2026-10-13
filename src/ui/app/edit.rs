@@ -41,6 +41,18 @@ pub enum ConfirmAction {
     Quit,
 }
 
+/// How long ago, roughly: `5s ago`, `2m ago`, `2h ago`.
+pub fn ago(elapsed: std::time::Duration) -> String {
+    let s = elapsed.as_secs();
+    if s < 60 {
+        format!("{s}s ago")
+    } else if s < 3600 {
+        format!("{}m ago", s / 60)
+    } else {
+        format!("{}h ago", s / 3600)
+    }
+}
+
 /// GitHub's own words for a failure; other errors as their message.
 pub fn error_message(error: &GithubError) -> String {
     match error {
@@ -322,6 +334,7 @@ impl App {
             Action::ReorderDown => self.reorder(true),
             Action::EditField => self.open_field_menu(),
             Action::ActionMenu => self.open_action_menu(),
+            Action::ErrorLog => self.open_error_log(),
             _ => return None,
         };
         Some(cmds)
@@ -533,7 +546,13 @@ impl App {
                     }
                 }
                 let message = error_message(&error);
-                self.status.error = Some(format!("Could not {what}: {message}"));
+                let hint = self
+                    .keymap
+                    .keys_for(Action::ErrorLog)
+                    .first()
+                    .map(|k| format!(" · {} error log", k.label()))
+                    .unwrap_or_default();
+                self.status.error = Some(format!("Could not {what}: {message}{hint}"));
                 self.errors.push(FailedEdit {
                     kind: kind.unwrap_or_else(|| {
                         debug_assert!(false, "pending op {id} has no recorded kind");
@@ -555,6 +574,50 @@ impl App {
             self.refused_scopes.retain(|r| !granted.contains(r));
         }
         self.scopes = scopes;
+    }
+
+    pub(crate) fn open_error_log(&mut self) -> Vec<Command> {
+        self.error_sel = 0;
+        // The failure the status line announced is now being read.
+        self.status.error = None;
+        self.mode = Mode::ErrorLog;
+        Vec::new()
+    }
+
+    /// The error log lists failures newest first; `error_sel` counts from the newest. Esc
+    /// closes it (never quits); the movement keys move the selection.
+    pub(crate) fn handle_error_log_key(&mut self, action: Option<Action>) -> Vec<Command> {
+        let last = self.errors.len().saturating_sub(1);
+        match action {
+            Some(Action::Down) => self.error_sel = (self.error_sel + 1).min(last),
+            Some(Action::Up) => self.error_sel = self.error_sel.saturating_sub(1),
+            Some(Action::Top) => self.error_sel = 0,
+            Some(Action::Bottom) => self.error_sel = last,
+            Some(Action::Retry) => return self.retry_selected(),
+            Some(Action::Back | Action::ErrorLog) => self.mode = self.base_mode(),
+            Some(Action::Quit) => {
+                self.mode = self.base_mode();
+                return self.request_quit();
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// Sends the selected failed edit again as a fresh op, after the capability matrix has
+    /// had its say (the item may have become read-only, archived or gone). The log stays
+    /// open. When the matrix refuses, the entry stays and the reason shows.
+    fn retry_selected(&mut self) -> Vec<Command> {
+        let Some(index) = self.errors.len().checked_sub(1 + self.error_sel) else {
+            return Vec::new();
+        };
+        let failed = self.errors.remove(index);
+        let cmds = self.submit(failed.kind, failed.op.clone());
+        if cmds.is_empty() {
+            self.errors.insert(index, failed);
+        }
+        self.error_sel = self.error_sel.min(self.errors.len().saturating_sub(1));
+        cmds
     }
 
     /// After an edit settles: an open quit question is recounted, or the app quits plainly
@@ -705,7 +768,9 @@ mod tests {
         assert_eq!(status(a.snapshot(), "a"), "Todo");
         assert_eq!(
             a.status.error.as_deref(),
-            Some("Could not set Status to Done on 'Fix crash': The field is archived")
+            Some(
+                "Could not set Status to Done on 'Fix crash': The field is archived · E error log"
+            )
         );
         assert_eq!(a.errors.len(), 1);
         assert_eq!(
@@ -1717,5 +1782,129 @@ mod tests {
         assert!(!b.sticky[0].listed);
         let a_item = b.snapshot().unwrap().items[&ItemId::new("a")].clone();
         assert!(!b.unmatched(&a_item));
+    }
+
+    fn fail(a: &mut App, id: OpId, message: &str) {
+        let error = GithubError::Graphql(vec![GraphqlErrorEntry {
+            message: message.into(),
+            kind: None,
+        }]);
+        a.on_sync(SyncEvent::OpDone {
+            id,
+            result: Err(error),
+        });
+    }
+
+    #[test]
+    fn failed_edits_are_listed_newest_first_and_r_retries_the_selected_one() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+        a.submit(OpKind::Move, set_status("b", "o_done", "Done"));
+        fail(&mut a, 1, "boom a");
+        fail(&mut a, 2, "boom b");
+        assert!(
+            a.status
+                .error
+                .as_deref()
+                .unwrap()
+                .ends_with("boom b · E error log")
+        );
+        a.handle_key(key('E'));
+        assert_eq!(a.mode, Mode::ErrorLog);
+        assert_eq!(a.error_sel, 0);
+        assert_eq!(a.handle_key(key('R')), vec![Command::Send(3)]);
+        assert_eq!(a.errors.len(), 1);
+        assert_eq!(a.errors[0].message, "boom a", "b was retried");
+        assert_eq!(status(a.snapshot(), "b"), "Done");
+        assert_eq!(a.mode, Mode::ErrorLog);
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!(a.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn a_retry_the_board_no_longer_allows_keeps_the_entry_and_says_why() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+        fail(&mut a, 1, "boom");
+        a.on_sync(SyncEvent::Access {
+            scopes: Some(vec!["repo".into()]),
+        });
+        a.handle_key(key('E'));
+        assert!(a.handle_key(key('R')).is_empty());
+        assert_eq!(a.errors.len(), 1);
+        assert!(a.status.flash.as_deref().unwrap().contains("project scope"));
+    }
+
+    #[test]
+    fn a_retry_for_an_item_that_is_gone_keeps_the_entry_and_says_so() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("gone", "o_done", "Done"));
+        a.handle_key(key('E'));
+        assert!(a.errors.is_empty());
+        a.errors.push(FailedEdit {
+            kind: OpKind::Move,
+            op: set_status("gone", "o_done", "Done"),
+            what: "set Status to Done on 'x'".into(),
+            message: "boom".into(),
+            at: Instant::now(),
+        });
+        assert!(a.handle_key(key('R')).is_empty());
+        assert_eq!(a.errors.len(), 1);
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("That item is no longer on the board")
+        );
+    }
+
+    #[test]
+    fn the_log_navigates_and_esc_closes_it_without_quitting() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+        a.submit(OpKind::Move, set_status("b", "o_done", "Done"));
+        fail(&mut a, 1, "boom a");
+        fail(&mut a, 2, "boom b");
+        a.handle_key(key('E'));
+        a.handle_key(key('j'));
+        assert_eq!(a.error_sel, 1);
+        a.handle_key(key('j'));
+        assert_eq!(a.error_sel, 1, "stops at the oldest");
+        a.handle_key(key('k'));
+        assert_eq!(a.error_sel, 0);
+        // R retries the older one when it is selected.
+        a.handle_key(key('j'));
+        assert_eq!(a.handle_key(key('R')), vec![Command::Send(3)]);
+        assert_eq!(a.errors[0].message, "boom b");
+        assert!(a.handle_key(code(KeyCode::Esc)).is_empty());
+        assert!(!a.quit);
+        assert_eq!(a.mode, Mode::Normal);
+        // E toggles it too, and q quits from inside it.
+        a.handle_key(key('E'));
+        a.handle_key(key('E'));
+        assert_eq!(a.mode, Mode::Normal);
+        a.handle_key(key('E'));
+        // The retried edit is still sending, so q asks before quitting.
+        a.handle_key(key('q'));
+        assert_eq!(a.mode, Mode::Confirm);
+        assert!(!a.quit);
+    }
+
+    #[test]
+    fn closing_the_log_returns_to_the_open_detail() {
+        let mut a = test_app();
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(a.mode, Mode::Detail);
+        a.handle_key(key('E'));
+        assert_eq!(a.mode, Mode::ErrorLog);
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!(a.mode, Mode::Detail);
+        assert!(a.detail.is_some());
+    }
+
+    #[test]
+    fn ages_read_naturally() {
+        use std::time::Duration;
+        assert_eq!(ago(Duration::from_secs(5)), "5s ago");
+        assert_eq!(ago(Duration::from_secs(125)), "2m ago");
+        assert_eq!(ago(Duration::from_secs(7300)), "2h ago");
     }
 }
