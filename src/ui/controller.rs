@@ -222,6 +222,12 @@ impl Controller {
         if self.app.mode == Mode::Setup {
             self.app.mode = Mode::Normal;
         }
+        // A retry after the token failed mid-session: the board is open and loaded, so keep
+        // its store, pending edits, queue and generation, and only refresh it with the new
+        // client. Reopening it would drop the pending edits.
+        if self.board.is_some() && self.app.snapshot().is_some() {
+            return self.poll(PollKind::Full, now);
+        }
         let state = State::load(&self.options.state_dir);
         let remembered = self
             .options
@@ -1781,6 +1787,73 @@ mod tests {
                 .as_deref(),
             Some("o_done")
         );
+    }
+
+    /// A token that stops working mid-session, then `r` on the setup screen: the board stays
+    /// open, so pending edits, their queue slots and the generation are kept.
+    #[test]
+    fn a_token_failure_then_retry_keeps_pending_edits_and_their_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        let mut sent = Vec::new();
+        for item in ["a", "b", "c", "d", "e"] {
+            sent.extend(mutates(&submit(&mut c, set_status(item, "o_done"), t0)));
+        }
+        assert_eq!(sent, [1, 2, 3, 4], "four in flight, the fifth queued");
+        let generation = c.generation();
+        let unauthorized = at(
+            &c,
+            SyncEvent::Failed {
+                task: SyncTask::FullLoad,
+                error: GithubError::Unauthorized,
+            },
+        );
+        c.handle(unauthorized, t0);
+        assert_eq!(c.app.mode, Mode::Setup);
+        let effects = c.handle(Input::Key(key('r')), t0);
+        assert_eq!(effects, vec![Effect::ResolveToken]);
+        let project = c.app.project().unwrap().clone();
+        assert_eq!(c.start(Ok(()), t0), vec![sp(&c, SyncJob::Refresh(project))]);
+        assert_eq!(c.generation(), generation, "late answers still count");
+        assert_eq!(c.app.mode, Mode::Normal);
+        assert_eq!(c.app.pending_count(), 5);
+        assert!(c.app.errors.is_empty(), "nothing was dropped");
+        assert_eq!(
+            mutates(&done(&mut c, 1, Ok(Confirmed::Applied), t0)),
+            [5],
+            "the queued edit takes the freed slot"
+        );
+    }
+
+    #[test]
+    fn q_on_the_setup_screen_asks_while_edits_are_sending() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        submit(&mut c, set_status("a", "o_done"), t0);
+        let no_token = at(
+            &c,
+            SyncEvent::Failed {
+                task: SyncTask::FullLoad,
+                error: GithubError::NoToken,
+            },
+        );
+        c.handle(no_token, t0);
+        assert_eq!(c.app.mode, Mode::Setup);
+        assert!(c.handle(Input::Key(key('q')), t0).is_empty());
+        assert_eq!(c.app.mode, Mode::Confirm);
+        assert_eq!(c.handle(Input::Key(key('y')), t0), vec![Effect::Exit]);
+    }
+
+    #[test]
+    fn edits_pending_when_another_board_opens_are_logged_as_not_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let other: BoardRef = "tviles/9".parse().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        submit(&mut c, set_status("a", "o_done"), t0);
+        c.commands(vec![Command::PickBoard(other)], t0);
+        assert_eq!(c.app.pending_count(), 0);
+        let messages: Vec<_> = c.app.errors.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(messages, ["not sent: the board was reloaded"]);
     }
 
     /// Edits still in flight for the old board must not hold the new board's write slots,

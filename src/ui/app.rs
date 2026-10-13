@@ -291,14 +291,21 @@ impl App {
         }
     }
 
-    /// Forgets what belonged to the previous board when another one opens: the quick search,
-    /// the error and the "loaded N of M" note. Config warnings stay.
+    /// Forgets what belonged to the previous board when another one opens (or the same one
+    /// is loaded again): the quick search, the error, the error log, the highlight and the
+    /// "loaded N of M" note. Config warnings stay. Edits still pending are never sent now;
+    /// they are the new error log's entries, so none vanishes unrecorded.
     pub fn reset_for_new_board(&mut self) {
         self.sticky.clear();
         self.search.clear();
         self.input.clear();
         self.status.error = None;
         self.status.notes.retain(|n| !n.starts_with("loaded "));
+        self.errors.clear();
+        self.highlight = None;
+        self.fail_all_pending(edit::NOT_SENT_RELOADED);
+        self.pending_kinds.clear();
+        self.error_sel = 0;
     }
 
     pub fn search_query(&self) -> &str {
@@ -707,11 +714,8 @@ impl App {
             }
             Mode::Setup => match key.code {
                 KeyCode::Char('r') => vec![Command::Retry],
-                // Esc never quits; the keymap's Quit does.
-                _ if action == Some(Action::Quit) => {
-                    self.quit = true;
-                    vec![Command::Quit]
-                }
+                // Esc never quits; the keymap's Quit does, asking first while edits are sending.
+                _ if action == Some(Action::Quit) => self.request_quit(),
                 _ => Vec::new(),
             },
             Mode::Picker => self.handle_picker_key(key),

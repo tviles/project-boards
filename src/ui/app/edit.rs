@@ -41,6 +41,9 @@ pub enum ConfirmAction {
     Quit,
 }
 
+/// The error log's message for an edit dropped unsent because its board was loaded again.
+pub const NOT_SENT_RELOADED: &str = "not sent: the board was reloaded";
+
 /// Failed edits kept in the log; the oldest drop first.
 const MAX_ERRORS: usize = 50;
 
@@ -227,7 +230,9 @@ impl App {
 
     /// The mode a popover or question returns to.
     pub fn base_mode(&self) -> Mode {
-        if self.detail.is_some() {
+        if self.setup.is_some() {
+            Mode::Setup
+        } else if self.detail.is_some() {
             Mode::Detail
         } else {
             Mode::Normal
@@ -537,16 +542,9 @@ impl App {
                 self.store.settle_ok(id, confirmed);
             }
             Err(error) => {
-                let what = self
-                    .store
-                    .pending()
-                    .iter()
-                    .find(|p| p.id == id)
-                    .map(|p| p.op.describe(self.snapshot()))
-                    .unwrap_or_else(|| "edit".into());
-                let Some(op) = self.store.settle_failed(id) else {
+                if !self.fail_pending(id, kind, error_message(&error)) {
                     return;
-                };
+                }
                 if let GithubError::InsufficientScopes { missing } = &error {
                     for scope in missing {
                         if !self.refused_scopes.contains(scope) {
@@ -554,33 +552,58 @@ impl App {
                         }
                     }
                 }
-                let message = error_message(&error);
-                let hint = self
-                    .keymap
-                    .keys_for(Action::ErrorLog)
-                    .first()
-                    .map(|k| format!(" · {} error log", k.label()))
-                    .unwrap_or_default();
-                self.status.error = Some(format!("Could not {what}: {message}{hint}"));
-                // The newest failure is row 0: while the log is open, keep the highlight on
-                // the same edit.
-                if self.mode == Mode::ErrorLog {
-                    self.error_sel += 1;
-                }
-                self.errors.push(FailedEdit {
-                    kind: kind.unwrap_or_else(|| {
-                        debug_assert!(false, "pending op {id} has no recorded kind");
-                        OpKind::SetField
-                    }),
-                    op,
-                    what,
-                    message,
-                    at: Instant::now(),
-                });
-                let extra = self.errors.len().saturating_sub(MAX_ERRORS);
-                self.errors.drain(..extra);
-                self.error_sel = self.error_sel.min(self.errors.len() - 1);
             }
+        }
+    }
+
+    /// Takes pending op `id` off the pending list as failed: the status line says so and it
+    /// goes to the error log with `message`. `false` when no such op is pending.
+    pub(super) fn fail_pending(&mut self, id: OpId, kind: Option<OpKind>, message: String) -> bool {
+        let what = self
+            .store
+            .pending()
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.op.describe(self.snapshot()))
+            .unwrap_or_else(|| "edit".into());
+        let Some(op) = self.store.settle_failed(id) else {
+            return false;
+        };
+        let hint = self
+            .keymap
+            .keys_for(Action::ErrorLog)
+            .first()
+            .map(|k| format!(" · {} error log", k.label()))
+            .unwrap_or_default();
+        self.status.error = Some(format!("Could not {what}: {message}{hint}"));
+        // The newest failure is row 0: while the log is open, keep the highlight on the
+        // same edit.
+        if self.mode == Mode::ErrorLog {
+            self.error_sel += 1;
+        }
+        self.errors.push(FailedEdit {
+            kind: kind.unwrap_or_else(|| {
+                debug_assert!(false, "pending op {id} has no recorded kind");
+                OpKind::SetField
+            }),
+            op,
+            what,
+            message,
+            at: Instant::now(),
+        });
+        let extra = self.errors.len().saturating_sub(MAX_ERRORS);
+        self.errors.drain(..extra);
+        self.error_sel = self.error_sel.min(self.errors.len() - 1);
+        true
+    }
+
+    /// Every edit still pending goes to the error log as not sent (its board is being
+    /// replaced, so it never will be).
+    pub(super) fn fail_all_pending(&mut self, message: &str) {
+        let ids: Vec<OpId> = self.store.pending().iter().map(|p| p.id).collect();
+        for id in ids {
+            let kind = self.pending_kinds.remove(&id);
+            self.fail_pending(id, kind, message.to_string());
         }
     }
 
@@ -1818,6 +1841,69 @@ mod tests {
             id,
             result: Err(error),
         });
+    }
+
+    #[test]
+    fn a_new_board_forgets_the_old_error_log_highlight_and_kinds() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+        a.submit(OpKind::Move, set_status("b", "o_done", "Done"));
+        fail(&mut a, 1, "boom a");
+        fail(&mut a, 2, "boom b");
+        a.error_sel = 1;
+        a.highlight = Some(ItemId::new("a"));
+        a.pending_kinds.insert(99, OpKind::Move);
+        a.reset_for_new_board();
+        assert!(a.errors.is_empty());
+        assert_eq!(a.error_sel, 0);
+        assert_eq!(a.highlight, None);
+        assert!(a.pending_kinds.is_empty());
+    }
+
+    #[test]
+    fn edits_still_pending_when_the_board_reloads_go_to_the_error_log() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+        a.submit(OpKind::SetField, set_status("b", "o_done", "Done"));
+        a.reset_for_new_board();
+        assert_eq!(a.pending_count(), 0);
+        let logged: Vec<_> = a
+            .errors
+            .iter()
+            .map(|e| (e.kind, e.op.item().as_str(), e.message.as_str()))
+            .collect();
+        assert_eq!(
+            logged,
+            [
+                (OpKind::Move, "a", NOT_SENT_RELOADED),
+                (OpKind::SetField, "b", NOT_SENT_RELOADED)
+            ]
+        );
+        assert!(
+            a.status
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains(NOT_SENT_RELOADED))
+        );
+    }
+
+    #[test]
+    fn q_on_the_setup_screen_asks_while_edits_are_sending() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::FullLoad,
+            error: GithubError::Unauthorized,
+        });
+        assert_eq!(a.mode, Mode::Setup);
+        assert!(a.handle_key(key('q')).is_empty());
+        assert_eq!(a.mode, Mode::Confirm);
+        assert!(!a.quit);
+        assert!(a.handle_key(key('n')).is_empty());
+        assert_eq!(a.mode, Mode::Setup, "back on the setup screen");
+        a.handle_key(key('q'));
+        assert_eq!(a.handle_key(key('y')), vec![Command::Quit]);
+        assert!(a.quit);
     }
 
     #[test]
