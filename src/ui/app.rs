@@ -717,6 +717,10 @@ impl App {
             Mode::Picker => self.handle_picker_key(key),
             Mode::Confirm => self.handle_confirm_key(&key),
             Mode::Popup => self.handle_popup_key(key),
+            Mode::ErrorLog if action.is_none() && key.code == KeyCode::Char('d') => {
+                self.dismiss_selected();
+                Vec::new()
+            }
             Mode::ErrorLog => self.handle_error_log_key(action),
             Mode::Detail => {
                 if let Some(a) = action

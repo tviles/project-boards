@@ -41,6 +41,9 @@ pub enum ConfirmAction {
     Quit,
 }
 
+/// Failed edits kept in the log; the oldest drop first.
+const MAX_ERRORS: usize = 50;
+
 /// How long ago, roughly: `5s ago`, `2m ago`, `2h ago`.
 pub fn ago(elapsed: std::time::Duration) -> String {
     let s = elapsed.as_secs();
@@ -48,13 +51,19 @@ pub fn ago(elapsed: std::time::Duration) -> String {
         format!("{s}s ago")
     } else if s < 3600 {
         format!("{}m ago", s / 60)
-    } else {
+    } else if s < 48 * 3600 {
         format!("{}h ago", s / 3600)
+    } else {
+        format!("{}d ago", s / 86400)
     }
 }
 
 /// GitHub's own words for a failure; other errors as their message.
 pub fn error_message(error: &GithubError) -> String {
+    crate::ui::text::sanitize(&raw_error_message(error))
+}
+
+fn raw_error_message(error: &GithubError) -> String {
     match error {
         GithubError::Graphql(entries) => {
             let messages: Vec<&str> = entries
@@ -553,6 +562,11 @@ impl App {
                     .map(|k| format!(" · {} error log", k.label()))
                     .unwrap_or_default();
                 self.status.error = Some(format!("Could not {what}: {message}{hint}"));
+                // The newest failure is row 0: while the log is open, keep the highlight on
+                // the same edit.
+                if self.mode == Mode::ErrorLog {
+                    self.error_sel += 1;
+                }
                 self.errors.push(FailedEdit {
                     kind: kind.unwrap_or_else(|| {
                         debug_assert!(false, "pending op {id} has no recorded kind");
@@ -563,6 +577,9 @@ impl App {
                     message,
                     at: Instant::now(),
                 });
+                let extra = self.errors.len().saturating_sub(MAX_ERRORS);
+                self.errors.drain(..extra);
+                self.error_sel = self.error_sel.min(self.errors.len() - 1);
             }
         }
     }
@@ -602,6 +619,14 @@ impl App {
             _ => {}
         }
         Vec::new()
+    }
+
+    /// Drops the selected entry from the log (a stale one for an item that is gone).
+    pub(crate) fn dismiss_selected(&mut self) {
+        if let Some(index) = self.errors.len().checked_sub(1 + self.error_sel) {
+            self.errors.remove(index);
+        }
+        self.error_sel = self.error_sel.min(self.errors.len().saturating_sub(1));
     }
 
     /// Sends the selected failed edit again as a fresh op, after the capability matrix has
@@ -1906,5 +1931,87 @@ mod tests {
         assert_eq!(ago(Duration::from_secs(5)), "5s ago");
         assert_eq!(ago(Duration::from_secs(125)), "2m ago");
         assert_eq!(ago(Duration::from_secs(7300)), "2h ago");
+    }
+
+    #[test]
+    fn a_failure_arriving_while_the_log_is_open_keeps_the_highlight_on_its_edit() {
+        let mut a = test_app();
+        for item in ["a", "b", "c"] {
+            a.submit(OpKind::Move, set_status(item, "o_done", "Done"));
+        }
+        fail(&mut a, 1, "boom a");
+        fail(&mut a, 2, "boom b");
+        a.handle_key(key('E'));
+        a.handle_key(key('j'));
+        assert_eq!(a.errors[a.errors.len() - 1 - a.error_sel].message, "boom a");
+        fail(&mut a, 3, "boom c");
+        assert_eq!(a.errors[a.errors.len() - 1 - a.error_sel].message, "boom a");
+        assert_eq!(a.handle_key(key('R')), vec![Command::Send(4)]);
+        assert_eq!(status(a.snapshot(), "a"), "Done", "a was retried");
+        // The log's hint line is not overwritten; the error waits for the log to close.
+        assert!(a.status.error.is_none() || a.mode == Mode::ErrorLog);
+    }
+
+    #[test]
+    fn the_selection_clamps_after_retrying_the_last_entry() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+        a.submit(OpKind::Move, set_status("b", "o_done", "Done"));
+        fail(&mut a, 1, "boom a");
+        fail(&mut a, 2, "boom b");
+        a.handle_key(key('E'));
+        a.handle_key(key('j'));
+        assert_eq!(a.error_sel, 1);
+        a.handle_key(key('R'));
+        assert_eq!(a.errors.len(), 1);
+        assert_eq!(a.error_sel, 0);
+        a.handle_key(key('R'));
+        assert!(a.errors.is_empty());
+        assert_eq!(a.error_sel, 0);
+        assert!(a.handle_key(key('R')).is_empty(), "nothing to retry");
+    }
+
+    #[test]
+    fn d_dismisses_the_selected_entry_and_the_log_keeps_the_newest_fifty() {
+        let mut a = test_app();
+        for n in 0..52 {
+            a.errors.push(FailedEdit {
+                kind: OpKind::Move,
+                op: set_status("a", "o_done", "Done"),
+                what: "x".into(),
+                message: format!("boom {n}"),
+                at: Instant::now(),
+            });
+        }
+        a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+        fail(&mut a, 1, "boom last");
+        assert_eq!(a.errors.len(), 50, "capped");
+        assert_eq!(a.errors[0].message, "boom 3", "the oldest dropped");
+        a.handle_key(key('E'));
+        a.handle_key(key('d'));
+        assert_eq!(a.errors.len(), 49);
+        assert_eq!(a.errors.last().unwrap().message, "boom 51");
+        assert_eq!(a.mode, Mode::ErrorLog);
+        for _ in 0..60 {
+            a.handle_key(key('d'));
+        }
+        assert!(a.errors.is_empty());
+        assert_eq!(a.error_sel, 0);
+    }
+
+    #[test]
+    fn messages_lose_newlines_and_control_characters() {
+        let error = GithubError::Graphql(vec![GraphqlErrorEntry {
+            message: "bad\nthing\u{7}here".into(),
+            kind: None,
+        }]);
+        assert_eq!(error_message(&error), "bad thing here");
+    }
+
+    #[test]
+    fn ages_switch_to_days_after_forty_eight_hours() {
+        use std::time::Duration;
+        assert_eq!(ago(Duration::from_secs(47 * 3600)), "47h ago");
+        assert_eq!(ago(Duration::from_secs(3 * 86400)), "3d ago");
     }
 }

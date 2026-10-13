@@ -128,11 +128,9 @@ fn draw_error_log(frame: &mut Frame, area: Rect, app: &App) {
         .unwrap_or_default();
     frame.render_widget(Clear, rect);
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" failed edits · {retry} retry · esc close ")),
-        ),
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(
+            " failed edits · {retry} retry · d dismiss · esc close "
+        ))),
         rect,
     );
 }
@@ -421,13 +419,13 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
                     truncate_to_width(flash, area.width as usize),
                     app.theme.accent(),
                 )
+            } else if app.mode == Mode::ErrorLog {
+                Line::styled(error_log_hints(app, area.width as usize), app.theme.dim())
             } else if let Some(e) = &app.status.error {
                 Line::styled(
                     truncate_keeping_hint(app, e, area.width as usize),
                     app.theme.error(),
                 )
-            } else if app.mode == Mode::ErrorLog {
-                Line::styled(error_log_hints(app, area.width as usize), app.theme.dim())
             } else {
                 let mut parts: Vec<String> = Vec::new();
                 if let Some(extra) = app.extra_filter() {
@@ -497,7 +495,7 @@ fn error_log_hints(app: &App, width: usize) -> String {
             .unwrap_or_default()
     };
     let text = format!(
-        "{} {} select · {} retry · esc close",
+        "{} {} select · {} retry · d dismiss · esc close",
         key(Action::Down),
         key(Action::Up),
         key(Action::Retry)
@@ -1155,7 +1153,7 @@ mod tests {
         assert!(screen.contains("connection reset"), "{screen}");
         assert!(screen.contains("0s ago"), "{screen}");
         let last = screen.lines().last().unwrap().trim_end().to_string();
-        assert_eq!(last, "j k select · R retry · esc close");
+        assert_eq!(last, "j k select · R retry · d dismiss · esc close");
     }
 
     #[test]
