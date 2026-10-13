@@ -361,24 +361,25 @@ mutation UnarchiveItem($project: ID!, $item: ID!) {
 }
 
 # --- Lookups for the editors (0.3) ---------------------------------------------------------
-# Cost (nodes requested / 100, rounded up, minimum 1): RepoCandidates 1+100+100+50 = 251 -> 3;
-# PushableRepos 1+1+100 = 102 -> 2; RepoLookup 1; SearchContent 1+20 = 21 -> 1; ContentByNumber 1.
+# Cost per call (nodes requested / 100, rounded up, minimum 1): RepoCandidates 1+100+100+50 = 251 -> 3;
+# PushableRepos 1+1+100 = 102 -> 2 per page, at most 5 pages; RepoLookup 1; SearchContent 1+20 = 21 -> 1; ContentByNumber 1.
 
 query RepoCandidates($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     id
-    assignableUsers(first: 100) { nodes { id login } }
-    labels(first: 100) { nodes { id name color } }
-    milestones(first: 50, states: [OPEN], orderBy: {field: DUE_DATE, direction: ASC}) { nodes { id title } }
+    assignableUsers(first: 100) { nodes { id login } pageInfo { hasNextPage } }
+    labels(first: 100) { nodes { id name color } pageInfo { hasNextPage } }
+    milestones(first: 50, states: [OPEN], orderBy: {field: DUE_DATE, direction: ASC}) { nodes { id title } pageInfo { hasNextPage } }
   }
 }
 
-query PushableRepos {
+query PushableRepos($after: String) {
   viewer {
-    repositories(first: 100, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER],
+    repositories(first: 100, after: $after, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER],
                  ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER],
                  isArchived: false, orderBy: {field: PUSHED_AT, direction: DESC}) {
       nodes { id nameWithOwner viewerPermission hasIssuesEnabled }
+      pageInfo { hasNextPage endCursor }
     }
   }
 }

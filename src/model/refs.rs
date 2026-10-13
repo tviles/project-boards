@@ -60,6 +60,16 @@ pub struct RepoCandidates {
     pub users: Vec<UserRef>,
     pub labels: Vec<LabelRef>,
     pub milestones: Vec<MilestoneRef>,
+    /// True when users, labels or milestones hit their cap, so a list is partial.
+    pub truncated: bool,
+}
+
+/// Repositories the viewer can create issues in, most recently pushed first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PushableRepos {
+    pub repos: Vec<RepoRef>,
+    /// True when more repositories exist than the pages read.
+    pub truncated: bool,
 }
 
 /// An issue or pull request found by search or by URL, to add to the board.

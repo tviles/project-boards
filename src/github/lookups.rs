@@ -9,6 +9,8 @@ use crate::model::*;
 use graphql_client::GraphQLQuery;
 use serde_json::Value;
 
+const PUSHABLE_PAGES: usize = 5;
+
 fn writable(repo: &Value) -> bool {
     matches!(
         repo["viewerPermission"].as_str(),
@@ -33,7 +35,7 @@ fn hit(node: &Value) -> Option<ContentHit> {
         id: node["id"].as_str()?.to_string(),
         pull,
         repo: str_of(&node["repository"]["nameWithOwner"]),
-        number: node["number"].as_u64()? as u32,
+        number: u32::try_from(node["number"].as_u64()?).ok()?,
         title: str_of(&node["title"]),
         open: node["state"] == "OPEN",
     })
@@ -80,6 +82,9 @@ impl Github {
                     })
                 })
                 .collect(),
+            truncated: ["assignableUsers", "labels", "milestones"]
+                .iter()
+                .any(|k| r[k]["pageInfo"]["hasNextPage"].as_bool() == Some(true)),
             milestones: nodes(r, "milestones")
                 .into_iter()
                 .filter_map(|m| {
@@ -92,15 +97,41 @@ impl Github {
         })
     }
 
-    /// The viewer's 100 most recently pushed repositories they can write to, issues on.
-    pub async fn pushable_repos(&self) -> Result<Vec<RepoRef>, GithubError> {
-        let body = queries::PushableRepos::build_query(queries::pushable_repos::Variables);
-        let data = self.run(GraphqlRequest::from_body(body)).await?.data;
-        Ok(nodes(&data["viewer"], "repositories")
-            .into_iter()
-            .filter(|r| writable(r))
-            .filter_map(repo_ref)
-            .collect())
+    /// The viewer's most recently pushed repositories they can write to, issues on: up to
+    /// five pages of 100, `truncated` when more remain.
+    pub async fn pushable_repos(&self) -> Result<PushableRepos, GithubError> {
+        let mut repos = Vec::new();
+        let mut after: Option<String> = None;
+        for page in 1..=PUSHABLE_PAGES {
+            let body = queries::PushableRepos::build_query(queries::pushable_repos::Variables {
+                after: after.clone(),
+            });
+            let data = self.run(GraphqlRequest::from_body(body)).await?.data;
+            let connection = &data["viewer"]["repositories"];
+            repos.extend(
+                nodes(&data["viewer"], "repositories")
+                    .into_iter()
+                    .filter(|r| writable(r))
+                    .filter_map(repo_ref),
+            );
+            let more = connection["pageInfo"]["hasNextPage"].as_bool() == Some(true);
+            after = connection["pageInfo"]["endCursor"]
+                .as_str()
+                .map(String::from);
+            if !more || after.is_none() {
+                return Ok(PushableRepos {
+                    repos,
+                    truncated: false,
+                });
+            }
+            if page == PUSHABLE_PAGES {
+                return Ok(PushableRepos {
+                    repos,
+                    truncated: true,
+                });
+            }
+        }
+        unreachable!("the loop returns on its last page")
     }
 
     /// `repo` when it exists, the viewer can write to it and it has issues; else `None`.
@@ -197,6 +228,7 @@ mod tests {
                 login: "octo".into()
             }]
         );
+        assert!(!c.truncated);
         assert_eq!(c.labels[0].name, "good first issue");
         assert_eq!(c.milestones[0].title, "v1");
         assert_eq!(
@@ -218,7 +250,8 @@ mod tests {
             {"id": "R_4", "nameWithOwner": "octo/dots", "viewerPermission": "ADMIN", "hasIssuesEnabled": true}
         ]}}}));
         let list = Github::new(t).pushable_repos().await.unwrap();
-        let slugs: Vec<String> = list.iter().map(|r| r.slug.to_string()).collect();
+        assert!(!list.truncated);
+        let slugs: Vec<String> = list.repos.iter().map(|r| r.slug.to_string()).collect();
         assert_eq!(slugs, ["acme/app", "octo/dots"]);
     }
 
@@ -262,5 +295,76 @@ mod tests {
         assert_eq!((one.number, one.open), (12, false));
         assert_eq!(t.requests()[1].variables["number"], 12);
         assert_eq!(gh.content_by_number(&repo(), 99).await.unwrap(), None);
+    }
+
+    fn page(id: &str, next: Option<&str>) -> serde_json::Value {
+        json!({"viewer": {"repositories": {
+            "nodes": [{"id": id, "nameWithOwner": format!("acme/{id}"), "viewerPermission": "WRITE", "hasIssuesEnabled": true}],
+            "pageInfo": {"hasNextPage": next.is_some(), "endCursor": next}}}})
+    }
+
+    #[tokio::test]
+    async fn pushable_repositories_follow_pages() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push("PushableRepos", page("a", Some("c1")));
+        t.push("PushableRepos", page("b", None));
+        let list = Github::new(t.clone()).pushable_repos().await.unwrap();
+        assert_eq!(list.repos.len(), 2);
+        assert!(!list.truncated);
+        let reqs = t.requests();
+        assert_eq!(reqs[0].variables["after"], serde_json::Value::Null);
+        assert_eq!(reqs[1].variables["after"], "c1");
+    }
+
+    #[tokio::test]
+    async fn pushable_repositories_stop_at_five_pages_and_say_so() {
+        let t = Arc::new(FixtureTransport::new());
+        for i in 0..6 {
+            t.push(
+                "PushableRepos",
+                page(&format!("r{i}"), Some(&format!("c{i}"))),
+            );
+        }
+        let list = Github::new(t.clone()).pushable_repos().await.unwrap();
+        assert_eq!(t.requests().len(), 5);
+        assert_eq!(list.repos.len(), 5);
+        assert!(list.truncated);
+    }
+
+    #[tokio::test]
+    async fn candidates_say_when_a_list_hit_its_cap() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push(
+            "RepoCandidates",
+            json!({"repository": {"id": "R_1",
+            "assignableUsers": {"nodes": [], "pageInfo": {"hasNextPage": false}},
+            "labels": {"nodes": [], "pageInfo": {"hasNextPage": true}},
+            "milestones": {"nodes": [], "pageInfo": {"hasNextPage": false}}}}),
+        );
+        assert!(
+            Github::new(t)
+                .repo_candidates(&repo())
+                .await
+                .unwrap()
+                .truncated
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repository_with_issues_disabled_is_not_offered() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push("RepoLookup", json!({"repository": {"id": "R_1", "nameWithOwner": "acme/app", "viewerPermission": "ADMIN", "hasIssuesEnabled": false}}));
+        assert_eq!(Github::new(t).lookup_repo(&repo()).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_closed_pull_request_hit_is_not_open_and_search_asks_for_twenty() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push("SearchContent", json!({"search": {"nodes": [
+            {"__typename": "PullRequest", "id": "PR_1", "number": 5, "title": "Old", "state": "CLOSED", "repository": {"nameWithOwner": "acme/app"}}]}}));
+        let gh = Github::new(t.clone());
+        let hits = gh.search_content("old").await.unwrap();
+        assert_eq!((hits[0].pull, hits[0].open), (true, false));
+        assert!(t.requests()[0].query.contains("first: 20"));
     }
 }
