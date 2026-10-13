@@ -1,6 +1,7 @@
 //! The popovers: what each one edits and what its keys do.
 
 use super::*;
+use crate::model::{ContentId, LabelRef, MilestoneRef, RepoCandidates, UserRef};
 use crate::model::{
     FieldValue, Iteration, OptionId, format_iso_date, parse_date_input, parse_iso_date,
     parse_number_input,
@@ -20,6 +21,9 @@ pub enum LineKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldTarget {
     Field(FieldId),
+    Assignees,
+    Labels,
+    Milestone,
 }
 
 /// An entry of the action menu.
@@ -27,6 +31,8 @@ pub enum FieldTarget {
 pub enum MenuEntry {
     /// Runs the action, as its key would.
     Key(Action),
+    /// The milestone picker (it has no key of its own; `e` reaches it too).
+    Milestone,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,6 +58,24 @@ pub enum Popup {
         item: ItemId,
         field: FieldId,
         select: MultiSelect<OptionId>,
+    },
+    /// `a`: the item's assignees, from its repository's assignable users.
+    Assignees {
+        item: ItemId,
+        repo: RepoSlug,
+        select: MultiSelect<UserRef>,
+    },
+    /// `t`: the item's labels, from its repository's labels.
+    Labels {
+        item: ItemId,
+        repo: RepoSlug,
+        select: MultiSelect<LabelRef>,
+    },
+    /// The item's milestone; `None` clears it.
+    Milestone {
+        item: ItemId,
+        repo: RepoSlug,
+        picker: ListPicker<Option<MilestoneRef>>,
     },
     /// A text, number or date field.
     Line {
@@ -186,6 +210,118 @@ fn item_ref(item: &crate::model::Item) -> String {
     }
 }
 
+/// The users to offer: the repository's, plus current assignees it did not list (so they
+/// can be removed), and the logins assigned now.
+pub(super) fn assignee_options(
+    c: &RepoCandidates,
+    item: &Item,
+) -> (Vec<MultiOption<UserRef>>, Vec<String>) {
+    let current: Vec<String> = item.assignees().iter().map(|s| s.to_string()).collect();
+    let mut users = c.users.clone();
+    for login in &current {
+        if !users.iter().any(|u| &u.login == login)
+            && let Some(id) = item.content_fields.assignee_ids.get(login)
+        {
+            users.push(UserRef {
+                id: id.clone(),
+                login: login.clone(),
+            });
+        }
+    }
+    let options = users
+        .into_iter()
+        .map(|u| MultiOption {
+            label: u.login.clone(),
+            color: None,
+            value: u,
+        })
+        .collect();
+    (options, current)
+}
+
+/// The labels to offer, current ones the repository did not list included.
+pub(super) fn label_options(
+    c: &RepoCandidates,
+    item: &Item,
+) -> (Vec<MultiOption<LabelRef>>, Vec<String>) {
+    let current: Vec<String> = item.label_names().iter().map(|s| s.to_string()).collect();
+    let mut labels = c.labels.clone();
+    for l in item.labels() {
+        if !labels.iter().any(|x| x.name == l.name)
+            && let Some(id) = item.content_fields.label_ids.get(&l.name)
+        {
+            labels.push(LabelRef {
+                id: id.clone(),
+                name: l.name.clone(),
+                color: l.color.clone(),
+            });
+        }
+    }
+    let options = labels
+        .into_iter()
+        .map(|l| MultiOption {
+            label: l.name.clone(),
+            color: Some(l.color.clone()),
+            value: l,
+        })
+        .collect();
+    (options, current)
+}
+
+/// Open milestones (the item's own marked `✓`, listed even when closed), then "No milestone".
+pub(super) fn milestone_choices(
+    c: &RepoCandidates,
+    item: &Item,
+) -> Vec<Choice<Option<MilestoneRef>>> {
+    let current = item.content_fields.milestone.clone();
+    let mut list = c.milestones.clone();
+    if let Some(m) = &current
+        && !list.contains(m)
+    {
+        list.push(m.clone());
+    }
+    let mut out: Vec<_> = list
+        .into_iter()
+        .map(|m| {
+            let mark = if current.as_ref() == Some(&m) {
+                "✓"
+            } else {
+                ""
+            };
+            Choice::new(m.title.clone(), Some(m)).with_detail(mark)
+        })
+        .collect();
+    if current.is_some() {
+        out.push(Choice::new("No milestone", None));
+    }
+    out
+}
+
+/// Fills a waiting assignee or label checklist once its repository's candidates have loaded
+/// (or failed). `options` lists the choices and the names checked now; `name` names a choice.
+pub(super) fn fill_checklist<T: Clone>(
+    select: &mut MultiSelect<T>,
+    lookup: Option<&Lookup<RepoCandidates>>,
+    item: Option<&Item>,
+    options: impl Fn(&RepoCandidates, &Item) -> (Vec<MultiOption<T>>, Vec<String>),
+    name: impl Fn(&T) -> String,
+) {
+    match lookup {
+        Some(Lookup::Ready(c)) => {
+            if let Some(it) = item {
+                let (choices, current) = options(c, it);
+                select.set_options(choices, |v| current.contains(&name(v)));
+                select.truncated = c.truncated;
+            }
+        }
+        Some(Lookup::Failed(e)) => {
+            select.loading = false;
+            select.error = Some(e.clone());
+        }
+        Some(Lookup::Loading) | None => {}
+    }
+}
+
 impl App {
     /// The user's local date.
     pub(crate) fn today(&self) -> time::Date {
@@ -223,6 +359,9 @@ impl App {
                         .with_detail(key(action)),
                 );
             }
+        }
+        if self.allowed(OpKind::Milestone, &item) {
+            choices.push(Choice::new("Milestone", MenuEntry::Milestone));
         }
         if item.url().is_some() {
             choices.push(
@@ -262,7 +401,7 @@ impl App {
         let Some(project) = self.project() else {
             return Vec::new();
         };
-        let choices: Vec<Choice<FieldTarget>> = project
+        let mut choices: Vec<Choice<FieldTarget>> = project
             .fields
             .iter()
             .filter(|f| editable(&f.kind))
@@ -271,6 +410,26 @@ impl App {
                     .with_detail(item.field_value(f).map(|v| v.display()).unwrap_or_default())
             })
             .collect();
+        let ctx = self.edit_context();
+        for (kind, label, target) in [
+            (OpKind::Assignees, "Assignees", FieldTarget::Assignees),
+            (OpKind::Labels, "Labels", FieldTarget::Labels),
+            (OpKind::Milestone, "Milestone", FieldTarget::Milestone),
+        ] {
+            if check(kind, &item, &ctx).is_ok() {
+                let current = match kind {
+                    OpKind::Assignees => item.assignees().join(", "),
+                    OpKind::Labels => item.label_names().join(", "),
+                    _ => item
+                        .content_fields
+                        .milestone
+                        .as_ref()
+                        .map(|m| m.title.clone())
+                        .unwrap_or_default(),
+                };
+                choices.push(Choice::new(label, target).with_detail(current));
+            }
+        }
         if choices.is_empty() {
             self.status.flash = Some("This project has no fields to edit here".into());
             return Vec::new();
@@ -281,6 +440,99 @@ impl App {
             picker: ListPicker::new(title, choices),
         });
         Vec::new()
+    }
+
+    /// `a`, `t`, or the milestone entry: a popover over the item's repository candidates,
+    /// loaded on first need.
+    pub(crate) fn open_candidates(&mut self, kind: OpKind) -> Vec<Command> {
+        let Some(item) = self.action_item().cloned() else {
+            self.status.flash = Some("Select an item first".into());
+            return Vec::new();
+        };
+        if let Err(reason) = self.check_here(kind, &item) {
+            self.status.flash = Some(reason);
+            return Vec::new();
+        }
+        let Some(repo) = self.candidate_repo(&item) else {
+            self.status.flash = Some(
+                "Open the board from a repository, or link one to the project, to assign drafts"
+                    .into(),
+            );
+            return Vec::new();
+        };
+        let title = |what: &str| format!("{what} · {}", item_ref(&item));
+        let (id, r) = (item.id.clone(), repo.clone());
+        let popup = match kind {
+            OpKind::Assignees => Popup::Assignees {
+                item: id,
+                repo: r,
+                select: MultiSelect::loading(title("Assignees")),
+            },
+            OpKind::Labels => Popup::Labels {
+                item: id,
+                repo: r,
+                select: MultiSelect::loading(title("Labels")),
+            },
+            _ => Popup::Milestone {
+                item: id,
+                repo: r,
+                picker: ListPicker::loading(title("Milestone")),
+            },
+        };
+        self.open_popup(popup);
+        let cmds = self.need_candidates(&repo);
+        self.refresh_popup();
+        cmds
+    }
+
+    /// Submits an op that needs the item's content node id; refuses (needs a refresh) without.
+    fn submit_people(
+        &mut self,
+        kind: OpKind,
+        item: ItemId,
+        op: impl FnOnce(ContentId) -> Op,
+    ) -> Vec<Command> {
+        match self.item(&item).and_then(|i| i.content_id()) {
+            Some(content) => self.submit(kind, op(content)),
+            None => {
+                self.status.flash = Some(self.denial_text(Denial::NeedsRefresh));
+                Vec::new()
+            }
+        }
+    }
+
+    /// Enter or Esc in the assignee or label checklist: Esc closes; Enter sends only what
+    /// changed (`op` builds the op from the item, its content id, added, removed and the whole
+    /// new list). `None` while the checklist stays open.
+    fn apply_checklist<T>(
+        &mut self,
+        outcome: MultiOutcome<T>,
+        item: ItemId,
+        kind: OpKind,
+        op: impl FnOnce(ItemId, ContentId, Vec<T>, Vec<T>, Vec<T>) -> Op,
+    ) -> Option<Vec<Command>> {
+        match outcome {
+            MultiOutcome::None => None,
+            MultiOutcome::Cancel => {
+                self.close_popup();
+                Some(Vec::new())
+            }
+            MultiOutcome::Apply {
+                added,
+                removed,
+                chosen,
+            } => {
+                self.close_popup();
+                if added.is_empty() && removed.is_empty() {
+                    return Some(Vec::new());
+                }
+                self.selected_id = Some(item.clone());
+                let target = item.clone();
+                Some(self.submit_people(kind, target, |content| {
+                    op(item, content, added, removed, chosen)
+                }))
+            }
+        }
     }
 
     /// The editor for `field` of `item`, by field type.
@@ -429,6 +681,10 @@ impl App {
                     self.close_popup();
                     return self.run_action(action);
                 }
+                ListOutcome::Chosen(MenuEntry::Milestone) => {
+                    self.close_popup();
+                    return self.open_candidates(OpKind::Milestone);
+                }
                 ListOutcome::Key(k) => {
                     let listed = self
                         .keymap
@@ -449,6 +705,15 @@ impl App {
                 ListOutcome::Chosen(FieldTarget::Field(field)) => {
                     let item = item.clone();
                     return self.open_field_editor(&item, &field);
+                }
+                ListOutcome::Chosen(FieldTarget::Assignees) => {
+                    return self.open_candidates(OpKind::Assignees);
+                }
+                ListOutcome::Chosen(FieldTarget::Labels) => {
+                    return self.open_candidates(OpKind::Labels);
+                }
+                ListOutcome::Chosen(FieldTarget::Milestone) => {
+                    return self.open_candidates(OpKind::Milestone);
                 }
                 ListOutcome::Cancel => {
                     self.close_popup();
@@ -498,6 +763,57 @@ impl App {
                     return self.back_to_menu(&field);
                 }
                 MultiOutcome::None => {}
+            },
+            Popup::Assignees { item, select, .. } => {
+                let (item, outcome) = (item.clone(), select.handle(&key));
+                let built = |item, content, add, remove, all| Op::Assignees {
+                    item,
+                    content,
+                    add,
+                    remove,
+                    all,
+                };
+                if let Some(cmds) = self.apply_checklist(outcome, item, OpKind::Assignees, built) {
+                    return cmds;
+                }
+            }
+            Popup::Labels { item, select, .. } => {
+                let (item, outcome) = (item.clone(), select.handle(&key));
+                let built = |item, content, add, remove, _all| Op::Labels {
+                    item,
+                    content,
+                    add,
+                    remove,
+                };
+                if let Some(cmds) = self.apply_checklist(outcome, item, OpKind::Labels, built) {
+                    return cmds;
+                }
+            }
+            Popup::Milestone { item, picker, .. } => match picker.handle(&key) {
+                ListOutcome::Chosen(milestone) => {
+                    let item = item.clone();
+                    self.close_popup();
+                    let current = self
+                        .item(&item)
+                        .and_then(|i| i.content_fields.milestone.clone());
+                    if current == milestone {
+                        return Vec::new();
+                    }
+                    self.selected_id = Some(item.clone());
+                    let target = item.clone();
+                    return self.submit_people(OpKind::Milestone, target, |content| {
+                        Op::Milestone {
+                            item,
+                            content,
+                            milestone,
+                        }
+                    });
+                }
+                ListOutcome::Cancel => {
+                    self.close_popup();
+                    return Vec::new();
+                }
+                ListOutcome::None | ListOutcome::Key(_) => {}
             },
             Popup::Line {
                 item,
@@ -589,7 +905,16 @@ mod tests {
         assert_eq!(
             field_labels(&a),
             [
-                "Status", "Priority", "Notes", "Size", "Due", "Sprint", "Areas"
+                "Status",
+                "Priority",
+                "Notes",
+                "Size",
+                "Due",
+                "Sprint",
+                "Areas",
+                "Assignees",
+                "Labels",
+                "Milestone"
             ]
         );
         let Some(Popup::Fields { picker, .. }) = &a.popup else {
@@ -1178,5 +1503,281 @@ mod tests {
         assert!(matches!(a.popup, Some(Popup::Actions { .. })));
         a.handle_key(code(KeyCode::Esc));
         assert_eq!(a.mode, Mode::Detail);
+    }
+
+    use crate::model::{RepoRef, RepoSlug};
+    use crate::sync::SyncEvent;
+
+    fn repo() -> RepoSlug {
+        "tviles/t".parse().unwrap()
+    }
+
+    fn candidates() -> RepoCandidates {
+        let user = |login: &str| UserRef {
+            id: format!("U_{login}"),
+            login: login.into(),
+        };
+        let label = |name: &str| LabelRef {
+            id: format!("L_{name}"),
+            name: name.into(),
+            color: "0075ca".into(),
+        };
+        RepoCandidates {
+            repo: RepoRef {
+                id: "R_t".into(),
+                slug: repo(),
+            },
+            users: vec![user("octo"), user("tviles")],
+            labels: vec![label("bug"), label("Good First Issue"), label("🐛 triage")],
+            milestones: vec![
+                MilestoneRef {
+                    id: "MI_1".into(),
+                    title: "v1".into(),
+                },
+                MilestoneRef {
+                    id: "MI_2".into(),
+                    title: "v2".into(),
+                },
+            ],
+            truncated: false,
+        }
+    }
+
+    fn pending_op(a: &App) -> Op {
+        a.store.pending().last().unwrap().op.clone()
+    }
+
+    #[test]
+    fn a_opens_with_current_assignees_checked_and_loads_candidates_once() {
+        let mut a = test_app();
+        assert_eq!(
+            a.handle_key(key('a')),
+            vec![Command::LoadCandidates(repo())]
+        );
+        assert!(matches!(&a.popup, Some(Popup::Assignees { select, .. }) if select.loading));
+        a.on_sync(SyncEvent::Candidates {
+            repo: repo(),
+            candidates: candidates(),
+        });
+        let Some(Popup::Assignees { select, .. }) = &a.popup else {
+            panic!("assignees")
+        };
+        assert_eq!(
+            select.options[0].label, "tviles",
+            "the current one, checked, first"
+        );
+        assert_eq!(select.checked, [true, false]);
+        a.handle_key(code(KeyCode::Down));
+        a.handle_key(key(' '));
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        let Op::Assignees {
+            add,
+            remove,
+            all,
+            content,
+            ..
+        } = pending_op(&a)
+        else {
+            panic!("assignees op")
+        };
+        assert_eq!((add.len(), remove.len(), all.len()), (1, 0, 2));
+        assert_eq!(add[0].login, "octo");
+        assert_eq!(content, crate::model::ContentId::Issue("I_a".into()));
+        assert_eq!(
+            a.item(&ItemId::new("a")).unwrap().assignees(),
+            ["tviles", "octo"]
+        );
+        a.handle_key(key('j'));
+        a.handle_key(key('j'));
+        assert!(a.handle_key(key('a')).is_empty(), "same repository: cached");
+        assert!(matches!(&a.popup, Some(Popup::Assignees { select, .. }) if !select.loading));
+    }
+
+    /// Review Focus 4.
+    #[test]
+    fn labels_with_spaces_and_emoji_are_prechecked_and_found() {
+        let mut a = test_app();
+        a.on_sync(SyncEvent::Candidates {
+            repo: repo(),
+            candidates: candidates(),
+        });
+        a.handle_key(key('t'));
+        let Some(Popup::Labels { select, .. }) = &a.popup else {
+            panic!("labels")
+        };
+        assert_eq!(
+            (select.options[0].label.as_str(), select.checked[0]),
+            ("bug", true)
+        );
+        type_text(&mut a, "good");
+        a.handle_key(key(' '));
+        a.handle_key(code(KeyCode::Enter));
+        let Op::Labels { add, remove, .. } = pending_op(&a) else {
+            panic!("labels op")
+        };
+        assert_eq!(
+            (add[0].name.as_str(), remove.len()),
+            ("Good First Issue", 0)
+        );
+        a.handle_key(key('t'));
+        type_text(&mut a, "TRI");
+        let Some(Popup::Labels { select, .. }) = &a.popup else {
+            panic!("labels")
+        };
+        assert_eq!(select.visible().len(), 1, "🐛 triage");
+    }
+
+    #[test]
+    fn an_unchanged_set_sends_nothing_and_esc_cancels() {
+        let mut a = test_app();
+        a.on_sync(SyncEvent::Candidates {
+            repo: repo(),
+            candidates: candidates(),
+        });
+        a.handle_key(key('t'));
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        assert_eq!((a.mode, a.pending_count()), (Mode::Normal, 0));
+        a.handle_key(key('a'));
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!((a.mode, a.pending_count()), (Mode::Normal, 0));
+    }
+
+    #[test]
+    fn a_current_label_outside_the_candidates_can_still_be_removed() {
+        let mut a = test_app();
+        let mut few = candidates();
+        few.labels.retain(|l| l.name != "bug");
+        a.on_sync(SyncEvent::Candidates {
+            repo: repo(),
+            candidates: few,
+        });
+        a.handle_key(key('t'));
+        a.handle_key(key(' '));
+        a.handle_key(code(KeyCode::Enter));
+        let Op::Labels { remove, .. } = pending_op(&a) else {
+            panic!("labels op")
+        };
+        assert_eq!(
+            (remove[0].name.as_str(), remove[0].id.as_str()),
+            ("bug", "L_bug")
+        );
+    }
+
+    #[test]
+    fn drafts_have_no_labels_but_take_assignees_from_the_pane_repository() {
+        let mut a = test_app();
+        a.pane_repo = Some(repo());
+        for _ in 0..3 {
+            a.handle_key(key('j'));
+        }
+        assert_eq!(a.selected_item().unwrap().id.as_str(), "d");
+        assert!(a.handle_key(key('t')).is_empty());
+        assert!(
+            a.status
+                .flash
+                .as_deref()
+                .unwrap()
+                .starts_with("Drafts have no labels — convert to issue first")
+        );
+        assert_eq!(
+            a.handle_key(key('a')),
+            vec![Command::LoadCandidates(repo())]
+        );
+        a.on_sync(SyncEvent::Candidates {
+            repo: repo(),
+            candidates: candidates(),
+        });
+        a.handle_key(key(' '));
+        a.handle_key(code(KeyCode::Enter));
+        let Op::Assignees { content, all, .. } = pending_op(&a) else {
+            panic!("assignees op")
+        };
+        assert_eq!(content, crate::model::ContentId::Draft("DI_d".into()));
+        assert_eq!(all.len(), 1);
+    }
+
+    #[test]
+    fn a_failed_candidate_load_shows_in_the_popover() {
+        let mut a = test_app();
+        a.handle_key(key('a'));
+        a.on_sync(SyncEvent::Failed {
+            task: crate::sync::SyncTask::Candidates(repo()),
+            error: crate::github::GithubError::Network("offline".into()),
+        });
+        let Some(Popup::Assignees { select, .. }) = &a.popup else {
+            panic!("assignees")
+        };
+        assert!(select.error.as_deref().unwrap().contains("offline"));
+        assert!(!select.loading);
+    }
+
+    #[test]
+    fn truncated_candidates_say_so_in_the_popover() {
+        let mut a = test_app();
+        let mut many = candidates();
+        many.truncated = true;
+        a.on_sync(SyncEvent::Candidates {
+            repo: repo(),
+            candidates: many,
+        });
+        a.handle_key(key('t'));
+        let Some(Popup::Labels { select, .. }) = &a.popup else {
+            panic!("labels")
+        };
+        assert!(select.truncated);
+    }
+
+    #[test]
+    fn the_popover_titles_name_the_item_by_number() {
+        let mut a = test_app();
+        a.handle_key(key('a'));
+        let Some(Popup::Assignees { select, .. }) = &a.popup else {
+            panic!("assignees")
+        };
+        assert!(
+            select.title.starts_with("Assignees · #"),
+            "{}",
+            select.title
+        );
+    }
+
+    #[test]
+    fn the_milestone_picker_sets_and_clears() {
+        let mut a = test_app();
+        a.on_sync(SyncEvent::Candidates {
+            repo: repo(),
+            candidates: candidates(),
+        });
+        a.handle_key(key('e'));
+        type_text(&mut a, "milestone");
+        a.handle_key(code(KeyCode::Enter));
+        assert!(matches!(a.popup, Some(Popup::Milestone { .. })));
+        type_text(&mut a, "v2");
+        a.handle_key(code(KeyCode::Enter));
+        assert!(
+            matches!(pending_op(&a), Op::Milestone { milestone: Some(m), .. } if m.title == "v2")
+        );
+        a.handle_key(key(' '));
+        let Some(Popup::Actions { picker, .. }) = &a.popup else {
+            panic!("menu")
+        };
+        let at = picker
+            .choices
+            .iter()
+            .position(|c| c.label == "Milestone")
+            .expect("listed");
+        for _ in 0..at {
+            a.handle_key(key('j'));
+        }
+        a.handle_key(code(KeyCode::Enter));
+        type_text(&mut a, "no milestone");
+        a.handle_key(code(KeyCode::Enter));
+        assert!(matches!(
+            pending_op(&a),
+            Op::Milestone {
+                milestone: None,
+                ..
+            }
+        ));
     }
 }

@@ -5,6 +5,7 @@ use super::*;
 use crate::model::{Denial, EditContext, OpKind, check, check_new};
 use crate::ops::{Confirmed, NewItem, Op, OpId};
 use crate::store::BoardSnapshot;
+use crate::ui::app::popups::{assignee_options, fill_checklist, label_options, milestone_choices};
 use crate::ui::marks::ItemMarks;
 use crate::ui::table::Row;
 use std::collections::HashMap;
@@ -115,6 +116,8 @@ pub(crate) const EDIT_ACTIONS: &[Action] = &[
     Action::MoveNextColumn,
     Action::ReorderUp,
     Action::ReorderDown,
+    Action::Assignees,
+    Action::Labels,
     Action::EditField,
 ];
 
@@ -146,7 +149,7 @@ fn hint_word(action: Action, kind: OpKind) -> &'static str {
 }
 
 /// The single-action keys the hints list before move and reorder.
-const HINTED: &[Action] = &[Action::EditField];
+const HINTED: &[Action] = &[Action::Assignees, Action::Labels, Action::EditField];
 
 /// A lookup an editor waits on.
 #[derive(Debug, Clone, PartialEq)]
@@ -162,7 +165,6 @@ impl App {
     }
 
     /// Asks for `repo`'s candidates unless they are loaded or loading; after a failure, again.
-    #[allow(dead_code)] // the editors that ask arrive in Tasks 30, 34 and 35
     pub(crate) fn need_candidates(&mut self, repo: &RepoSlug) -> Vec<Command> {
         if matches!(
             self.candidates.get(repo),
@@ -260,13 +262,48 @@ impl App {
         true
     }
 
-    /// Fills a popover that waits on a lookup which has landed or failed. Later tasks add
-    /// the popovers that wait.
+    /// Fills a popover that waits on a lookup which has landed or failed.
     pub(crate) fn refresh_popup(&mut self) {
-        let Some(popup) = self.popup.take() else {
+        let Some(mut popup) = self.popup.take() else {
             return;
         };
+        match &mut popup {
+            Popup::Assignees { item, repo, select } if select.loading => fill_checklist(
+                select,
+                self.candidates.get(repo),
+                self.item(item),
+                assignee_options,
+                |u: &UserRef| u.login.clone(),
+            ),
+            Popup::Labels { item, repo, select } if select.loading => fill_checklist(
+                select,
+                self.candidates.get(repo),
+                self.item(item),
+                label_options,
+                |l: &LabelRef| l.name.clone(),
+            ),
+            Popup::Milestone { item, repo, picker } if picker.loading => {
+                match self.candidates.get(repo) {
+                    Some(Lookup::Ready(c)) => {
+                        if let Some(it) = self.item(item) {
+                            picker.set_choices(milestone_choices(c, it));
+                        }
+                    }
+                    Some(Lookup::Failed(e)) => {
+                        picker.loading = false;
+                        picker.error = Some(e.clone());
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
         self.popup = Some(popup);
+    }
+
+    /// Whether `kind` is allowed on `item` here.
+    pub(crate) fn allowed(&self, kind: OpKind, item: &Item) -> bool {
+        self.check_here(kind, item).is_ok()
     }
 
     /// The first operation of `action` allowed on `item` here (`check_here`: the matrix and
@@ -532,6 +569,8 @@ impl App {
             Action::MoveNextColumn => self.move_card(1),
             Action::ReorderUp => self.reorder(false),
             Action::ReorderDown => self.reorder(true),
+            Action::Assignees => self.open_candidates(OpKind::Assignees),
+            Action::Labels => self.open_candidates(OpKind::Labels),
             Action::EditField => self.open_field_menu(),
             Action::ActionMenu => self.open_action_menu(),
             Action::ErrorLog => self.open_error_log(),

@@ -29,6 +29,8 @@ pub enum Action {
     MoveNextColumn,
     ReorderUp,
     ReorderDown,
+    Assignees,
+    Labels,
     EditField,
     ActionMenu,
     ErrorLog,
@@ -44,6 +46,8 @@ impl Action {
         match self {
             Action::MovePrevColumn | Action::MoveNextColumn => &[OpKind::Move],
             Action::ReorderUp | Action::ReorderDown => &[OpKind::Reorder],
+            Action::Assignees => &[OpKind::Assignees],
+            Action::Labels => &[OpKind::Labels],
             Action::EditField => &[OpKind::SetField],
             _ => &[],
         }
@@ -57,7 +61,7 @@ impl Action {
             .find(|a| a.kinds().contains(&kind))
     }
 
-    pub const ALL: [Action; 30] = [
+    pub const ALL: [Action; 32] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -84,6 +88,8 @@ impl Action {
         Action::MoveNextColumn,
         Action::ReorderUp,
         Action::ReorderDown,
+        Action::Assignees,
+        Action::Labels,
         Action::EditField,
         Action::ActionMenu,
         Action::ErrorLog,
@@ -119,6 +125,8 @@ impl Action {
             Action::MoveNextColumn => "move_next_column",
             Action::ReorderUp => "reorder_up",
             Action::ReorderDown => "reorder_down",
+            Action::Assignees => "assignees",
+            Action::Labels => "labels",
             Action::EditField => "edit_field",
             Action::ActionMenu => "action_menu",
             Action::ErrorLog => "error_log",
@@ -154,6 +162,8 @@ impl Action {
             Action::MoveNextColumn => "move the item to the next column",
             Action::ReorderUp => "move the item up (reorder)",
             Action::ReorderDown => "move the item down (reorder)",
+            Action::Assignees => "assign people to the item",
+            Action::Labels => "set the item's labels",
             Action::EditField => "edit a field of the item",
             Action::ActionMenu => "actions: every operation the item allows",
             Action::ErrorLog => "error log: failed edits",
@@ -289,6 +299,8 @@ const DEFAULTS: &[(&str, Action)] = &[
     (">", Action::MoveNextColumn),
     ("K", Action::ReorderUp),
     ("J", Action::ReorderDown),
+    ("a", Action::Assignees),
+    ("t", Action::Labels),
     ("e", Action::EditField),
     ("space", Action::ActionMenu),
     ("E", Action::ErrorLog),
@@ -500,6 +512,14 @@ mod tests {
             km.action(&ev(KeyCode::Char('e'), KeyModifiers::NONE)),
             Some(Action::EditField)
         );
-        assert_eq!(Action::ALL.len(), 30);
+        assert_eq!(Action::ALL.len(), 32);
+        assert_eq!(
+            km.action(&ev(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Some(Action::Assignees)
+        );
+        assert_eq!(
+            km.action(&ev(KeyCode::Char('t'), KeyModifiers::NONE)),
+            Some(Action::Labels)
+        );
     }
 }
