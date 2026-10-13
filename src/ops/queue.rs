@@ -87,7 +87,6 @@ mod tests {
         ItemId::new(s)
     }
 
-    /// Review Focus 2.
     #[test]
     fn ops_on_one_item_go_one_at_a_time_in_order() {
         let now = Instant::now();

@@ -201,7 +201,10 @@ impl Store for MemoryStore {
         let pos = self.pending.iter().position(|p| p.id == id)?;
         let Pending { op, .. } = self.pending.remove(pos);
         if let Some(c) = self.confirmed.as_mut() {
-            if let Confirmed::Item(item) = confirmed {
+            // A poll that removed the item meanwhile wins over the server's copy.
+            if let Confirmed::Item(item) = confirmed
+                && c.items.contains_key(&item.id)
+            {
                 c.upsert_items(vec![item]);
             }
             op.apply(c);
@@ -401,6 +404,22 @@ mod tests {
                 .as_deref(),
             Some("p2")
         );
+    }
+
+    /// A poll that removed the item while its edit was in flight wins: the server's copy
+    /// of the item does not bring it back.
+    #[test]
+    fn a_returned_item_does_not_bring_back_one_a_poll_removed() {
+        let (mut s, _) = layered();
+        let id = s.begin(set("a", "o_done"));
+        let rest: Vec<_> = crate::ui::fixtures::items()
+            .into_iter()
+            .filter(|i| i.id.as_str() != "a")
+            .collect();
+        s.apply(StoreUpdate::ReplaceItems(rest));
+        s.settle_ok(id, Confirmed::Item(stale_a()));
+        assert!(!s.confirmed().unwrap().items.contains_key(&ItemId::new("a")));
+        assert!(!s.snapshot().unwrap().items.contains_key(&ItemId::new("a")));
     }
 
     #[test]
