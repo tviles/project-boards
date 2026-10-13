@@ -203,6 +203,111 @@ impl Github {
         payload(&response, name).map(|_| ())
     }
 
+    /// Adds an existing issue or pull request (by node id) to the project and returns its
+    /// item; GitHub returns the existing item when it is already there.
+    pub async fn add_item_by_id(
+        &self,
+        project: &ProjectId,
+        content: &str,
+    ) -> Result<Item, GithubError> {
+        if content.is_empty() {
+            return Err(refused("Nothing to add: the content id is empty"));
+        }
+        let vars = queries::add_item_by_id::Variables {
+            project: project.0.clone(),
+            content: content.into(),
+        };
+        let response = self
+            .run(GraphqlRequest::from_body(
+                queries::AddItemById::build_query(vars),
+            ))
+            .await?;
+        item_payload(&response, "addProjectV2ItemById", "item")
+    }
+
+    /// Creates an issue and returns its node id; `add_item_by_id` puts it on the board.
+    pub async fn create_issue(
+        &self,
+        repo: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<String, GithubError> {
+        if title.trim().is_empty() {
+            return Err(refused("An issue needs a title"));
+        }
+        let vars = queries::create_issue::Variables {
+            repo: repo.into(),
+            title: title.into(),
+            body: body.into(),
+        };
+        let response = self
+            .run(GraphqlRequest::from_body(
+                queries::CreateIssue::build_query(vars),
+            ))
+            .await?;
+        payload(&response, "createIssue")?["issue"]["id"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| GithubError::Decode("createIssue returned no issue id".into()))
+    }
+
+    pub async fn convert_draft(&self, item: &ItemId, repo: &str) -> Result<Item, GithubError> {
+        let vars = queries::convert_draft::Variables {
+            item: item.0.clone(),
+            repo: repo.into(),
+        };
+        let response = self
+            .run(GraphqlRequest::from_body(
+                queries::ConvertDraft::build_query(vars),
+            ))
+            .await?;
+        item_payload(&response, "convertProjectV2DraftIssueItemToIssue", "item")
+    }
+
+    pub async fn archive_item(
+        &self,
+        project: &ProjectId,
+        item: &ItemId,
+    ) -> Result<(), GithubError> {
+        let vars = queries::archive_item::Variables {
+            project: project.0.clone(),
+            item: item.0.clone(),
+        };
+        self.mutate_ok(
+            queries::ArchiveItem::build_query(vars),
+            "archiveProjectV2Item",
+        )
+        .await
+    }
+
+    pub async fn unarchive_item(
+        &self,
+        project: &ProjectId,
+        item: &ItemId,
+    ) -> Result<(), GithubError> {
+        let vars = queries::unarchive_item::Variables {
+            project: project.0.clone(),
+            item: item.0.clone(),
+        };
+        self.mutate_ok(
+            queries::UnarchiveItem::build_query(vars),
+            "unarchiveProjectV2Item",
+        )
+        .await
+    }
+
+    /// Deletes an issue. Only the live suite calls this, to clean up the issues it made; it is
+    /// compiled only for tests and the `live` feature, so the app cannot delete issues.
+    #[cfg(any(test, feature = "live"))]
+    pub async fn delete_issue(&self, issue: &str) -> Result<(), GithubError> {
+        if issue.is_empty() {
+            return Err(refused("Nothing to delete: the issue id is empty"));
+        }
+        let vars = queries::delete_issue::Variables { id: issue.into() };
+        self.mutate_ok(queries::DeleteIssue::build_query(vars), "deleteIssue")
+            .await
+    }
+
     /// Adding nobody sends nothing.
     pub async fn add_assignees(&self, content: &str, users: &[String]) -> Result<(), GithubError> {
         if users.is_empty() {
@@ -960,5 +1065,90 @@ mod tests {
             4,
             "no request for a refused draft operation"
         );
+    }
+
+    #[tokio::test]
+    async fn items_are_added_created_converted_and_archived() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push(
+            "CreateIssue",
+            json!({"createIssue": {"issue": {"id": "I_new"}}}),
+        );
+        t.push(
+            "AddItemById",
+            json!({"addProjectV2ItemById": {"item": item_json()}}),
+        );
+        t.push(
+            "ConvertDraft",
+            json!({"convertProjectV2DraftIssueItemToIssue": {"item": item_json()}}),
+        );
+        t.push(
+            "ArchiveItem",
+            json!({"archiveProjectV2Item": {"item": {"id": "PVTI_1"}}}),
+        );
+        t.push(
+            "UnarchiveItem",
+            json!({"unarchiveProjectV2Item": {"item": {"id": "PVTI_1"}}}),
+        );
+        ok_payload(&t, "DeleteIssue", "deleteIssue");
+        let gh = Github::new(t.clone());
+        let p = ProjectId::new("PVT_1");
+        let issue = gh.create_issue("R_1", "Title", "Body").await.unwrap();
+        assert_eq!(issue, "I_new");
+        let item = gh.add_item_by_id(&p, &issue).await.unwrap();
+        assert_eq!(item.id.as_str(), "PVTI_1");
+        gh.convert_draft(&item.id, "R_1").await.unwrap();
+        gh.archive_item(&p, &item.id).await.unwrap();
+        gh.unarchive_item(&p, &item.id).await.unwrap();
+        gh.delete_issue("I_new").await.unwrap();
+        let r = t.requests();
+        assert_eq!(
+            (
+                r[0].variables["repo"].as_str(),
+                r[0].variables["title"].as_str()
+            ),
+            (Some("R_1"), Some("Title"))
+        );
+        assert_eq!(r[1].variables["content"], "I_new");
+        assert_eq!(
+            (
+                r[2].variables["item"].as_str(),
+                r[2].variables["repo"].as_str()
+            ),
+            (Some("PVTI_1"), Some("R_1"))
+        );
+        assert_eq!(r[3].variables["project"], "PVT_1");
+        assert_eq!(r[4].variables["item"], "PVTI_1");
+        assert_eq!(r[5].variables["id"], "I_new");
+    }
+
+    #[tokio::test]
+    async fn empty_inputs_send_nothing() {
+        let t = Arc::new(FixtureTransport::new());
+        let gh = Github::new(t.clone());
+        let p = ProjectId::new("PVT_1");
+        assert!(gh.create_issue("R_1", "  ", "b").await.is_err());
+        assert!(gh.add_item_by_id(&p, "").await.is_err());
+        assert!(gh.delete_issue("").await.is_err());
+        assert!(t.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_refused_add_surfaces_githubs_message_and_a_missing_id_is_a_decode_error() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push_body(
+            "AddItemById",
+            json!({"data": {"addProjectV2ItemById": null},
+                   "errors": [{"type": "FORBIDDEN", "message": "Resource not accessible"}]}),
+        );
+        t.push("CreateIssue", json!({"createIssue": {"issue": null}}));
+        let gh = Github::new(t.clone());
+        let e = gh
+            .add_item_by_id(&ProjectId::new("PVT_1"), "I_1")
+            .await
+            .unwrap_err();
+        assert!(matches!(&e, GithubError::Graphql(m) if m[0].message == "Resource not accessible"));
+        let e = gh.create_issue("R_1", "T", "").await.unwrap_err();
+        assert!(matches!(e, GithubError::Decode(_)));
     }
 }

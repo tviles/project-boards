@@ -11,7 +11,7 @@ description = "A herdr plugin for viewing and managing GitHub Projects boards"
 repository = "https://github.com/tviles/project-boards"
 
 [features]
-live = []
+live = ["project-boards-queries/live"]
 
 [dependencies]
 anyhow = "1"
@@ -36,6 +36,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 
 [dev-dependencies]
+project-boards-queries = { path = "crates/queries", features = ["live"] }
 insta = "1"
 wiremock = "0.6"
 tempfile = "3"

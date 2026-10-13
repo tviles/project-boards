@@ -337,3 +337,25 @@ mutation ClosePullRequest($id: ID!) {
 mutation ReopenPullRequest($id: ID!) {
   reopenPullRequest(input: {pullRequestId: $id}) { pullRequest { id } }
 }
+
+# --- Mutations: project items (0.3) --------------------------------------------------------
+
+mutation AddItemById($project: ID!, $content: ID!) {
+  addProjectV2ItemById(input: {projectId: $project, contentId: $content}) { item { ...ItemFields } }
+}
+
+mutation CreateIssue($repo: ID!, $title: String!, $body: String!) {
+  createIssue(input: {repositoryId: $repo, title: $title, body: $body}) { issue { id } }
+}
+
+mutation ConvertDraft($item: ID!, $repo: ID!) {
+  convertProjectV2DraftIssueItemToIssue(input: {itemId: $item, repositoryId: $repo}) { item { ...ItemFields } }
+}
+
+mutation ArchiveItem($project: ID!, $item: ID!) {
+  archiveProjectV2Item(input: {projectId: $project, itemId: $item}) { item { id } }
+}
+
+mutation UnarchiveItem($project: ID!, $item: ID!) {
+  unarchiveProjectV2Item(input: {projectId: $project, itemId: $item}) { item { id } }
+}

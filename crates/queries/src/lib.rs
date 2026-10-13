@@ -60,4 +60,19 @@ operation!(
     ReopenIssue,
     ClosePullRequest,
     ReopenPullRequest,
+    AddItemById,
+    CreateIssue,
+    ConvertDraft,
+    ArchiveItem,
+    UnarchiveItem,
 );
+
+/// The live suite's cleanup only: release builds do not contain this operation.
+#[cfg(feature = "live")]
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "graphql/schema.graphql",
+    query_path = "graphql/cleanup.graphql",
+    variables_derives = "Debug, Clone"
+)]
+pub struct DeleteIssue;

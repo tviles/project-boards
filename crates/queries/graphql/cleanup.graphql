@@ -1,0 +1,5 @@
+# The live suite's cleanup only (feature `live`): the app never deletes issues. Kept apart
+# from board.graphql because graphql_client embeds a whole file in every operation built from it.
+mutation DeleteIssue($id: ID!) {
+  deleteIssue(input: {issueId: $id}) { clientMutationId }
+}

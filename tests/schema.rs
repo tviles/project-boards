@@ -38,6 +38,12 @@ const REQUIRED: &[&str] = &[
     "closePullRequest(",
     "reopenPullRequest(",
     "enum IssueClosedStateReason",
+    "addProjectV2ItemById(",
+    "createIssue(",
+    "convertProjectV2DraftIssueItemToIssue(",
+    "archiveProjectV2Item(",
+    "unarchiveProjectV2Item(",
+    "deleteIssue(",
 ];
 
 #[test]
