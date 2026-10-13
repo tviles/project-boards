@@ -1,5 +1,6 @@
 ---
 source: src/ui/chrome.rs
+assertion_line: 737
 expression: screen
 ---
 Testbed · tviles/3
@@ -13,4 +14,4 @@ Draft idea                                                                   Don
 
 
 
-a assignees · t labels · e field · / search · f filter · L layout · q quit · space actions · ? help
+a assignees · t labels · e field · X close · c comment · < > move · space actions · ? help

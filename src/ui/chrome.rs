@@ -553,16 +553,18 @@ fn status_hints(h: &Hints, keep: Option<&str>, width: usize) -> String {
     };
     let fits = |text: &str| !text.is_empty() && display_width(text) <= room;
     let mut left = None;
-    for e in (0..=h.edit.len()).rev() {
-        let t = join(e, h.general.len());
+    // With an item selected its edit keys matter more than the board-wide keys, so the
+    // general hints go first (from the end), then the edit hints (E17).
+    for g in (0..=h.general.len()).rev() {
+        let t = join(h.edit.len(), g);
         if fits(&t) {
             left = Some(t);
             break;
         }
     }
     if left.is_none() {
-        for g in (0..h.general.len()).rev() {
-            let t = join(0, g);
+        for e in (0..h.edit.len()).rev() {
+            let t = join(e, 0);
             if fits(&t) {
                 left = Some(t);
                 break;
@@ -1171,13 +1173,17 @@ mod tests {
             line(200),
             "a assignees · c comment · < > move · J K reorder · / search · q quit · space actions · ? help"
         );
-        // Edit hints go from the end first.
-        assert_eq!(
-            line(88),
-            "a assignees · c comment · < > move · / search · q quit · space actions · ? help"
+        // Board-wide hints go first: every edit hint outlasts them.
+        let l = line(88);
+        assert!(l.contains("J K reorder") && !l.contains("/ search"), "{l}");
+        assert!(l.ends_with("space actions · ? help"), "{l}");
+        // Then edit hints go from the end.
+        let l = line(45);
+        assert!(
+            l.starts_with("a assignees") && !l.contains("J K reorder"),
+            "{l}"
         );
-        // General hints go only after every edit hint.
-        assert_eq!(line(45), "/ search · q quit · space actions · ? help");
+        assert!(!l.contains("/ search"), "{l}");
         for w in [30, 22] {
             let l = line(w);
             assert!(l.ends_with("space actions · ? help"), "{w}: {l}");
