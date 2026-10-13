@@ -91,6 +91,13 @@ fn tail_to_width(s: &str, width: usize) -> String {
     }
 }
 
+/// Deletes the last user-perceived character (a whole grapheme cluster).
+fn pop_grapheme(s: &mut String) {
+    if let Some((i, _)) = s.grapheme_indices(true).next_back() {
+        s.truncate(i);
+    }
+}
+
 fn plain_char(key: &KeyEvent) -> Option<char> {
     match key.code {
         KeyCode::Char(c)
@@ -98,7 +105,7 @@ fn plain_char(key: &KeyEvent) -> Option<char> {
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            Some(c)
+            Some(c).filter(|c| !c.is_control())
         }
         _ => None,
     }
@@ -143,6 +150,10 @@ impl<T: Clone> ListPicker<T> {
     }
 
     pub fn handle(&mut self, key: &KeyEvent) -> ListOutcome<T> {
+        // Ctrl+C is the app's global quit: always handed back, never typed.
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return ListOutcome::Key(*key);
+        }
         match key.code {
             KeyCode::Esc => return ListOutcome::Cancel,
             KeyCode::Enter => {
@@ -153,7 +164,7 @@ impl<T: Clone> ListPicker<T> {
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down => self.selected += 1,
             KeyCode::Backspace if self.typing => {
-                self.input.pop();
+                pop_grapheme(&mut self.input);
                 self.selected = 0;
             }
             _ => match (plain_char(key), self.typing) {
@@ -189,7 +200,7 @@ pub fn edit_line(input: &mut String, key: &KeyEvent) -> LineOutcome {
         KeyCode::Enter => LineOutcome::Submit,
         KeyCode::Esc => LineOutcome::Cancel,
         KeyCode::Backspace => {
-            input.pop();
+            pop_grapheme(input);
             LineOutcome::Typing
         }
         _ => {
@@ -462,6 +473,74 @@ mod tests {
             )
         });
         assert!(line.contains("END"), "{line}");
+    }
+
+    #[test]
+    fn backspace_removes_a_whole_grapheme() {
+        for s in [
+            "e\u{301}",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+            "\u{1F1E9}\u{1F1EA}",
+            "\u{1F44D}\u{1F3FD}",
+        ] {
+            let mut line = s.to_string();
+            edit_line(&mut line, &code(KeyCode::Backspace));
+            assert_eq!(line, "", "{s:?}");
+            let mut p = picker();
+            p.input = s.to_string();
+            p.handle(&code(KeyCode::Backspace));
+            assert_eq!(p.input, "", "{s:?}");
+        }
+    }
+
+    #[test]
+    fn ctrl_c_is_handed_back_and_control_characters_are_not_stored() {
+        let mut p = picker();
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(p.handle(&ctrl_c), ListOutcome::Key(ctrl_c));
+        assert_eq!(p.input, "");
+        let mut s = String::new();
+        for c in ['a', '\t', '\n', '\u{1b}', 'b'] {
+            edit_line(&mut s, &key(c));
+            p.handle(&key(c));
+        }
+        assert_eq!((s.as_str(), p.input.as_str()), ("ab", "ab"));
+    }
+
+    #[test]
+    fn tiny_areas_do_not_panic_and_wide_input_stays_inside() {
+        let p = picker();
+        for (w, h) in [(0u16, 0u16), (5, 3), (5, 12)] {
+            render_to_string(w, h, |f| {
+                render_list_picker(f, f.area(), &p, &Theme::plain())
+            });
+            render_to_string(w, h, |f| {
+                render_line_popup(f, f.area(), "T", "x", "h", Some("e"), &Theme::plain())
+            });
+        }
+        let wide = "日本語".repeat(20);
+        let screen = render_to_string(30, 7, |f| {
+            render_line_popup(f, f.area(), "T", &wide, "h", None, &Theme::plain())
+        });
+        assert!(screen.lines().all(|l| display_width(l) <= 30), "{screen}");
+        assert!(screen.contains('語'), "{screen}");
+    }
+
+    #[test]
+    fn shrinking_the_filter_clamps_the_selection() {
+        let mut p = picker();
+        p.handle(&code(KeyCode::Down));
+        p.handle(&code(KeyCode::Down));
+        assert_eq!(p.selected, 2);
+        p.handle(&key('o'));
+        assert_eq!(p.selected, 0, "typing resets");
+        p.selected = 2;
+        p.handle(&key('n'));
+        assert_eq!(p.visible().len(), 1, "only Done");
+        assert_eq!(p.selected, 0);
+        p.handle(&key('z'));
+        assert!(p.visible().is_empty());
+        assert_eq!(p.handle(&code(KeyCode::Enter)), ListOutcome::None);
     }
 
     /// Spec section 9: pickers are snapshot-tested at 60, 100 and 200 columns.
