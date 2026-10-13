@@ -39,13 +39,18 @@ pub enum MenuEntry {
     EditTitle,
     /// The body in `$EDITOR`; it has no key.
     EditBody,
+    /// Removes the item from the project, after asking; it has no key.
+    Remove,
+    /// Shows or hides archived items (`is:archived` in the session filter).
+    ToggleArchived,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Popup {
     /// Space: every operation the item allows, with its key.
     Actions {
-        item: ItemId,
+        /// `None` when no item is selected: only the board's entries are listed.
+        item: Option<ItemId>,
         picker: ListPicker<MenuEntry>,
     },
     /// `e`: which field of `item` to edit.
@@ -364,10 +369,7 @@ impl App {
 
     /// Space: every operation `action_item` allows, each with its key; or why there are none.
     pub(crate) fn open_action_menu(&mut self) -> Vec<Command> {
-        let Some(item) = self.action_item().cloned() else {
-            self.status.flash = Some("Select an item first".into());
-            return Vec::new();
-        };
+        let item = self.action_item().cloned();
         let key = |a: Action| {
             self.keymap
                 .keys_for(a)
@@ -376,45 +378,71 @@ impl App {
                 .unwrap_or_default()
         };
         let mut choices: Vec<Choice<MenuEntry>> = Vec::new();
-        for &action in edit::EDIT_ACTIONS {
-            if let Some(kind) = self.allowed_kind(action, &item) {
+        if let Some(item) = &item {
+            for &action in edit::EDIT_ACTIONS {
+                if let Some(kind) = self.allowed_kind(action, item) {
+                    choices.push(
+                        Choice::new(edit::menu_label(action, kind), MenuEntry::Key(action))
+                            .with_detail(key(action)),
+                    );
+                }
+            }
+            for (kind, label, entry) in [
+                (OpKind::Title, "Edit title", MenuEntry::EditTitle),
+                (OpKind::Body, "Edit body", MenuEntry::EditBody),
+                (OpKind::Remove, "Remove from project", MenuEntry::Remove),
+            ] {
+                if self.allowed(kind, item) {
+                    choices.push(Choice::new(label, entry));
+                }
+            }
+            if self.allowed(OpKind::Milestone, item) {
+                choices.push(Choice::new("Milestone", MenuEntry::Milestone));
+            }
+            if item.url().is_some() {
                 choices.push(
-                    Choice::new(edit::menu_label(action, kind), MenuEntry::Key(action))
-                        .with_detail(key(action)),
+                    Choice::new("Open in the browser", MenuEntry::Key(Action::OpenBrowser))
+                        .with_detail(key(Action::OpenBrowser)),
                 );
             }
         }
-        for (kind, label, entry) in [
-            (OpKind::Title, "Edit title", MenuEntry::EditTitle),
-            (OpKind::Body, "Edit body", MenuEntry::EditBody),
-        ] {
-            if self.allowed(kind, &item) {
-                choices.push(Choice::new(label, entry));
-            }
-        }
-        if self.allowed(OpKind::Milestone, &item) {
-            choices.push(Choice::new("Milestone", MenuEntry::Milestone));
-        }
-        if item.url().is_some() {
-            choices.push(
-                Choice::new("Open in the browser", MenuEntry::Key(Action::OpenBrowser))
-                    .with_detail(key(Action::OpenBrowser)),
-            );
+        if self.current_view().is_some() {
+            let shown = self.extra_filter().is_some_and(|f| {
+                f.split_whitespace()
+                    .any(|w| w.eq_ignore_ascii_case("is:archived"))
+            });
+            let label = if shown {
+                "Hide archived items"
+            } else {
+                "Show archived items"
+            };
+            choices.push(Choice::new(label, MenuEntry::ToggleArchived));
         }
         if choices.is_empty() {
             // Nothing at all: say why, with the first reason an edit key was refused.
-            let reason = edit::EDIT_ACTIONS
-                .iter()
-                .flat_map(|a| a.kinds())
-                .find_map(|k| self.check_here(*k, &item).err());
-            self.status.flash =
-                Some(reason.unwrap_or_else(|| "Nothing to do with this item".into()));
+            let reason = item.as_ref().and_then(|item| {
+                edit::EDIT_ACTIONS
+                    .iter()
+                    .flat_map(|a| a.kinds())
+                    .find_map(|k| self.check_here(*k, item).err())
+            });
+            self.status.flash = Some(reason.unwrap_or_else(|| {
+                if item.is_some() {
+                    "Nothing to do with this item".into()
+                } else {
+                    "Select an item first".into()
+                }
+            }));
             return Vec::new();
         }
-        let mut picker = ListPicker::new(format!("Actions · {}", item_ref(&item)), choices);
+        let title = match &item {
+            Some(item) => format!("Actions · {}", item_ref(item)),
+            None => "Actions".to_string(),
+        };
+        let mut picker = ListPicker::new(title, choices);
         picker.typing = false;
         self.open_popup(Popup::Actions {
-            item: item.id,
+            item: item.map(|i| i.id),
             picker,
         });
         Vec::new()
@@ -734,6 +762,14 @@ impl App {
                 ListOutcome::Chosen(MenuEntry::EditBody) => {
                     self.close_popup();
                     return self.edit_body();
+                }
+                ListOutcome::Chosen(MenuEntry::Remove) => {
+                    self.close_popup();
+                    return self.confirm_remove();
+                }
+                ListOutcome::Chosen(MenuEntry::ToggleArchived) => {
+                    self.close_popup();
+                    return self.toggle_archived();
                 }
                 ListOutcome::Key(k) => {
                     let listed = self
@@ -1492,7 +1528,7 @@ mod tests {
     }
 
     #[test]
-    fn a_read_only_board_still_offers_the_browser_and_hints_nothing() {
+    fn a_read_only_board_offers_show_archived_and_the_browser_and_keys_say_why() {
         let mut a = test_app();
         let mut snap = a.snapshot().unwrap().clone();
         snap.project.viewer_can_update = false;
@@ -1500,14 +1536,24 @@ mod tests {
         assert!(a.handle_key(key(' ')).is_empty());
         assert_eq!(
             menu(&a),
-            [("Open in the browser".to_string(), "o".to_string())]
+            [
+                ("Open in the browser".to_string(), "o".to_string()),
+                ("Show archived items".to_string(), String::new()),
+            ],
+            "reading a board can still show archived items"
         );
         assert_eq!(a.edit_hints(), None);
         assert_eq!(a.actions_hint(), None);
+        a.handle_key(code(KeyCode::Esc));
+        assert!(a.handle_key(key('>')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("This board is read-only for you")
+        );
     }
 
     #[test]
-    fn with_nothing_to_do_the_menu_says_why() {
+    fn nothing_to_do_with_the_item_leaves_only_the_boards_entries() {
         let mut a = test_app();
         let mut snap = a.snapshot().unwrap().clone();
         snap.project.viewer_can_update = false;
@@ -1515,7 +1561,12 @@ mod tests {
             crate::model::ItemContent::Redacted;
         a.store.apply(crate::store::StoreUpdate::Replace(snap));
         assert!(a.handle_key(key(' ')).is_empty());
-        assert!(a.popup.is_none());
+        assert_eq!(
+            menu(&a),
+            [("Show archived items".to_string(), String::new())]
+        );
+        a.handle_key(code(KeyCode::Esc));
+        a.handle_key(key('e'));
         assert_eq!(
             a.status.flash.as_deref(),
             Some("This board is read-only for you")

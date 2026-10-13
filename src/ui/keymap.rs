@@ -34,6 +34,7 @@ pub enum Action {
     EditField,
     Comment,
     CloseReopen,
+    Archive,
     ActionMenu,
     ErrorLog,
     Retry,
@@ -53,6 +54,7 @@ impl Action {
             Action::EditField => &[OpKind::SetField],
             Action::Comment => &[OpKind::Comment],
             Action::CloseReopen => &[OpKind::Close, OpKind::Reopen],
+            Action::Archive => &[OpKind::Archive, OpKind::Unarchive],
             _ => &[],
         }
     }
@@ -65,7 +67,7 @@ impl Action {
             .find(|a| a.kinds().contains(&kind))
     }
 
-    pub const ALL: [Action; 34] = [
+    pub const ALL: [Action; 35] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -97,6 +99,7 @@ impl Action {
         Action::EditField,
         Action::Comment,
         Action::CloseReopen,
+        Action::Archive,
         Action::ActionMenu,
         Action::ErrorLog,
         Action::Retry,
@@ -136,6 +139,7 @@ impl Action {
             Action::EditField => "edit_field",
             Action::Comment => "comment",
             Action::CloseReopen => "close_reopen",
+            Action::Archive => "archive",
             Action::ActionMenu => "action_menu",
             Action::ErrorLog => "error_log",
             Action::Retry => "retry",
@@ -175,6 +179,7 @@ impl Action {
             Action::EditField => "edit a field of the item",
             Action::Comment => "comment on the item",
             Action::CloseReopen => "close or reopen the issue or pull request",
+            Action::Archive => "archive or unarchive the item",
             Action::ActionMenu => "actions: every operation the item allows",
             Action::ErrorLog => "error log: failed edits",
             Action::Retry => "error log: retry the selected edit",
@@ -314,6 +319,7 @@ const DEFAULTS: &[(&str, Action)] = &[
     ("e", Action::EditField),
     ("c", Action::Comment),
     ("X", Action::CloseReopen),
+    ("A", Action::Archive),
     ("space", Action::ActionMenu),
     ("E", Action::ErrorLog),
     ("R", Action::Retry),
@@ -524,7 +530,7 @@ mod tests {
             km.action(&ev(KeyCode::Char('e'), KeyModifiers::NONE)),
             Some(Action::EditField)
         );
-        assert_eq!(Action::ALL.len(), 34);
+        assert_eq!(Action::ALL.len(), 35);
         assert_eq!(
             km.action(&ev(KeyCode::Char('a'), KeyModifiers::NONE)),
             Some(Action::Assignees)

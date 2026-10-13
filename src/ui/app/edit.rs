@@ -2,7 +2,9 @@
 //! settles when GitHub answers. Failed edits go to the error log.
 
 use super::*;
-use crate::model::{CloseReason, ContentId, Denial, EditContext, OpKind, check, check_new};
+use crate::model::{
+    CloseReason, ContentId, Denial, EditContext, ItemContent, OpKind, check, check_new,
+};
 use crate::ops::{Confirmed, NewItem, Op, OpId};
 use crate::store::BoardSnapshot;
 use crate::ui::app::popups::{
@@ -139,6 +141,7 @@ pub(crate) const EDIT_ACTIONS: &[Action] = &[
     Action::EditField,
     Action::Comment,
     Action::CloseReopen,
+    Action::Archive,
 ];
 
 /// The menu's words for an action.
@@ -175,6 +178,7 @@ const HINTED: &[Action] = &[
     Action::EditField,
     Action::CloseReopen,
     Action::Comment,
+    Action::Archive,
 ];
 
 /// A lookup an editor waits on.
@@ -614,6 +618,7 @@ impl App {
             Action::EditField => self.open_field_menu(),
             Action::Comment => self.comment(),
             Action::CloseReopen => self.close_or_reopen(),
+            Action::Archive => self.archive_or_unarchive(),
             Action::ActionMenu => self.open_action_menu(),
             Action::ErrorLog => self.open_error_log(),
             _ => return None,
@@ -1296,6 +1301,59 @@ impl App {
             }
             ConfirmAction::Submit { kind, op } => self.submit(kind, op),
         }
+    }
+
+    /// `A`: archive the item, or unarchive an archived one. No confirmation: unarchiving
+    /// undoes it.
+    pub(crate) fn archive_or_unarchive(&mut self) -> Vec<Command> {
+        let Some(item) = self.action_item().cloned() else {
+            self.status.flash = Some("Select an item first".into());
+            return Vec::new();
+        };
+        let (kind, op) = if item.archived {
+            (OpKind::Unarchive, Op::Unarchive { item: item.id })
+        } else {
+            (OpKind::Archive, Op::Archive { item: item.id })
+        };
+        self.submit(kind, op)
+    }
+
+    /// Asks before removing the item from the project.
+    pub(crate) fn confirm_remove(&mut self) -> Vec<Command> {
+        let Some(item) = self.guarded(OpKind::Remove) else {
+            return Vec::new();
+        };
+        let title = crate::ui::text::truncate_to_width(item.title(), 40);
+        let question = match (&item.content, item.number()) {
+            (ItemContent::Draft { .. }, _) => {
+                format!("Remove the draft '{title}' from the project? The draft is deleted. (y/n)")
+            }
+            (_, Some(n)) => {
+                format!("Remove #{n} '{title}' from the project? It stays in its repository. (y/n)")
+            }
+            (_, None) => format!("Remove '{title}' from the project? (y/n)"),
+        };
+        self.confirm = Some(Confirm {
+            question,
+            action: ConfirmAction::Submit {
+                kind: OpKind::Remove,
+                op: Op::Remove { item: item.id },
+            },
+        });
+        self.mode = Mode::Confirm;
+        Vec::new()
+    }
+
+    /// "Show archived items" in the action menu: toggles `is:archived` in the session filter.
+    pub(crate) fn toggle_archived(&mut self) -> Vec<Command> {
+        let current = self.extra_filter().unwrap_or_default().to_string();
+        let mut words: Vec<&str> = current.split_whitespace().collect();
+        let had = words.iter().any(|w| w.eq_ignore_ascii_case("is:archived"));
+        words.retain(|w| !w.eq_ignore_ascii_case("is:archived"));
+        if !had {
+            words.push("is:archived");
+        }
+        self.set_extra_filter(&words.join(" "))
     }
 
     /// `X`: reopen a closed item at once; close an open one after asking (a reason for an
@@ -3759,7 +3817,7 @@ mod tests {
         assert!(a.handle_key(key('X')).is_empty());
         assert_eq!(
             a.status.flash.as_deref(),
-            Some("Drafts can't be closed — archive or remove it instead")
+            Some("Drafts can't be closed — archive (`A`) or remove it instead")
         );
         assert!(a.popup.is_none());
         assert_eq!(a.pending_count(), 0);
@@ -3844,5 +3902,102 @@ mod tests {
             Mode::Detail,
             "choosing a reason returns to the detail"
         );
+    }
+
+    #[test]
+    fn a_archives_and_the_item_waits_dimmed_until_the_view_is_left() {
+        let mut a = test_app();
+        assert_eq!(a.handle_key(key('A')), vec![Command::Send(1)]);
+        let item = a.item(&ItemId::new("a")).unwrap().clone();
+        assert!(item.archived);
+        assert!(
+            a.view_items().unwrap().iter().any(|i| i.id == item.id),
+            "sticky"
+        );
+        assert!(a.unmatched(&item));
+    }
+
+    #[test]
+    fn archived_items_unarchive_with_a() {
+        let mut a = app_edited(|s| s.items.get_mut(&ItemId::new("a")).unwrap().archived = true);
+        a.handle_key(key('f'));
+        for c in "is:archived".chars() {
+            a.handle_key(key(c));
+        }
+        a.handle_key(code(KeyCode::Enter));
+        a.on_sync(SyncEvent::ViewIds {
+            view: crate::model::ViewId::new("V_table"),
+            filter: "is:archived".into(),
+            list: list(&["a"]),
+        });
+        assert_eq!(selected(&a), "a");
+        assert!(a.handle_key(key('e')).is_empty());
+        assert!(
+            a.status
+                .flash
+                .as_deref()
+                .unwrap()
+                .contains("(`A` unarchives)"),
+            "the reason names the key"
+        );
+        assert_eq!(a.handle_key(key('A')), vec![Command::Send(1)]);
+        assert!(matches!(&a.store.pending()[0].op, Op::Unarchive { .. }));
+    }
+
+    #[test]
+    fn remove_asks_first_and_says_what_happens_to_the_content() {
+        let mut a = test_app();
+        assert!(a.confirm_remove().is_empty());
+        assert_eq!(
+            a.confirm.as_ref().unwrap().question,
+            "Remove #1 'Fix crash' from the project? It stays in its repository. (y/n)"
+        );
+        assert_eq!(a.handle_key(key('y')), vec![Command::Send(1)]);
+        assert!(a.item(&ItemId::new("a")).is_none());
+        assert_eq!(selected(&a), "b", "the cursor moves on");
+        for _ in 0..2 {
+            a.handle_key(key('j'));
+        }
+        assert_eq!(selected(&a), "d");
+        a.confirm_remove();
+        assert_eq!(
+            a.confirm.as_ref().unwrap().question,
+            "Remove the draft 'Draft idea' from the project? The draft is deleted. (y/n)"
+        );
+        assert!(a.handle_key(key('n')).is_empty());
+    }
+
+    #[test]
+    fn show_archived_toggles_is_archived_in_the_session_filter() {
+        let mut a = test_app();
+        let cmds = a.toggle_archived();
+        assert_eq!(a.effective_filter(), "is:archived");
+        assert!(
+            matches!(&cmds[..], [Command::FetchViewIds { filter, .. }] if filter == "is:archived")
+        );
+        a.toggle_archived();
+        assert_eq!(a.effective_filter(), "");
+        a.handle_key(key('f'));
+        for c in "label:bug".chars() {
+            a.handle_key(key(c));
+        }
+        a.handle_key(code(KeyCode::Enter));
+        a.toggle_archived();
+        assert_eq!(a.effective_filter(), "label:bug is:archived");
+    }
+
+    #[test]
+    fn the_action_menu_lists_remove_and_show_archived() {
+        let mut a = test_app();
+        a.handle_key(key(' '));
+        let Some(Popup::Actions { picker, .. }) = &a.popup else {
+            panic!("menu")
+        };
+        let labels: Vec<&str> = picker.choices.iter().map(|c| c.label.as_str()).collect();
+        assert!(
+            labels.contains(&"Archive") && labels.contains(&"Remove from project"),
+            "{labels:?}"
+        );
+        assert!(labels.contains(&"Show archived items"), "{labels:?}");
     }
 }

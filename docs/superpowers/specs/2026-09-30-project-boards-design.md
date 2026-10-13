@@ -188,7 +188,7 @@ An edit can make an item stop matching the view's filter, for example moving a c
 
 - **View filter:** GitHub filter syntax, for example `status:Todo assignee:@me -label:bug`, passed to `items(query:)` so results match the web. Changing it refetches the view's ID list.
 - **Session filter (`f`):** a filter typed in herdr is ANDed onto the view's GitHub filter for this session only; it is never saved to GitHub. `x` clears it. A view's ID list fetched with a session filter is left out of the disk cache.
-- **Archived items:** hidden by default, as on the web. "Show archived" in the action menu adds `is:archived` to the view filter, which is where items are unarchived.
+- **Archived items:** hidden by default, as on the web. "Show archived items" in the action menu adds `is:archived` to the session filter (`f`), so `x` clears it too; that view is where items are unarchived. "Hide archived items" takes it out again.
 - **Quick search (`/`):** an instant, client-side match on title, number, assignee and label over the items in the current view. It never touches the network.
 
 ### Polling
