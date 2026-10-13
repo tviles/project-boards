@@ -9,6 +9,7 @@ pub mod keymap;
 pub mod labels;
 pub mod markdown;
 pub mod marks;
+pub mod multiselect;
 pub mod picker;
 pub mod pills;
 pub mod popup;

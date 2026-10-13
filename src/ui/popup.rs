@@ -68,7 +68,7 @@ pub fn fuzzy_match(query: &str, text: &str) -> bool {
 
 /// The last `width` cells of `s` (sanitised), with a leading `…` when it was cut, so the end of
 /// what is being typed stays visible.
-fn tail_to_width(s: &str, width: usize) -> String {
+pub(crate) fn tail_to_width(s: &str, width: usize) -> String {
     let clean = sanitize(s);
     if display_width(&clean) <= width {
         return clean;
@@ -92,13 +92,13 @@ fn tail_to_width(s: &str, width: usize) -> String {
 }
 
 /// Deletes the last user-perceived character (a whole grapheme cluster).
-fn pop_grapheme(s: &mut String) {
+pub(crate) fn pop_grapheme(s: &mut String) {
     if let Some((i, _)) = s.grapheme_indices(true).next_back() {
         s.truncate(i);
     }
 }
 
-fn plain_char(key: &KeyEvent) -> Option<char> {
+pub(crate) fn plain_char(key: &KeyEvent) -> Option<char> {
     match key.code {
         KeyCode::Char(c)
             if !key
