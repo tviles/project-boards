@@ -879,8 +879,11 @@ impl App {
                     self.status.error = Some(format!("{}: {error}", task_words(&task)));
                 }
             }
-            SyncEvent::OpDone { id, result } => self.settle(id, result),
-            SyncEvent::Access { scopes } => self.scopes = scopes,
+            SyncEvent::OpDone { id, result } => {
+                self.settle(id, result);
+                cmds.extend(self.refresh_quit_question());
+            }
+            SyncEvent::Access { scopes } => self.set_scopes(scopes),
             SyncEvent::ViewIds { .. } | SyncEvent::Hydrated(_) | SyncEvent::RepoProjects(_) => {}
         }
         self.restore_selection();

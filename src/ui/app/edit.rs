@@ -33,11 +33,18 @@ pub enum ConfirmAction {
 /// GitHub's own words for a failure; other errors as their message.
 pub fn error_message(error: &GithubError) -> String {
     match error {
-        GithubError::Graphql(entries) if !entries.is_empty() => entries
-            .iter()
-            .map(|e| e.message.as_str())
-            .collect::<Vec<_>>()
-            .join("; "),
+        GithubError::Graphql(entries) => {
+            let messages: Vec<&str> = entries
+                .iter()
+                .map(|e| e.message.trim())
+                .filter(|m| !m.is_empty())
+                .collect();
+            if messages.is_empty() {
+                "GitHub returned an error".into()
+            } else {
+                messages.join("; ")
+            }
+        }
         other => other.to_string(),
     }
 }
@@ -122,12 +129,19 @@ impl App {
                     return;
                 };
                 if let GithubError::InsufficientScopes { missing } = &error {
-                    self.refused_scopes.extend(missing.iter().cloned());
+                    for scope in missing {
+                        if !self.refused_scopes.contains(scope) {
+                            self.refused_scopes.push(scope.clone());
+                        }
+                    }
                 }
                 let message = error_message(&error);
                 self.status.error = Some(format!("Could not {what}: {message}"));
                 self.errors.push(FailedEdit {
-                    kind: kind.unwrap_or(OpKind::SetField),
+                    kind: kind.unwrap_or_else(|| {
+                        debug_assert!(false, "pending op {id} has no recorded kind");
+                        OpKind::SetField
+                    }),
                     op,
                     what,
                     message,
@@ -135,6 +149,31 @@ impl App {
                 });
             }
         }
+    }
+
+    /// A reported scope list that now includes a refused scope lifts that refusal, so a
+    /// refreshed token unblocks edits without a restart.
+    pub(crate) fn set_scopes(&mut self, scopes: Option<Vec<String>>) {
+        if let Some(granted) = &scopes {
+            self.refused_scopes.retain(|r| !granted.contains(r));
+        }
+        self.scopes = scopes;
+    }
+
+    /// After an edit settles: an open quit question is recounted, or the app quits plainly
+    /// when nothing is sending any more.
+    pub(crate) fn refresh_quit_question(&mut self) -> Vec<Command> {
+        if self.mode != Mode::Confirm
+            || !self
+                .confirm
+                .as_ref()
+                .is_some_and(|c| c.action == ConfirmAction::Quit)
+        {
+            return Vec::new();
+        }
+        self.confirm = None;
+        self.mode = self.base_mode();
+        self.request_quit()
     }
 
     /// Quits, or asks first while edits are still sending.
@@ -350,5 +389,204 @@ mod tests {
             vec![Command::Quit],
             "nothing pending: quits at once"
         );
+    }
+
+    fn refused(scope: &str) -> GithubError {
+        GithubError::InsufficientScopes {
+            missing: vec![scope.into()],
+        }
+    }
+
+    #[test]
+    fn a_refused_scope_is_recorded_once_and_lifted_when_the_token_reports_it() {
+        let mut a = test_app();
+        for _ in 0..2 {
+            let cmds = a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+            assert_eq!(cmds.len(), 1);
+            let id = a.store.pending().last().unwrap().id;
+            a.on_sync(SyncEvent::OpDone {
+                id,
+                result: Err(refused("project")),
+            });
+            if a.refused_scopes.len() == 1
+                && a.submit(OpKind::Move, set_status("a", "o_done", "Done"))
+                    .is_empty()
+            {
+                break;
+            }
+        }
+        assert_eq!(a.refused_scopes, vec!["project".to_string()]);
+        a.on_sync(SyncEvent::Access {
+            scopes: Some(vec!["repo".into()]),
+        });
+        assert_eq!(
+            a.refused_scopes,
+            vec!["project".to_string()],
+            "unrelated scopes keep it"
+        );
+        a.on_sync(SyncEvent::Access {
+            scopes: Some(vec!["project".into(), "repo".into()]),
+        });
+        assert!(a.refused_scopes.is_empty());
+        assert_eq!(
+            a.submit(OpKind::Move, set_status("b", "o_done", "Done"))
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_repeated_refusal_does_not_duplicate_the_scope() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+        a.submit(OpKind::Move, set_status("b", "o_done", "Done"));
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Err(refused("project")),
+        });
+        a.on_sync(SyncEvent::OpDone {
+            id: 2,
+            result: Err(refused("project")),
+        });
+        assert_eq!(a.refused_scopes, vec!["project".to_string()]);
+    }
+
+    #[test]
+    fn esc_cancels_the_quit_question() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+        a.handle_key(key('q'));
+        assert!(a.handle_key(code(KeyCode::Esc)).is_empty());
+        assert_eq!((a.mode, a.quit), (Mode::Normal, false));
+        assert!(a.confirm.is_none());
+    }
+
+    #[test]
+    fn the_quit_question_returns_to_the_detail() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("b", "o_done", "Done"));
+        a.open_detail(ItemId::new("a"));
+        assert_eq!(a.mode, Mode::Detail);
+        a.handle_key(key('q'));
+        assert_eq!(a.mode, Mode::Confirm);
+        a.handle_key(key('n'));
+        assert_eq!(a.mode, Mode::Detail);
+        assert!(a.detail.is_some());
+    }
+
+    #[test]
+    fn help_then_q_asks_when_edits_are_sending() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+        a.handle_key(key('?'));
+        assert_eq!(a.mode, Mode::Help);
+        assert!(a.handle_key(key('q')).is_empty());
+        assert_eq!(a.mode, Mode::Confirm);
+    }
+
+    #[test]
+    fn answers_for_unknown_or_repeated_ids_change_nothing() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+        a.on_sync(SyncEvent::OpDone {
+            id: 99,
+            result: Err(GithubError::Unauthorized),
+        });
+        assert_eq!(
+            (a.pending_count(), a.errors.len(), a.status.error.clone()),
+            (1, 0, None)
+        );
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Ok(Confirmed::Applied),
+        });
+        let before = status(a.store.confirmed(), "a");
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Err(GithubError::Unauthorized),
+        });
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Ok(Confirmed::Applied),
+        });
+        assert_eq!(
+            (a.pending_count(), a.errors.len(), a.status.error.clone()),
+            (0, 0, None)
+        );
+        assert_eq!(status(a.store.confirmed(), "a"), before);
+    }
+
+    #[test]
+    fn a_failure_after_the_item_vanished_still_goes_to_the_log() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+        a.store
+            .apply(crate::store::StoreUpdate::ReplaceItems(Vec::new()));
+        let error = GithubError::Graphql(vec![GraphqlErrorEntry {
+            message: "Gone".into(),
+            kind: None,
+        }]);
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Err(error),
+        });
+        assert_eq!(a.errors.len(), 1);
+        assert_eq!(a.errors[0].what, "set Status to Done on 'an item'");
+    }
+
+    #[test]
+    fn selection_stays_on_the_same_item_through_settles() {
+        for ok in [true, false] {
+            let mut a = test_app();
+            a.handle_key(key('j'));
+            let sel = a.selected_item().unwrap().id.clone();
+            a.submit(OpKind::Move, set_status(sel.as_str(), "o_done", "Done"));
+            assert_eq!(a.selected_item().unwrap().id, sel);
+            let result = if ok {
+                Ok(Confirmed::Applied)
+            } else {
+                Err(GithubError::Unauthorized)
+            };
+            a.on_sync(SyncEvent::OpDone { id: 1, result });
+            assert_eq!(a.selected_item().unwrap().id, sel, "ok={ok}");
+        }
+    }
+
+    #[test]
+    fn the_quit_question_closes_itself_when_the_last_edit_settles() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+        a.submit(OpKind::Move, set_status("b", "o_done", "Done"));
+        a.handle_key(key('q'));
+        assert_eq!(
+            a.confirm.as_ref().unwrap().question,
+            "2 edits are still sending; quit anyway? (y/n)"
+        );
+        let cmds = a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Ok(Confirmed::Applied),
+        });
+        assert!(cmds.is_empty());
+        assert_eq!(
+            a.confirm.as_ref().unwrap().question,
+            "1 edit is still sending; quit anyway? (y/n)"
+        );
+        let cmds = a.on_sync(SyncEvent::OpDone {
+            id: 2,
+            result: Ok(Confirmed::Applied),
+        });
+        assert_eq!(cmds, vec![Command::Quit]);
+        assert!(a.quit);
+    }
+
+    #[test]
+    fn a_graphql_error_without_messages_has_no_dangling_colon() {
+        let none = GithubError::Graphql(vec![]);
+        assert_eq!(error_message(&none), "GitHub returned an error");
+        let blank = GithubError::Graphql(vec![GraphqlErrorEntry {
+            message: " ".into(),
+            kind: None,
+        }]);
+        assert_eq!(error_message(&blank), "GitHub returned an error");
     }
 }
