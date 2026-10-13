@@ -69,6 +69,10 @@ fn move_after(order: &mut Vec<ItemId>, item: &ItemId, after: Option<&ItemId>) ->
 
 /// Moves `item` within `list` to where its project rank puts it: before the first item
 /// ranked after it. Ids without a rank (not loaded yet) count as last.
+///
+/// View id lists are kept in project (POSITION) order. Sorted views are ordered on display
+/// by `sort_items`, which reads field values (stable, so ties keep list order), and reorder
+/// is refused in sorted views (`check_here`, Task 11), so re-ranking every list is safe.
 fn place_by_rank(list: &mut Vec<ItemId>, item: &ItemId, rank: &HashMap<ItemId, usize>) {
     let (Some(from), Some(&mine)) = (list.iter().position(|i| i == item), rank.get(item)) else {
         return;
@@ -119,6 +123,10 @@ impl Op {
     pub fn apply(&self, snap: &mut BoardSnapshot) {
         match self {
             Op::SetField { item, field, value } => {
+                // A field the project does not have cannot be set.
+                if snap.project.field(field).is_none() {
+                    return;
+                }
                 if let Some(i) = snap.items.get_mut(item) {
                     i.values.insert(field.clone(), value.clone());
                 }
@@ -256,6 +264,125 @@ mod tests {
         .apply(&mut s);
         assert_eq!(ids(&s.order), ["c", "e", "b", "d", "a"]);
         assert_eq!(ids(&s.views[&ViewId::new("V_bugs")].ids), ["c", "e", "a"]);
+    }
+
+    fn date(d: &str) -> FieldValue {
+        FieldValue::Date(d.into())
+    }
+
+    #[test]
+    fn clear_on_a_missing_item_or_twice_changes_nothing_more() {
+        let mut s = snapshot();
+        let before = s.clone();
+        Op::ClearField {
+            item: ItemId::new("gone"),
+            field: FieldId::new("F_status"),
+        }
+        .apply(&mut s);
+        assert_eq!(s, before);
+        let clear = Op::ClearField {
+            item: ItemId::new("a"),
+            field: FieldId::new("F_status"),
+        };
+        clear.apply(&mut s);
+        let once = s.clone();
+        clear.apply(&mut s);
+        assert_eq!(s, once);
+    }
+
+    #[test]
+    fn reorder_edge_cases_leave_the_order_alone_or_settle() {
+        let mut s = snapshot();
+        let before = s.clone();
+        Op::Reorder {
+            item: ItemId::new("b"),
+            after: Some(ItemId::new("gone")),
+        }
+        .apply(&mut s);
+        Op::Reorder {
+            item: ItemId::new("b"),
+            after: Some(ItemId::new("b")),
+        }
+        .apply(&mut s);
+        Op::Reorder {
+            item: ItemId::new("b"),
+            after: Some(ItemId::new("a")),
+        }
+        .apply(&mut s);
+        assert_eq!(s, before, "missing after, after == item, already in place");
+        let first = Op::Reorder {
+            item: ItemId::new("c"),
+            after: None,
+        };
+        first.apply(&mut s);
+        first.apply(&mut s);
+        assert_eq!(ids(&s.order), ["c", "a", "b", "d", "e"]);
+    }
+
+    #[test]
+    fn reorder_leaves_views_without_the_item_and_places_unranked_ids_last() {
+        let mut s = snapshot();
+        let list = |v: &[&str]| ViewList {
+            ids: v.iter().map(|i| ItemId::new(*i)).collect(),
+            total: v.len(),
+            truncated: false,
+        };
+        s.set_view_ids(ViewId::new("V_bugs"), list(&["a", "c"]));
+        s.set_view_ids(ViewId::new("V_board"), list(&["a", "zz", "d"]));
+        Op::Reorder {
+            item: ItemId::new("d"),
+            after: None,
+        }
+        .apply(&mut s);
+        assert_eq!(
+            ids(&s.views[&ViewId::new("V_bugs")].ids),
+            ["a", "c"],
+            "item not in list"
+        );
+        assert_eq!(ids(&s.views[&ViewId::new("V_board")].ids), ["d", "a", "zz"]);
+        Op::Reorder {
+            item: ItemId::new("a"),
+            after: Some(ItemId::new("b")),
+        }
+        .apply(&mut s);
+        assert_eq!(ids(&s.views[&ViewId::new("V_board")].ids), ["d", "a", "zz"]);
+    }
+
+    #[test]
+    fn set_works_for_text_number_and_date_values_and_repeats_safely() {
+        let mut s = snapshot();
+        for (field, value) in [
+            ("F_notes", FieldValue::Text("hi".into())),
+            ("F_created", date("2026-10-03")),
+            ("F_notes", FieldValue::Number(3.0)),
+        ] {
+            let op = Op::SetField {
+                item: ItemId::new("b"),
+                field: FieldId::new(field),
+                value: value.clone(),
+            };
+            op.apply(&mut s);
+            let once = s.clone();
+            op.apply(&mut s);
+            assert_eq!(s, once);
+            assert_eq!(
+                s.items[&ItemId::new("b")].value(&FieldId::new(field)),
+                Some(&value)
+            );
+        }
+    }
+
+    #[test]
+    fn set_on_a_field_the_project_lacks_changes_nothing() {
+        let mut s = snapshot();
+        let before = s.clone();
+        Op::SetField {
+            item: ItemId::new("a"),
+            field: FieldId::new("F_nope"),
+            value: done(),
+        }
+        .apply(&mut s);
+        assert_eq!(s, before);
     }
 
     #[test]
