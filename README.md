@@ -49,9 +49,9 @@ The board opens for the repository of the focused pane (the board you last used 
 | `?` | help |
 | `Esc` | back or cancel; never quits |
 | `q` | quit |
-| `Ctrl+C` | quit (fixed, not rebindable) |
+| `Ctrl+C` | quit now (unsent edits are dropped); fixed, not rebindable |
 
-The bottom line lists the edit keys the selected item allows, and always ends with `? help`. The same edit keys work in the item detail. An item you edit stays in place until you leave the view or press `r`, even when the view's filter no longer matches it (it is then dimmed and marked ⊘). The header shows `saving N…` while edits are sending, and `writes paused Ns` while GitHub asks the plugin to slow down; quitting with edits still sending asks first (`y` quits, `n` or `Esc` stays; `Ctrl+C` quits at once). If the board is read-only for you the header says `read-only`; if the token lacks the `project` scope it says so, and the edit keys explain why.
+The bottom line lists the edit keys the selected item allows, and always ends with `? help`. The same edit keys work in the item detail. An item you edit stays in place until you leave the view or press `r`, even when the view's filter no longer matches it (it is then dimmed and marked ⊘). The header shows `saving N…` while edits are sending, and `writes paused Ns` while GitHub asks the plugin to slow down; quitting with edits still sending asks first (`y` quits, `n` or `Esc` stays). `Ctrl+C` is the emergency exit: it quits at once without asking, and edits not yet sent are dropped. If the board is read-only for you the header says `read-only`; if the token lacks the `project` scope it says so, and the edit keys explain why.
 
 `<` and `>` follow the columns the board shows, stopping at the first and the last; "No Status" is never a destination, so clearing a field is only done with `e`. Reordering needs a view with no sort and stays inside its lane or group.
 
