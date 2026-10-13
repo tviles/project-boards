@@ -82,13 +82,19 @@ pub trait Store: Send {
     fn settle_failed(&mut self, id: OpId) -> Option<Op>;
 }
 
+/// An edit GitHub confirmed, kept for `RECENT_WINDOW`.
+#[derive(Debug, Clone)]
+enum Recent {
+    Op(Op),
+}
+
 pub struct MemoryStore {
     confirmed: Option<BoardSnapshot>,
     pending: Vec<Pending>,
     /// `confirmed` with `pending` replayed; `None` while nothing is pending.
     derived: Option<BoardSnapshot>,
     /// Edits GitHub confirmed, with when, for `RECENT_WINDOW`.
-    recent: Vec<(Instant, Op)>,
+    recent: Vec<(Instant, Recent)>,
     next_id: OpId,
     clock: Clock,
 }
@@ -122,8 +128,9 @@ impl MemoryStore {
         };
     }
 
-    /// Re-applies the edits GitHub confirmed within `RECENT_WINDOW`, in the order made,
-    /// after server data that may predate them; forgets older ones.
+    /// Re-applies the edits GitHub confirmed within `RECENT_WINDOW`, in the order GitHub
+    /// confirmed them (settle order), after server data that may predate them; forgets older
+    /// ones. Edits to one item are sent one at a time, so for them that is the order made.
     fn reapply_recent(&mut self) {
         let now = (self.clock)();
         self.recent
@@ -131,8 +138,10 @@ impl MemoryStore {
         let Some(c) = self.confirmed.as_mut() else {
             return;
         };
-        for (_, op) in &self.recent {
-            op.apply(c);
+        for (_, recent) in &self.recent {
+            match recent {
+                Recent::Op(op) => op.apply(c),
+            }
         }
     }
 }
@@ -197,7 +206,7 @@ impl Store for MemoryStore {
             }
             op.apply(c);
         }
-        self.recent.push(((self.clock)(), op));
+        self.recent.push(((self.clock)(), Recent::Op(op)));
         self.rebuild();
         None
     }
@@ -214,7 +223,9 @@ impl Store for MemoryStore {
 mod tests {
     use super::*;
     use crate::model::item::tests::issue;
+    use crate::model::{FieldId, FieldValue, OptionId};
     use crate::store::snapshot::tests::project;
+    use std::sync::Mutex;
 
     #[test]
     fn items_before_project_are_ignored_then_project_creates_snapshot() {
@@ -270,9 +281,6 @@ mod tests {
                 .contains_key(&ViewId::new("V"))
         );
     }
-
-    use crate::model::{FieldId, FieldValue, OptionId};
-    use std::sync::Mutex;
 
     fn status_value(option: &str) -> FieldValue {
         FieldValue::SingleSelect {
@@ -403,5 +411,65 @@ mod tests {
         assert_ne!(s.snapshot(), s.confirmed(), "the pending edit shows");
         s.settle_ok(id, Confirmed::Applied);
         assert_eq!(s.snapshot(), s.confirmed(), "settled: one board again");
+    }
+
+    #[test]
+    fn the_window_is_exclusive_at_its_edge() {
+        let (mut s, now) = layered();
+        let id = s.begin(set("a", "o_done"));
+        s.settle_ok(id, Confirmed::Applied);
+        *now.lock().unwrap() += RECENT_WINDOW - Duration::from_secs(1);
+        s.apply(StoreUpdate::UpsertItems(vec![stale_a()]));
+        assert_eq!(status_of(s.confirmed(), "a"), "o_done", "inside the window");
+        *now.lock().unwrap() += Duration::from_secs(1);
+        s.apply(StoreUpdate::UpsertItems(vec![stale_a()]));
+        assert_eq!(
+            status_of(s.confirmed(), "a"),
+            "Todo",
+            "exactly RECENT_WINDOW: expired (`<`)"
+        );
+    }
+
+    #[test]
+    fn an_item_a_poll_removes_stays_gone_despite_pending_and_recent_edits() {
+        let (mut s, _) = layered();
+        let done = s.begin(set("a", "o_done"));
+        s.settle_ok(done, Confirmed::Applied);
+        s.begin(set("a", "o_prog"));
+        let rest: Vec<_> = crate::ui::fixtures::items().into_iter().skip(1).collect();
+        s.apply(StoreUpdate::ReplaceItems(rest));
+        assert!(!s.confirmed().unwrap().items.contains_key(&ItemId::new("a")));
+        assert!(!s.snapshot().unwrap().items.contains_key(&ItemId::new("a")));
+    }
+
+    #[test]
+    fn a_recent_reorder_is_re_applied_after_a_view_list_refresh() {
+        let (mut s, _) = layered();
+        let view = ViewId::new("V");
+        let list = ViewList {
+            ids: ["a", "b", "c"].map(ItemId::new).to_vec(),
+            total: 3,
+            truncated: false,
+        };
+        s.apply(StoreUpdate::ViewIds {
+            view: view.clone(),
+            list: list.clone(),
+        });
+        let id = s.begin(Op::Reorder {
+            item: ItemId::new("a"),
+            after: Some(ItemId::new("c")),
+        });
+        s.settle_ok(id, Confirmed::Applied);
+        // GitHub's list still has the old order.
+        s.apply(StoreUpdate::ViewIds {
+            view: view.clone(),
+            list,
+        });
+        let ids: Vec<&str> = s.confirmed().unwrap().views[&view]
+            .ids
+            .iter()
+            .map(|i| i.as_str())
+            .collect();
+        assert_eq!(ids, ["b", "c", "a"]);
     }
 }

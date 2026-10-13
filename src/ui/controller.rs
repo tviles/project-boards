@@ -954,6 +954,31 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_edit_never_reaches_the_disk_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        let item = crate::model::ItemId::new("a");
+        let field = crate::model::FieldId::new("F_status");
+        let before = c.app.store.confirmed().unwrap().items[&item]
+            .value(&field)
+            .cloned();
+        c.app.store.begin(crate::ops::Op::ClearField {
+            item: item.clone(),
+            field: field.clone(),
+        });
+        assert_ne!(
+            c.app.store.snapshot().unwrap().items[&item].value(&field),
+            before.as_ref(),
+            "the view shows the pending edit"
+        );
+        c.persist_cache();
+        let saved = crate::store::cache::load_cache(&cache_path(dir.path(), &board())).unwrap();
+        assert_eq!(saved.items[&item].value(&field), before.as_ref());
+    }
+
+    #[test]
     fn polls_incrementally_with_a_two_minute_overlap() {
         let dir = tempfile::tempdir().unwrap();
         save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
