@@ -11,6 +11,7 @@ pub mod markdown;
 pub mod marks;
 pub mod picker;
 pub mod pills;
+pub mod popup;
 pub mod runtime;
 pub mod search;
 pub mod table;
