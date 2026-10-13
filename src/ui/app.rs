@@ -832,6 +832,11 @@ impl App {
         if let Some(update) = store_update(&event) {
             self.store.apply(update);
         }
+        // The first snapshot has just arrived: anchor the cursor so an edit key pressed
+        // before any navigation key still makes the cursor follow its item.
+        if self.selected_id.is_none() {
+            self.sync_selected_id();
+        }
         let mut cmds = Vec::new();
         match event {
             SyncEvent::Project(_) => cmds.extend(self.view_needs_ids()),

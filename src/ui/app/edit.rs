@@ -153,6 +153,7 @@ impl App {
     /// before it. Clearing a field is `e`'s job. The table uses the same columns.
     fn move_card(&mut self, step: isize) -> Vec<Command> {
         let Some(item) = self.action_item().cloned() else {
+            self.status.flash = Some("Select an item first".into());
             return Vec::new();
         };
         if let Err(reason) = self.check_here(OpKind::Move, &item) {
@@ -187,8 +188,10 @@ impl App {
             return Vec::new();
         };
         let Some(value) = field.value_for_bucket(&key) else {
+            self.status.flash = Some(format!("Can't move to that {} column", field.name));
             return Vec::new();
         };
+        self.selected_id = Some(item.id.clone());
         self.submit(
             OpKind::Move,
             Op::SetField {
@@ -204,6 +207,7 @@ impl App {
     /// lower neighbour. Needs an unsorted view; stays inside the swimlane or group.
     fn reorder(&mut self, down: bool) -> Vec<Command> {
         let Some(item) = self.action_item().cloned() else {
+            self.status.flash = Some("Select an item first".into());
             return Vec::new();
         };
         if let Err(reason) = self.check_here(OpKind::Reorder, &item) {
@@ -235,8 +239,15 @@ impl App {
         let after = if down {
             Some(neighbour)
         } else {
-            self.predecessor(&neighbour, &item.id)
+            match self.predecessor(&neighbour, &item.id) {
+                Some(p) => p,
+                None => {
+                    self.status.flash = Some("Can't place this card here; refresh with r".into());
+                    return Vec::new();
+                }
+            }
         };
+        self.selected_id = Some(item.id.clone());
         self.submit(
             OpKind::Reorder,
             Op::Reorder {
@@ -281,10 +292,11 @@ impl App {
     }
 
     /// The item before `of` in project order, skipping `skip` (the item being moved).
-    fn predecessor(&self, of: &ItemId, skip: &ItemId) -> Option<ItemId> {
+    /// `None` when `of` is not in project order; `Some(None)` when nothing precedes it.
+    fn predecessor(&self, of: &ItemId, skip: &ItemId) -> Option<Option<ItemId>> {
         let order = &self.snapshot()?.order;
         let at = order.iter().position(|i| i == of)?;
-        order[..at].iter().rev().find(|i| *i != skip).cloned()
+        Some(order[..at].iter().rev().find(|i| *i != skip).cloned())
     }
 
     /// GitHub answered edit `id`. A failure leaves the pending list (the view rebuilds
@@ -979,6 +991,267 @@ mod tests {
         assert_eq!(a.mode, Mode::Detail);
         assert_eq!(a.handle_key(key('>')), vec![Command::Send(1)]);
         assert_eq!(status(a.snapshot(), "a"), "In Progress");
+        assert_eq!(a.mode, Mode::Detail);
+    }
+
+    fn app_with(snap: crate::store::BoardSnapshot) -> App {
+        App::new(
+            Box::new(crate::store::MemoryStore::new(Some(snap))),
+            crate::ui::keymap::Keymap::defaults(),
+            crate::ui::theme::Theme::plain(),
+        )
+    }
+
+    fn set_value(snap: &mut crate::store::BoardSnapshot, item: &str, field: &str, v: FieldValue) {
+        snap.items
+            .get_mut(&ItemId::new(item))
+            .unwrap()
+            .values
+            .insert(FieldId::new(field), v);
+    }
+
+    fn select_value(id: &str, name: &str) -> FieldValue {
+        FieldValue::SingleSelect {
+            option_id: OptionId::new(id),
+            name: name.into(),
+        }
+    }
+
+    /// Todo / P0 holds a, b, c (project order); the board view has no filter.
+    fn one_lane() -> crate::store::BoardSnapshot {
+        let mut snap = snapshot();
+        set_value(&mut snap, "b", "F_status", select_value("o_todo", "Todo"));
+        set_value(&mut snap, "b", "F_prio", select_value("p0", "P0"));
+        set_value(&mut snap, "c", "F_prio", select_value("p0", "P0"));
+        snap
+    }
+
+    #[test]
+    fn the_cursor_follows_the_card_on_the_very_first_keypress() {
+        let mut a = test_app();
+        a.select_view(&crate::model::ViewId::new("V_board"));
+        assert_eq!(a.selected_id, None, "no navigation key yet");
+        a.handle_key(key('>'));
+        assert_eq!(selected(&a), "a");
+        assert_eq!(a.board_sel.column, 1);
+
+        let mut b = app_with(one_lane());
+        b.select_view(&crate::model::ViewId::new("V_board"));
+        b.board_sel = crate::ui::board::BoardSelection {
+            column: 0,
+            index: 1,
+        };
+        assert_eq!(selected(&b), "b");
+        b.handle_key(key('K'));
+        assert_eq!(selected(&b), "b", "the cursor stays on the reordered card");
+    }
+
+    #[test]
+    fn the_first_snapshot_anchors_the_cursor() {
+        let mut a = App::new(
+            Box::new(crate::store::MemoryStore::new(None)),
+            crate::ui::keymap::Keymap::defaults(),
+            crate::ui::theme::Theme::plain(),
+        );
+        a.on_sync(SyncEvent::Project(snapshot().project));
+        a.on_sync(SyncEvent::ItemsPage {
+            items: crate::ui::fixtures::items(),
+            loaded: 5,
+            total: 5,
+        });
+        assert_eq!(a.selected_id, Some(ItemId::new("a")));
+    }
+
+    #[test]
+    fn a_board_reorder_inside_a_lane_uses_project_order() {
+        let mut a = app_with(one_lane());
+        a.select_view(&crate::model::ViewId::new("V_board"));
+        a.board_sel = crate::ui::board::BoardSelection {
+            column: 0,
+            index: 2,
+        };
+        assert_eq!(selected(&a), "c");
+        assert_eq!(a.handle_key(key('K')), vec![Command::Send(1)]);
+        assert_eq!(
+            a.store.pending()[0].op,
+            Op::Reorder {
+                item: ItemId::new("c"),
+                after: Some(ItemId::new("a"))
+            }
+        );
+        a.board_sel = crate::ui::board::BoardSelection {
+            column: 0,
+            index: 0,
+        };
+        a.sync_selected_id();
+        a.handle_key(key('J'));
+        assert_eq!(
+            a.store.pending()[1].op,
+            Op::Reorder {
+                item: ItemId::new("a"),
+                after: Some(ItemId::new("c"))
+            }
+        );
+    }
+
+    #[test]
+    fn k_after_a_hidden_predecessor_still_follows_project_order() {
+        let mut snap = one_lane();
+        snap.order = ["b", "a", "c", "d", "e"]
+            .iter()
+            .map(|i| ItemId::new(*i))
+            .collect();
+        snap.project.views[1].filter = "-status:\"In Progress\"".into();
+        // b is In Progress again, so the filter hides it.
+        set_value(
+            &mut snap,
+            "b",
+            "F_status",
+            select_value("o_prog", "In Progress"),
+        );
+        let mut a = app_with(snap);
+        let board = crate::model::ViewId::new("V_board");
+        a.select_view(&board);
+        a.on_sync(SyncEvent::ViewIds {
+            view: board,
+            filter: "-status:\"In Progress\"".into(),
+            list: crate::store::ViewList {
+                ids: ["a", "c", "d", "e"]
+                    .iter()
+                    .map(|i| ItemId::new(*i))
+                    .collect(),
+                total: 4,
+                truncated: false,
+            },
+        });
+        a.board_sel = crate::ui::board::BoardSelection {
+            column: 0,
+            index: 1,
+        };
+        assert_eq!(selected(&a), "c");
+        a.handle_key(key('K'));
+        assert_eq!(
+            a.store.pending()[0].op,
+            Op::Reorder {
+                item: ItemId::new("c"),
+                after: Some(ItemId::new("b"))
+            }
+        );
+    }
+
+    #[test]
+    fn a_missing_predecessor_refuses_instead_of_sending_first() {
+        // b is in the view's list but not in project order (say, hydrated late).
+        let mut snap = one_lane();
+        snap.order = ["a", "c", "d", "e"]
+            .iter()
+            .map(|i| ItemId::new(*i))
+            .collect();
+        snap.project.views[1].filter = "-status:\"In Progress\"".into();
+        let mut a = app_with(snap);
+        let board = crate::model::ViewId::new("V_board");
+        a.select_view(&board);
+        a.on_sync(SyncEvent::ViewIds {
+            view: board,
+            filter: "-status:\"In Progress\"".into(),
+            list: crate::store::ViewList {
+                ids: ["a", "b", "c", "d", "e"]
+                    .iter()
+                    .map(|i| ItemId::new(*i))
+                    .collect(),
+                total: 5,
+                truncated: false,
+            },
+        });
+        a.board_sel = crate::ui::board::BoardSelection {
+            column: 0,
+            index: 2,
+        };
+        assert_eq!(selected(&a), "c");
+        assert!(a.handle_key(key('K')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Can't place this card here; refresh with r")
+        );
+        assert_eq!(a.pending_count(), 0);
+    }
+
+    #[test]
+    fn moves_into_and_out_of_a_merged_column_use_the_canonical_option() {
+        let mut snap = snapshot();
+        let col_field = snap
+            .project
+            .fields
+            .iter_mut()
+            .find(|f| f.name == "Status")
+            .unwrap();
+        let crate::model::FieldKind::SingleSelect { options } = &mut col_field.kind else {
+            panic!("Status is single-select")
+        };
+        options.push(crate::model::SelectOption {
+            id: OptionId::new("o_dup"),
+            name: "Todo".into(),
+            color: crate::model::OptionColor::Blue,
+        });
+        let mut a = app_with(snap);
+        a.select_view(&crate::model::ViewId::new("V_board"));
+        let names: Vec<String> = a
+            .board_columns()
+            .iter()
+            .map(|c| c.bucket.title.clone())
+            .collect();
+        assert_eq!(names, ["In Progress", "Done", "Todo", "No Status"]);
+        // d (Done) moves into the merged column: the canonical id is the last option's.
+        a.board_sel = crate::ui::board::BoardSelection {
+            column: 1,
+            index: 0,
+        };
+        assert_eq!(selected(&a), "d");
+        a.handle_key(key('>'));
+        assert_eq!(a.store.pending()[0].op, set_status("d", "o_dup", "Todo"));
+        // a sits on the alias id o_todo and moves out of the same column.
+        let col = a
+            .board_columns()
+            .iter()
+            .position(|c| c.items().iter().any(|i| i.id.0 == "a"))
+            .unwrap();
+        assert_eq!(col, 2);
+        a.board_sel = crate::ui::board::BoardSelection {
+            column: 2,
+            index: 0,
+        };
+        a.sync_selected_id();
+        assert_eq!(selected(&a), "a");
+        a.handle_key(key('<'));
+        assert_eq!(status(a.snapshot(), "a"), "Done");
+    }
+
+    #[test]
+    fn a_group_header_asks_for_an_item() {
+        let mut snap = snapshot();
+        snap.project.views[0].group_by = vec![FieldId::new("F_status")];
+        let mut a = app_with(snap);
+        assert!(
+            a.selected_item().is_none(),
+            "the cursor is on a group header"
+        );
+        assert!(a.handle_key(key('>')).is_empty());
+        assert_eq!(a.status.flash.as_deref(), Some("Select an item first"));
+    }
+
+    #[test]
+    fn edit_keys_reorder_the_open_detail_item() {
+        let mut a = test_app();
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(a.mode, Mode::Detail);
+        a.handle_key(key('J'));
+        assert_eq!(
+            a.store.pending()[0].op,
+            Op::Reorder {
+                item: ItemId::new("a"),
+                after: Some(ItemId::new("b"))
+            }
+        );
         assert_eq!(a.mode, Mode::Detail);
     }
 }
