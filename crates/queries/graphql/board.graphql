@@ -248,3 +248,13 @@ mutation UpdateItemPosition($project: ID!, $item: ID!, $after: ID) {
     items(first: 100) { nodes { id } }
   }
 }
+
+mutation AddDraftIssue($project: ID!, $title: String!, $body: String!) {
+  addProjectV2DraftIssue(input: {projectId: $project, title: $title, body: $body}) {
+    projectItem { ...ItemFields }
+  }
+}
+
+mutation DeleteItem($project: ID!, $item: ID!) {
+  deleteProjectV2Item(input: {projectId: $project, itemId: $item}) { deletedItemId }
+}

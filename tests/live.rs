@@ -4,46 +4,12 @@
 //! `cost` and `updated_filter` never record; add `-- --nocapture` to see what they measured.
 #![cfg(feature = "live")]
 
+mod common;
+
+use common::*;
 use project_boards::github::Github;
 use project_boards::github::client::FULL_PAGE;
-use project_boards::github::record::RecordingTransport;
-use project_boards::github::token::resolve_token_from_system;
-use project_boards::github::transport::{HttpTransport, Transport};
 use project_boards::model::*;
-use std::sync::Arc;
-
-fn testbed() -> (BoardRef, ProjectId) {
-    let t: toml::Table = std::fs::read_to_string("tests/testbed.toml")
-        .unwrap()
-        .parse()
-        .unwrap();
-    let board = BoardRef {
-        owner: t["owner"].as_str().unwrap().into(),
-        number: t["number"].as_integer().unwrap() as u32,
-    };
-    (board, ProjectId::new(t["project_id"].as_str().unwrap()))
-}
-
-fn http() -> Arc<dyn Transport> {
-    let token = resolve_token_from_system(None).expect("a token for the testbed");
-    Arc::new(HttpTransport::new(token.value))
-}
-
-fn recording() -> bool {
-    std::env::var("PB_RECORD").as_deref() == Ok("1")
-}
-
-/// A client for one test; with PB_RECORD=1 it records into tests/fixtures/recorded/<name>/.
-fn github(name: &str) -> Github {
-    let http = http();
-    if recording() {
-        let dir = std::path::Path::new("tests/fixtures/recorded").join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        Github::new(Arc::new(RecordingTransport::new(http, dir)))
-    } else {
-        Github::new(http)
-    }
-}
 
 #[tokio::test]
 async fn resolve() {
@@ -138,10 +104,7 @@ async fn detail() {
 async fn projects() {
     let (board, _) = testbed();
     let gh = github("projects");
-    let linked = gh
-        .list_repo_projects(&"tviles/project-boards-testbed".parse().unwrap())
-        .await
-        .unwrap();
+    let linked = gh.list_repo_projects(&testbed_repo()).await.unwrap();
     assert!(linked.iter().any(|p| p.board == board));
     let all = gh.list_viewer_projects().await.unwrap();
     assert!(all.iter().any(|p| p.board == board));

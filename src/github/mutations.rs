@@ -129,6 +129,37 @@ impl Github {
         item_payload(&response, "clearProjectV2ItemFieldValue", "projectV2Item")
     }
 
+    /// Adds a draft and returns its item.
+    pub async fn add_draft_issue(
+        &self,
+        project: &ProjectId,
+        title: &str,
+        body: &str,
+    ) -> Result<Item, GithubError> {
+        let request = GraphqlRequest::from_body(queries::AddDraftIssue::build_query(
+            queries::add_draft_issue::Variables {
+                project: project.0.clone(),
+                title: title.to_string(),
+                body: body.to_string(),
+            },
+        ));
+        let response = self.run(request).await?;
+        item_payload(&response, "addProjectV2DraftIssue", "projectItem")
+    }
+
+    /// Removes the item from the project. A draft is deleted with it; an issue or pull
+    /// request stays in its repository.
+    pub async fn delete_item(&self, project: &ProjectId, item: &ItemId) -> Result<(), GithubError> {
+        let request = GraphqlRequest::from_body(queries::DeleteItem::build_query(
+            queries::delete_item::Variables {
+                project: project.0.clone(),
+                item: item.0.clone(),
+            },
+        ));
+        let response = self.run(request).await?;
+        payload(&response, "deleteProjectV2Item").map(|_| ())
+    }
+
     /// Puts `item` right after `after` in the project's order; `None` puts it first.
     /// Returns the first 100 item ids in the order GitHub now has.
     pub async fn update_item_position(
@@ -384,5 +415,36 @@ mod tests {
             err.to_string().contains("Could not resolve to a node"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_draft_is_added_and_an_item_deleted() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push(
+            "AddDraftIssue",
+            json!({"addProjectV2DraftIssue": {"projectItem": item_json()}}),
+        );
+        t.push(
+            "DeleteItem",
+            json!({"deleteProjectV2Item": {"deletedItemId": "PVTI_1"}}),
+        );
+        let gh = Github::new(t.clone());
+        let item = gh
+            .add_draft_issue(&ProjectId::new("PVT_1"), "Idea", "Body")
+            .await
+            .unwrap();
+        assert_eq!(item.id.as_str(), "PVTI_1");
+        gh.delete_item(&ProjectId::new("PVT_1"), &item.id)
+            .await
+            .unwrap();
+        let r = t.requests();
+        assert_eq!(
+            (
+                r[0].variables["title"].as_str(),
+                r[0].variables["body"].as_str()
+            ),
+            (Some("Idea"), Some("Body"))
+        );
+        assert_eq!(r[1].variables["item"], "PVTI_1");
     }
 }

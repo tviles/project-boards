@@ -40,4 +40,6 @@ operation!(
     SetIterationValue,
     ClearFieldValue,
     UpdateItemPosition,
+    AddDraftIssue,
+    DeleteItem,
 );
