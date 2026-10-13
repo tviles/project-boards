@@ -215,18 +215,20 @@ impl App {
                 );
             }
         }
-        if item.url().is_some() && !choices.is_empty() {
+        if item.url().is_some() {
             choices.push(
                 Choice::new("Open in the browser", MenuEntry::Key(Action::OpenBrowser))
                     .with_detail(key(Action::OpenBrowser)),
             );
         }
         if choices.is_empty() {
-            let denial = check(OpKind::Move, &item, &self.edit_context()).err();
-            self.status.flash = Some(denial.map_or_else(
-                || "Nothing to do with this item".into(),
-                |d| self.denial_text(d),
-            ));
+            // Nothing at all: say why, with the first reason an edit key was refused.
+            let reason = edit::EDIT_ACTIONS
+                .iter()
+                .flat_map(|a| a.kinds())
+                .find_map(|k| self.check_here(*k, &item).err());
+            self.status.flash =
+                Some(reason.unwrap_or_else(|| "Nothing to do with this item".into()));
             return Vec::new();
         }
         let mut picker = ListPicker::new(
@@ -1064,10 +1066,26 @@ mod tests {
     }
 
     #[test]
-    fn a_read_only_board_has_no_menu_and_says_why() {
+    fn a_read_only_board_still_offers_the_browser_and_hints_nothing() {
         let mut a = test_app();
         let mut snap = a.snapshot().unwrap().clone();
         snap.project.viewer_can_update = false;
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        assert!(a.handle_key(key(' ')).is_empty());
+        assert_eq!(
+            menu(&a),
+            [("Open in the browser".to_string(), "o".to_string())]
+        );
+        assert_eq!(a.edit_hints(), None);
+    }
+
+    #[test]
+    fn with_nothing_to_do_the_menu_says_why() {
+        let mut a = test_app();
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.project.viewer_can_update = false;
+        snap.items.get_mut(&ItemId::new("a")).unwrap().content =
+            crate::model::ItemContent::Redacted;
         a.store.apply(crate::store::StoreUpdate::Replace(snap));
         assert!(a.handle_key(key(' ')).is_empty());
         assert!(a.popup.is_none());
@@ -1075,7 +1093,24 @@ mod tests {
             a.status.flash.as_deref(),
             Some("This board is read-only for you")
         );
-        assert_eq!(a.edit_hints(), None);
+    }
+
+    #[test]
+    fn rebinding_a_key_changes_its_menu_label_and_hint() {
+        let mut a = test_app();
+        let mut o = std::collections::BTreeMap::new();
+        o.insert("edit_field".to_string(), "E".to_string());
+        o.insert("action_menu".to_string(), "m".to_string());
+        a.keymap = crate::ui::keymap::Keymap::with_overrides(&o).0;
+        let hints = a.edit_hints().unwrap();
+        assert!(
+            hints.contains("E field") && hints.ends_with("m actions"),
+            "{hints}"
+        );
+        a.handle_key(key('m'));
+        assert!(menu(&a).contains(&("Edit a field".to_string(), "E".to_string())));
+        a.handle_key(key('E'));
+        assert!(matches!(a.popup, Some(Popup::Fields { .. })));
     }
 
     #[test]

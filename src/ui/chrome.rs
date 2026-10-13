@@ -419,11 +419,17 @@ fn status_line_with(left: &str, keep: Option<&str>, width: usize) -> String {
     }
     tail.push_str(" · ");
     tail.push_str(HELP);
-    if left.is_empty() {
-        let tail = tail.trim_start_matches(" · ");
-        return truncate_to_width(tail, width);
-    }
     let room = width.saturating_sub(display_width(&tail));
+    if left.is_empty() || room == 0 {
+        // Nothing of `left` fits: no leading separator, and never wider than the line.
+        let bare = tail.trim_start_matches(" · ");
+        let bare = if display_width(bare) <= width {
+            bare
+        } else {
+            HELP
+        };
+        return truncate_to_width(bare, width);
+    }
     format!("{}{tail}", truncate_to_width(left, room))
 }
 
@@ -945,5 +951,48 @@ mod tests {
         render_to_string(100, 40, |f| draw(f, &mut a));
         a.handle_key(key('j'));
         assert_eq!(a.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn status_line_never_overflows_and_help_stands_alone_when_there_is_no_room() {
+        for width in 6..=10 {
+            let line = status_line("e field · move", width);
+            assert!(display_width(&line) <= width, "{width}: {line}");
+            assert!(line.ends_with("? help"), "{width}: {line}");
+        }
+        assert_eq!(status_line("e field", 6), "? help");
+        assert_eq!(status_line("e field", 9), "? help");
+        assert_eq!(status_line("e field", 10), "… · ? help");
+    }
+
+    #[test]
+    fn a_wide_char_hint_cut_stays_within_the_width() {
+        for width in 10..30 {
+            let line = status_line("中文中文中文中文中文", width);
+            assert!(display_width(&line) <= width, "{width}: {line}");
+            assert!(line.ends_with(" · ? help"), "{width}: {line}");
+        }
+    }
+
+    #[test]
+    fn the_reminder_needs_twelve_cells_left_for_the_hints() {
+        let a = app();
+        let mut marks = ItemMarks::default();
+        marks.unmatched.insert(crate::model::ItemId::new("a"));
+        let min = display_width(crate::ui::marks::UNMATCHED_TEXT)
+            + display_width(" · ? help")
+            + MIN_HINT_ROOM;
+        for (width, shown) in [(min - 1, false), (min, true)] {
+            let screen = render_to_string(width as u16, 3, |f| {
+                draw_status(f, f.area(), &a, &marks);
+            });
+            let line = screen.lines().next().unwrap();
+            assert_eq!(
+                line.contains("⊘ no longer matches"),
+                shown,
+                "{width}: {line}"
+            );
+            assert!(line.ends_with("? help"), "{width}: {line}");
+        }
     }
 }
