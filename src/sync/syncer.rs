@@ -10,6 +10,19 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+/// The variant's name, for logs that must not carry GitHub's message text.
+fn error_kind(e: &GithubError) -> &'static str {
+    match e {
+        GithubError::NoToken => "NoToken",
+        GithubError::Unauthorized => "Unauthorized",
+        GithubError::InsufficientScopes { .. } => "InsufficientScopes",
+        GithubError::RateLimited { .. } => "RateLimited",
+        GithubError::Graphql(_) => "Graphql",
+        GithubError::Network(_) => "Network",
+        GithubError::Decode(_) => "Decode",
+    }
+}
+
 fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
@@ -118,11 +131,18 @@ impl Syncer {
         self.send(SyncEvent::Rate(self.gh.rate()));
     }
 
-    /// Sends one edit. The log names the op and the error, never titles or values.
+    /// Sends one edit and always reports exactly one `OpDone`, even if the send panics (it runs
+    /// in its own task). The log names the op, the item and the kind of error, never GitHub's
+    /// text, titles or values.
     pub async fn mutate(&self, id: crate::ops::OpId, project: &ProjectId, op: &crate::ops::Op) {
-        let result = crate::ops::send::send(&self.gh, project, op).await;
+        let (gh, project_id, sent) = (self.gh.clone(), project.clone(), op.clone());
+        let joined =
+            tokio::spawn(async move { crate::ops::send::send(&gh, &project_id, &sent).await })
+                .await;
+        let result = joined
+            .unwrap_or_else(|_| Err(GithubError::Network("the edit failed unexpectedly".into())));
         if let Err(e) = &result {
-            tracing::warn!(op = op.name(), item = %op.item(), error = %e, "edit failed");
+            tracing::warn!(op = op.name(), item = %op.item(), error = error_kind(e), "edit failed");
         }
         self.send(SyncEvent::OpDone { id, result });
         self.send(SyncEvent::Rate(self.gh.rate()));
@@ -578,5 +598,49 @@ mod tests {
             |e| matches!(e, SyncEvent::Access { scopes: Some(s) } if s == &["project".to_string()])
         ));
         assert!(matches!(events.last(), Some(SyncEvent::Rate(_))));
+    }
+
+    struct Panicking;
+
+    impl crate::github::transport::Transport for Panicking {
+        fn execute(
+            &self,
+            _request: crate::github::transport::GraphqlRequest,
+        ) -> futures::future::BoxFuture<
+            '_,
+            Result<crate::github::transport::GraphqlResponse, GithubError>,
+        > {
+            Box::pin(async { panic!("transport blew up") })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panicking_send_still_reports_one_op_done() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let s = Syncer::new(
+            Arc::new(Github::new(Arc::new(Panicking))),
+            tx,
+            2000,
+            IncrementalMode::DateTime,
+        );
+        let op = crate::ops::Op::ClearField {
+            item: ItemId::new("PVTI_1"),
+            field: FieldId::new("F_notes"),
+        };
+        s.mutate(9, &ProjectId::new("P"), &op).await;
+        let events = drain(&mut rx);
+        let dones = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    SyncEvent::OpDone {
+                        id: 9,
+                        result: Err(_)
+                    }
+                )
+            })
+            .count();
+        assert_eq!(dones, 1);
     }
 }

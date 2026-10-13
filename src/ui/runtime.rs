@@ -91,7 +91,11 @@ async fn drive(
                         // controller.generation() here (a bump may have happened since).
                         Some(r) => r.spawn(job, generation),
                         None => {
-                            tracing::warn!(job = job.kind(), "no GitHub client yet; job dropped")
+                            tracing::warn!(job = job.kind(), "no GitHub client yet; job dropped");
+                            // An edit must still be answered, or it would stay "sending".
+                            if let Some(event) = unanswered_edit(&job) {
+                                let _ = tx.send((generation, event));
+                            }
                         }
                     },
                     Effect::OpenUrl(url) => open_url(&url),
@@ -204,6 +208,17 @@ impl Runner {
     }
 }
 
+/// The `OpDone` that answers a Mutate job nobody could run (no token yet).
+fn unanswered_edit(job: &SyncJob) -> Option<crate::sync::SyncEvent> {
+    match job {
+        SyncJob::Mutate { id, .. } => Some(crate::sync::SyncEvent::OpDone {
+            id: *id,
+            result: Err(crate::github::GithubError::NoToken),
+        }),
+        _ => None,
+    }
+}
+
 fn open_url(url: &str) {
     // The controller already refuses these; checked again so nothing else can reach `open`.
     if !crate::ui::controller::is_web_link(url) {
@@ -222,5 +237,33 @@ fn open_url(url: &str) {
         .spawn();
     if let Err(e) = spawned {
         tracing::warn!(error = %e, "could not open the browser");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{FieldId, ItemId, ProjectId};
+    use crate::ops::Op;
+    use crate::sync::SyncEvent;
+
+    #[test]
+    fn an_edit_with_no_client_is_answered_with_an_error() {
+        let job = SyncJob::Mutate {
+            id: 3,
+            project: ProjectId::new("P"),
+            op: Op::ClearField {
+                item: ItemId::new("I"),
+                field: FieldId::new("F"),
+            },
+        };
+        assert!(matches!(
+            unanswered_edit(&job),
+            Some(SyncEvent::OpDone {
+                id: 3,
+                result: Err(_)
+            })
+        ));
+        assert!(unanswered_edit(&SyncJob::Projects(None)).is_none());
     }
 }
