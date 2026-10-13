@@ -81,6 +81,7 @@ fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
     let Some(popup) = &app.popup else { return };
     let theme = &app.theme;
     match popup {
+        Popup::Actions { picker, .. } => render_list_picker(frame, area, picker, theme),
         Popup::Fields { picker, .. } => render_list_picker(frame, area, picker, theme),
         Popup::Value { picker, .. } => render_list_picker(frame, area, picker, theme),
         Popup::Options { select, .. } => render_multiselect(frame, area, select, theme),
@@ -379,22 +380,18 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
                     .and(app.keymap.keys_for(Action::ClearFilter).first().copied())
                     .map(|k| format!(" · {} clear filter", k.label()))
                     .unwrap_or_default();
-                parts.push(format!(
-                    "? help · / search · f filter{clear} · L layout · q quit"
-                ));
-                // The reminder is only worth the room when `? help` still fits after it.
-                if !marks.unmatched.is_empty() {
-                    let mut with = parts.clone();
-                    with.insert(
-                        parts.len() - 1,
-                        crate::ui::marks::UNMATCHED_TEXT.to_string(),
-                    );
-                    if display_width(&with.join(" · ")) <= area.width as usize {
-                        parts = with;
-                    }
-                }
+                parts.extend(app.edit_hints());
+                parts.push(format!("/ search · f filter{clear} · L layout · q quit"));
+                // The reminder outranks the hints: they are cut for it, but only when what
+                // is left of them is still worth showing.
+                let reminder = (!marks.unmatched.is_empty()
+                    && area.width as usize
+                        >= display_width(crate::ui::marks::UNMATCHED_TEXT)
+                            + display_width(" · ? help")
+                            + MIN_HINT_ROOM)
+                    .then_some(crate::ui::marks::UNMATCHED_TEXT);
                 Line::styled(
-                    truncate_to_width(&parts.join(" · "), area.width as usize),
+                    status_line_with(&parts.join(" · "), reminder, area.width as usize),
                     app.theme.dim(),
                 )
             }
@@ -403,7 +400,36 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
+/// The least room the hints keep when the unmatched reminder is shown.
+const MIN_HINT_ROOM: usize = 12;
+
+/// The bottom hint line: `left` cut with `…` to fit, then `? help`, which always shows
+/// (pre-flight ruling 4).
+pub fn status_line(left: &str, width: usize) -> String {
+    status_line_with(left, None, width)
+}
+
+/// `status_line` with `keep` (never cut) between `left` and `? help`.
+fn status_line_with(left: &str, keep: Option<&str>, width: usize) -> String {
+    const HELP: &str = "? help";
+    let mut tail = String::new();
+    if let Some(keep) = keep {
+        tail.push_str(" · ");
+        tail.push_str(keep);
+    }
+    tail.push_str(" · ");
+    tail.push_str(HELP);
+    if left.is_empty() {
+        let tail = tail.trim_start_matches(" · ");
+        return truncate_to_width(tail, width);
+    }
+    let room = width.saturating_sub(display_width(&tail));
+    format!("{}{tail}", truncate_to_width(left, room))
+}
+
+/// The help overlay: every action with its keys. When the pane is too short for all of them
+/// it scrolls (`j`/`k`/arrows; any other key closes).
+fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
     let lines: Vec<Line> = Action::ALL
         .iter()
         .map(|a| {
@@ -414,7 +440,21 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
             ])
         })
         .collect();
-    let h = (lines.len() as u16 + 2).min(area.height);
+    let total = lines.len();
+    let h = (total as u16 + 2).min(area.height);
+    let visible = (h as usize).saturating_sub(2);
+    app.help_visible = visible;
+    let scrolls = total > visible;
+    app.help_scroll = app.help_scroll.min(total.saturating_sub(visible));
+    let title = if scrolls {
+        format!(
+            " keys {}-{} of {total} · j/k scroll · other key closes ",
+            app.help_scroll + 1,
+            app.help_scroll + visible
+        )
+    } else {
+        " keys · any key closes ".to_string()
+    };
     let w = 64.min(area.width);
     let rect = Rect {
         x: area.x + (area.width - w) / 2,
@@ -422,13 +462,14 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
         width: w,
         height: h,
     };
+    let shown: Vec<Line> = lines
+        .into_iter()
+        .skip(app.help_scroll)
+        .take(visible)
+        .collect();
     frame.render_widget(Clear, rect);
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" keys · any key closes "),
-        ),
+        Paragraph::new(shown).block(Block::default().borders(Borders::ALL).title(title)),
         rect,
     );
 }
@@ -851,5 +892,58 @@ mod tests {
             "the detail's border, not the table header: {screen}"
         );
         assert!(screen.contains("Edit · Fix crash"), "{screen}");
+    }
+
+    #[test]
+    fn the_hint_line_keeps_help_visible_when_narrow() {
+        let mut a = app();
+        let screen = render_to_string(50, 12, |f| draw(f, &mut a));
+        let last = screen.lines().last().unwrap();
+        assert!(last.ends_with(" · ? help"), "{last}");
+        assert!(
+            last.contains('…'),
+            "the edit hints are cut, not ? help: {last}"
+        );
+        assert!(display_width(last) <= 50);
+        assert_eq!(status_line("", 10), "? help");
+        assert_eq!(status_line("e field", 40), "e field · ? help");
+    }
+
+    #[test]
+    fn help_scrolls_when_the_pane_is_short() {
+        let mut a = app();
+        a.handle_key(key('?'));
+        let screen = render_to_string(100, 14, |f| draw(f, &mut a));
+        assert!(screen.contains("1-"), "{screen}");
+        assert!(screen.contains("j/k scroll"), "{screen}");
+        let first_key = a.help_scroll;
+        assert_eq!(first_key, 0);
+        // The last action is not visible until we scroll down.
+        let last = Action::ALL[Action::ALL.len() - 1].description();
+        assert!(!screen.contains(last), "{screen}");
+        for _ in 0..40 {
+            assert!(a.handle_key(key('j')).is_empty());
+            assert_eq!(a.mode, Mode::Help, "j scrolls, it does not close");
+            render_to_string(100, 14, |f| draw(f, &mut a));
+        }
+        let screen = render_to_string(100, 14, |f| draw(f, &mut a));
+        assert!(screen.contains(last), "{screen}");
+        assert!(
+            !screen.contains(Action::ALL[0].description()),
+            "scrolled past the first rows: {screen}"
+        );
+        a.handle_key(key('k'));
+        assert_eq!(a.mode, Mode::Help);
+        a.handle_key(key('x'));
+        assert_eq!(a.mode, Mode::Normal, "any other key closes");
+    }
+
+    #[test]
+    fn help_that_fits_closes_on_any_key() {
+        let mut a = app();
+        a.handle_key(key('?'));
+        render_to_string(100, 40, |f| draw(f, &mut a));
+        a.handle_key(key('j'));
+        assert_eq!(a.mode, Mode::Normal);
     }
 }

@@ -19,7 +19,7 @@ mod popups;
 
 use crate::ops::OpId;
 pub use edit::{Confirm, ConfirmAction, FailedEdit};
-pub use popups::{FieldTarget, LineKind, Popup};
+pub use popups::{FieldTarget, LineKind, MenuEntry, Popup};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -128,6 +128,9 @@ pub struct App {
     pub utc_offset: time::UtcOffset,
     /// Detail width used to number targets; kept in sync by the renderer.
     pub detail_width: u16,
+    /// The help overlay's first visible row, and how many rows it showed last draw.
+    pub help_scroll: usize,
+    pub help_visible: usize,
 }
 
 fn task_words(task: &SyncTask) -> &'static str {
@@ -190,6 +193,8 @@ impl App {
             popup: None,
             utc_offset: time::UtcOffset::UTC,
             detail_width: 80,
+            help_scroll: 0,
+            help_visible: usize::MAX,
         }
     }
 
@@ -675,6 +680,19 @@ impl App {
                 Some(false) => Vec::new(),
             },
             Mode::Help => {
+                // Too tall for the pane: the up and down keys scroll, anything else closes.
+                let max = Action::ALL.len().saturating_sub(self.help_visible);
+                match action {
+                    Some(Action::Down) if max > 0 => {
+                        self.help_scroll = (self.help_scroll + 1).min(max);
+                        return Vec::new();
+                    }
+                    Some(Action::Up) if max > 0 => {
+                        self.help_scroll = self.help_scroll.saturating_sub(1);
+                        return Vec::new();
+                    }
+                    _ => {}
+                }
                 self.mode = Mode::Normal;
                 if action == Some(Action::Quit) {
                     return self.request_quit();
@@ -806,15 +824,9 @@ impl App {
                         self.sticky.clear();
                         vec![Command::Refresh]
                     }
-                    Some(Action::OpenBrowser) => {
-                        let url = self
-                            .selected_item()
-                            .and_then(|i| i.url())
-                            .map(String::from)
-                            .or_else(|| self.project().map(|p| p.url.clone()));
-                        url.map(|u| vec![Command::OpenUrl(u)]).unwrap_or_default()
-                    }
+                    Some(Action::OpenBrowser) => self.open_in_browser(),
                     Some(Action::Help) => {
+                        self.help_scroll = 0;
                         self.mode = Mode::Help;
                         Vec::new()
                     }

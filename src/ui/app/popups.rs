@@ -23,8 +23,20 @@ pub enum FieldTarget {
     Field(FieldId),
 }
 
+/// An entry of the action menu.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MenuEntry {
+    /// Runs the action, as its key would.
+    Key(Action),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Popup {
+    /// Space: every operation the item allows, with its key.
+    Actions {
+        item: ItemId,
+        picker: ListPicker<MenuEntry>,
+    },
     /// `e`: which field of `item` to edit.
     Fields {
         item: ItemId,
@@ -179,6 +191,54 @@ impl App {
     pub(crate) fn close_popup(&mut self) {
         self.popup = None;
         self.mode = self.base_mode();
+    }
+
+    /// Space: every operation `action_item` allows, each with its key; or why there are none.
+    pub(crate) fn open_action_menu(&mut self) -> Vec<Command> {
+        let Some(item) = self.action_item().cloned() else {
+            self.status.flash = Some("Select an item first".into());
+            return Vec::new();
+        };
+        let key = |a: Action| {
+            self.keymap
+                .keys_for(a)
+                .first()
+                .map(|k| k.label())
+                .unwrap_or_default()
+        };
+        let mut choices: Vec<Choice<MenuEntry>> = Vec::new();
+        for &action in edit::EDIT_ACTIONS {
+            if let Some(kind) = self.allowed_kind(action, &item) {
+                choices.push(
+                    Choice::new(edit::menu_label(action, kind), MenuEntry::Key(action))
+                        .with_detail(key(action)),
+                );
+            }
+        }
+        if item.url().is_some() && !choices.is_empty() {
+            choices.push(
+                Choice::new("Open in the browser", MenuEntry::Key(Action::OpenBrowser))
+                    .with_detail(key(Action::OpenBrowser)),
+            );
+        }
+        if choices.is_empty() {
+            let denial = check(OpKind::Move, &item, &self.edit_context()).err();
+            self.status.flash = Some(denial.map_or_else(
+                || "Nothing to do with this item".into(),
+                |d| self.denial_text(d),
+            ));
+            return Vec::new();
+        }
+        let mut picker = ListPicker::new(
+            format!("Actions · {}", truncate_to_width(item.title(), 40)),
+            choices,
+        );
+        picker.typing = false;
+        self.open_popup(Popup::Actions {
+            item: item.id,
+            picker,
+        });
+        Vec::new()
     }
 
     /// `e`: the menu of the item's editable fields, each with its current value.
@@ -356,6 +416,27 @@ impl App {
         };
         let today = self.today();
         match &mut popup {
+            Popup::Actions { picker, .. } => match picker.handle(&key) {
+                ListOutcome::Chosen(MenuEntry::Key(action)) => {
+                    self.close_popup();
+                    return self.run_action(action);
+                }
+                ListOutcome::Key(k) => {
+                    let listed = self
+                        .keymap
+                        .action(&k)
+                        .filter(|a| picker.choices.iter().any(|c| c.value == MenuEntry::Key(*a)));
+                    if let Some(action) = listed {
+                        self.close_popup();
+                        return self.run_action(action);
+                    }
+                }
+                ListOutcome::Cancel => {
+                    self.close_popup();
+                    return Vec::new();
+                }
+                ListOutcome::None => {}
+            },
             Popup::Fields { item, picker } => match picker.handle(&key) {
                 ListOutcome::Chosen(FieldTarget::Field(field)) => {
                     let item = item.clone();
@@ -914,5 +995,147 @@ mod tests {
         a.store.apply(crate::store::StoreUpdate::Replace(snap));
         a.handle_key(key('e'));
         assert_eq!(a.status.flash.as_deref(), Some("Select an item first"));
+    }
+
+    fn menu(a: &App) -> Vec<(String, String)> {
+        match &a.popup {
+            Some(Popup::Actions { picker, .. }) => picker
+                .choices
+                .iter()
+                .map(|c| (c.label.clone(), c.detail.clone()))
+                .collect(),
+            other => panic!("expected the action menu, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn space_lists_every_operation_the_item_allows_with_its_key() {
+        let mut a = test_app();
+        a.handle_key(key(' '));
+        let rows = menu(&a);
+        // Later tasks add entries; these must stay, the moves first.
+        assert_eq!(
+            rows[0],
+            ("Move to the previous column".to_string(), "<".to_string())
+        );
+        for (label, key) in [
+            ("Move to the next column", ">"),
+            ("Move up", "K"),
+            ("Move down", "J"),
+            ("Edit a field", "e"),
+            ("Open in the browser", "o"),
+        ] {
+            assert!(
+                rows.iter().any(|(l, d)| l == label && d == key),
+                "{label} ({key}) in {rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn choosing_from_the_menu_or_pressing_a_listed_key_runs_it() {
+        let mut a = test_app();
+        a.handle_key(key(' '));
+        a.handle_key(key('j'));
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::Send(1)],
+            "move to the next column"
+        );
+        assert_eq!(a.mode, Mode::Normal);
+        a.handle_key(key(' '));
+        assert!(a.handle_key(key('e')).is_empty());
+        assert!(
+            matches!(a.popup, Some(Popup::Fields { .. })),
+            "e opened the field menu"
+        );
+    }
+
+    #[test]
+    fn the_menu_ignores_unlisted_keys_and_esc_closes_it() {
+        let mut a = test_app();
+        a.handle_key(key(' '));
+        a.handle_key(key('q'));
+        a.handle_key(key('z'));
+        assert!(matches!(a.popup, Some(Popup::Actions { .. })), "still open");
+        a.handle_key(code(KeyCode::Esc));
+        assert!(a.popup.is_none());
+        assert_eq!(a.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn a_read_only_board_has_no_menu_and_says_why() {
+        let mut a = test_app();
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.project.viewer_can_update = false;
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        assert!(a.handle_key(key(' ')).is_empty());
+        assert!(a.popup.is_none());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("This board is read-only for you")
+        );
+        assert_eq!(a.edit_hints(), None);
+    }
+
+    #[test]
+    fn hints_list_the_keys_the_item_allows() {
+        let a = test_app();
+        let hints = a.edit_hints().unwrap();
+        // Asserted piece by piece: later tasks insert `a assignees`, `c comment`, `X close`, ...
+        assert!(hints.contains("< > move · J K reorder"), "{hints}");
+        assert!(hints.contains("e field"), "{hints}");
+        assert!(hints.ends_with("space actions"), "{hints}");
+        let mut a = a;
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.items.get_mut(&ItemId::new("a")).unwrap().content =
+            crate::model::ItemContent::Redacted;
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        let hints = a.edit_hints().unwrap();
+        assert!(
+            hints.contains("< > move") && hints.ends_with("space actions"),
+            "{hints}"
+        );
+        assert!(
+            !hints.contains("reorder") && !hints.contains("field"),
+            "{hints}"
+        );
+    }
+
+    /// Pre-flight ruling 7: what the view rules out is neither offered nor hinted.
+    #[test]
+    fn a_sorted_view_neither_offers_nor_hints_reorder() {
+        let mut a = test_app();
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.project.views[0].sort_by = vec![crate::model::SortSpec {
+            field: FieldId::new("F_prio"),
+            direction: crate::model::SortDirection::Desc,
+        }];
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        let hints = a.edit_hints().unwrap();
+        assert!(
+            !hints.contains("reorder") && hints.contains("< > move"),
+            "{hints}"
+        );
+        a.handle_key(key(' '));
+        let rows = menu(&a);
+        assert!(
+            !rows.iter().any(|(l, _)| l == "Move up" || l == "Move down"),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|(l, _)| l == "Move to the next column"),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn space_works_from_the_detail_too() {
+        let mut a = test_app();
+        a.handle_key(code(KeyCode::Enter));
+        a.handle_key(key(' '));
+        assert!(matches!(a.popup, Some(Popup::Actions { .. })));
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!(a.mode, Mode::Detail);
     }
 }

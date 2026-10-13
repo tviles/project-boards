@@ -60,7 +60,108 @@ pub fn error_message(error: &GithubError) -> String {
     }
 }
 
+/// The edit keys in the order the action menu and the hints list them.
+pub(crate) const EDIT_ACTIONS: &[Action] = &[
+    Action::MovePrevColumn,
+    Action::MoveNextColumn,
+    Action::ReorderUp,
+    Action::ReorderDown,
+    Action::EditField,
+];
+
+/// The menu's words for an action.
+pub(crate) fn menu_label(action: Action, kind: OpKind) -> String {
+    match action {
+        Action::MovePrevColumn => "Move to the previous column".into(),
+        Action::MoveNextColumn => "Move to the next column".into(),
+        Action::ReorderUp => "Move up".into(),
+        Action::ReorderDown => "Move down".into(),
+        Action::EditField => "Edit a field".into(),
+        _ => {
+            let label = kind.label();
+            let mut chars = label.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// The hints' word for an action's key, e.g. `e field`.
+fn hint_word(action: Action, kind: OpKind) -> &'static str {
+    match action {
+        Action::EditField => "field",
+        _ => kind.label(),
+    }
+}
+
+/// The single-action keys the hints list before move and reorder.
+const HINTED: &[Action] = &[Action::EditField];
+
 impl App {
+    /// The first operation of `action` allowed on `item` here (`check_here`: the matrix and
+    /// the view's rules).
+    pub(crate) fn allowed_kind(&self, action: Action, item: &Item) -> Option<OpKind> {
+        action
+            .kinds()
+            .iter()
+            .copied()
+            .find(|k| self.check_here(*k, item).is_ok())
+    }
+
+    /// Runs `action` as its key would (the action menu uses this).
+    pub(crate) fn run_action(&mut self, action: Action) -> Vec<Command> {
+        if let Some(cmds) = self.edit_key(action) {
+            return cmds;
+        }
+        match action {
+            Action::OpenBrowser => self.open_in_browser(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The item's page, else the board's.
+    pub(crate) fn open_in_browser(&self) -> Vec<Command> {
+        self.action_item()
+            .and_then(|i| i.url())
+            .map(String::from)
+            .or_else(|| self.project().map(|p| p.url.clone()))
+            .map(|u| vec![Command::OpenUrl(u)])
+            .unwrap_or_default()
+    }
+
+    /// The edit keys the item allows, for the status line: single-key edits first (`e field`),
+    /// then `< > move · J K reorder · space actions`. `None` with no item or nothing allowed.
+    pub fn edit_hints(&self) -> Option<String> {
+        let item = self.action_item()?;
+        let ctx = self.edit_context();
+        if crate::model::capabilities(item, &ctx).is_empty() {
+            return None;
+        }
+        let key = |a: Action| self.keymap.keys_for(a).first().map(|k| k.label());
+        let mut parts = Vec::new();
+        for &action in HINTED {
+            if let (Some(kind), Some(k)) = (self.allowed_kind(action, item), key(action)) {
+                parts.push(format!("{k} {}", hint_word(action, kind)));
+            }
+        }
+        if self.check_here(OpKind::Move, item).is_ok()
+            && let (Some(p), Some(n)) = (key(Action::MovePrevColumn), key(Action::MoveNextColumn))
+        {
+            parts.push(format!("{p} {n} move"));
+        }
+        if self.check_here(OpKind::Reorder, item).is_ok()
+            && let (Some(d), Some(u)) = (key(Action::ReorderDown), key(Action::ReorderUp))
+        {
+            parts.push(format!("{d} {u} reorder"));
+        }
+        if let Some(k) = key(Action::ActionMenu) {
+            parts.push(format!("{k} actions"));
+        }
+        Some(parts.join(" · "))
+    }
+
     pub fn edit_context(&self) -> EditContext {
         EditContext {
             viewer_can_update: self.project().is_some_and(|p| p.viewer_can_update),
@@ -220,6 +321,7 @@ impl App {
             Action::ReorderUp => self.reorder(false),
             Action::ReorderDown => self.reorder(true),
             Action::EditField => self.open_field_menu(),
+            Action::ActionMenu => self.open_action_menu(),
             _ => return None,
         };
         Some(cmds)
