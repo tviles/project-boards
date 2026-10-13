@@ -5,7 +5,9 @@ use super::*;
 use crate::model::{Denial, EditContext, OpKind, check, check_new};
 use crate::ops::{Confirmed, NewItem, Op, OpId};
 use crate::store::BoardSnapshot;
-use crate::ui::app::popups::{assignee_options, fill_checklist, label_options, milestone_choices};
+use crate::ui::app::popups::{
+    GONE, assignee_options, fill_checklist, label_options, milestone_choices,
+};
 use crate::ui::marks::ItemMarks;
 use crate::ui::table::Row;
 use std::collections::HashMap;
@@ -268,34 +270,40 @@ impl App {
             return;
         };
         match &mut popup {
-            Popup::Assignees { item, repo, select } if select.loading => fill_checklist(
+            Popup::Assignees {
+                item, repo, select, ..
+            } if select.loading => fill_checklist(
                 select,
                 self.candidates.get(repo),
                 self.item(item),
                 assignee_options,
                 |u: &UserRef| u.login.clone(),
             ),
-            Popup::Labels { item, repo, select } if select.loading => fill_checklist(
+            Popup::Labels {
+                item, repo, select, ..
+            } if select.loading => fill_checklist(
                 select,
                 self.candidates.get(repo),
                 self.item(item),
                 label_options,
                 |l: &LabelRef| l.name.clone(),
             ),
-            Popup::Milestone { item, repo, picker } if picker.loading => {
-                match self.candidates.get(repo) {
-                    Some(Lookup::Ready(c)) => {
-                        if let Some(it) = self.item(item) {
-                            picker.set_choices(milestone_choices(c, it));
-                        }
-                    }
-                    Some(Lookup::Failed(e)) => {
+            Popup::Milestone {
+                item, repo, picker, ..
+            } if picker.loading => match self.candidates.get(repo) {
+                Some(Lookup::Ready(c)) => match self.item(item) {
+                    Some(it) => picker.set_choices(milestone_choices(c, it)),
+                    None => {
                         picker.loading = false;
-                        picker.error = Some(e.clone());
+                        picker.error = Some(GONE.into());
                     }
-                    _ => {}
+                },
+                Some(Lookup::Failed(e)) => {
+                    picker.loading = false;
+                    picker.error = Some(e.clone());
                 }
-            }
+                _ => {}
+            },
             _ => {}
         }
         self.popup = Some(popup);
@@ -569,8 +577,8 @@ impl App {
             Action::MoveNextColumn => self.move_card(1),
             Action::ReorderUp => self.reorder(false),
             Action::ReorderDown => self.reorder(true),
-            Action::Assignees => self.open_candidates(OpKind::Assignees),
-            Action::Labels => self.open_candidates(OpKind::Labels),
+            Action::Assignees => self.open_candidates(OpKind::Assignees, false),
+            Action::Labels => self.open_candidates(OpKind::Labels, false),
             Action::EditField => self.open_field_menu(),
             Action::ActionMenu => self.open_action_menu(),
             Action::ErrorLog => self.open_error_log(),

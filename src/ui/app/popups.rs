@@ -63,18 +63,24 @@ pub enum Popup {
     Assignees {
         item: ItemId,
         repo: RepoSlug,
+        /// Opened from the `e` menu, so Esc goes back to it.
+        from_menu: bool,
         select: MultiSelect<UserRef>,
     },
     /// `t`: the item's labels, from its repository's labels.
     Labels {
         item: ItemId,
         repo: RepoSlug,
+        /// Opened from the `e` menu, so Esc goes back to it.
+        from_menu: bool,
         select: MultiSelect<LabelRef>,
     },
     /// The item's milestone; `None` clears it.
     Milestone {
         item: ItemId,
         repo: RepoSlug,
+        /// Opened from the `e` menu, so Esc goes back to it.
+        from_menu: bool,
         picker: ListPicker<Option<MilestoneRef>>,
     },
     /// A text, number or date field.
@@ -210,6 +216,9 @@ fn item_ref(item: &crate::model::Item) -> String {
     }
 }
 
+/// Shown in a popover whose item left the board while its candidates loaded.
+pub(super) const GONE: &str = "This item is no longer on the board";
+
 /// The users to offer: the repository's, plus current assignees it did not list (so they
 /// can be removed), and the logins assigned now.
 pub(super) fn assignee_options(
@@ -276,14 +285,14 @@ pub(super) fn milestone_choices(
     let current = item.content_fields.milestone.clone();
     let mut list = c.milestones.clone();
     if let Some(m) = &current
-        && !list.contains(m)
+        && !list.iter().any(|x| x.id == m.id)
     {
         list.push(m.clone());
     }
     let mut out: Vec<_> = list
         .into_iter()
         .map(|m| {
-            let mark = if current.as_ref() == Some(&m) {
+            let mark = if current.as_ref().is_some_and(|c| c.id == m.id) {
                 "✓"
             } else {
                 ""
@@ -307,6 +316,10 @@ pub(super) fn fill_checklist<T: Clone>(
     name: impl Fn(&T) -> String,
 ) {
     match lookup {
+        Some(Lookup::Ready(_)) if item.is_none() => {
+            select.loading = false;
+            select.error = Some(GONE.into());
+        }
         Some(Lookup::Ready(c)) => {
             if let Some(it) = item {
                 let (choices, current) = options(c, it);
@@ -410,13 +423,12 @@ impl App {
                     .with_detail(item.field_value(f).map(|v| v.display()).unwrap_or_default())
             })
             .collect();
-        let ctx = self.edit_context();
         for (kind, label, target) in [
             (OpKind::Assignees, "Assignees", FieldTarget::Assignees),
             (OpKind::Labels, "Labels", FieldTarget::Labels),
             (OpKind::Milestone, "Milestone", FieldTarget::Milestone),
         ] {
-            if check(kind, &item, &ctx).is_ok() {
+            if self.allowed(kind, &item) {
                 let current = match kind {
                     OpKind::Assignees => item.assignees().join(", "),
                     OpKind::Labels => item.label_names().join(", "),
@@ -444,7 +456,7 @@ impl App {
 
     /// `a`, `t`, or the milestone entry: a popover over the item's repository candidates,
     /// loaded on first need.
-    pub(crate) fn open_candidates(&mut self, kind: OpKind) -> Vec<Command> {
+    pub(crate) fn open_candidates(&mut self, kind: OpKind, from_menu: bool) -> Vec<Command> {
         let Some(item) = self.action_item().cloned() else {
             self.status.flash = Some("Select an item first".into());
             return Vec::new();
@@ -454,10 +466,12 @@ impl App {
             return Vec::new();
         }
         let Some(repo) = self.candidate_repo(&item) else {
-            self.status.flash = Some(
+            self.status.flash = Some(if item.reference().is_some() {
+                "Can't tell this item's repository; refresh with r".into()
+            } else {
                 "Open the board from a repository, or link one to the project, to assign drafts"
-                    .into(),
-            );
+                    .into()
+            });
             return Vec::new();
         };
         let title = |what: &str| format!("{what} · {}", item_ref(&item));
@@ -466,16 +480,19 @@ impl App {
             OpKind::Assignees => Popup::Assignees {
                 item: id,
                 repo: r,
+                from_menu,
                 select: MultiSelect::loading(title("Assignees")),
             },
             OpKind::Labels => Popup::Labels {
                 item: id,
                 repo: r,
+                from_menu,
                 select: MultiSelect::loading(title("Labels")),
             },
             _ => Popup::Milestone {
                 item: id,
                 repo: r,
+                from_menu,
                 picker: ListPicker::loading(title("Milestone")),
             },
         };
@@ -509,14 +526,18 @@ impl App {
         outcome: MultiOutcome<T>,
         item: ItemId,
         kind: OpKind,
+        back: Option<FieldTarget>,
         op: impl FnOnce(ItemId, ContentId, Vec<T>, Vec<T>, Vec<T>) -> Op,
     ) -> Option<Vec<Command>> {
         match outcome {
             MultiOutcome::None => None,
-            MultiOutcome::Cancel => {
-                self.close_popup();
-                Some(Vec::new())
-            }
+            MultiOutcome::Cancel => Some(match back {
+                Some(target) => self.back_to_menu(&target),
+                None => {
+                    self.close_popup();
+                    Vec::new()
+                }
+            }),
             MultiOutcome::Apply {
                 added,
                 removed,
@@ -683,7 +704,7 @@ impl App {
                 }
                 ListOutcome::Chosen(MenuEntry::Milestone) => {
                     self.close_popup();
-                    return self.open_candidates(OpKind::Milestone);
+                    return self.open_candidates(OpKind::Milestone, false);
                 }
                 ListOutcome::Key(k) => {
                     let listed = self
@@ -707,13 +728,13 @@ impl App {
                     return self.open_field_editor(&item, &field);
                 }
                 ListOutcome::Chosen(FieldTarget::Assignees) => {
-                    return self.open_candidates(OpKind::Assignees);
+                    return self.open_candidates(OpKind::Assignees, true);
                 }
                 ListOutcome::Chosen(FieldTarget::Labels) => {
-                    return self.open_candidates(OpKind::Labels);
+                    return self.open_candidates(OpKind::Labels, true);
                 }
                 ListOutcome::Chosen(FieldTarget::Milestone) => {
-                    return self.open_candidates(OpKind::Milestone);
+                    return self.open_candidates(OpKind::Milestone, true);
                 }
                 ListOutcome::Cancel => {
                     self.close_popup();
@@ -731,8 +752,8 @@ impl App {
                     return self.submit_value(item, field, value);
                 }
                 ListOutcome::Cancel => {
-                    let field = field.clone();
-                    return self.back_to_menu(&field);
+                    let target = FieldTarget::Field(field.clone());
+                    return self.back_to_menu(&target);
                 }
                 ListOutcome::None | ListOutcome::Key(_) => {}
             },
@@ -759,12 +780,18 @@ impl App {
                     return self.submit_value(item, field, value);
                 }
                 MultiOutcome::Cancel => {
-                    let field = field.clone();
-                    return self.back_to_menu(&field);
+                    let target = FieldTarget::Field(field.clone());
+                    return self.back_to_menu(&target);
                 }
                 MultiOutcome::None => {}
             },
-            Popup::Assignees { item, select, .. } => {
+            Popup::Assignees {
+                item,
+                select,
+                from_menu,
+                ..
+            } => {
+                let back = from_menu.then_some(FieldTarget::Assignees);
                 let (item, outcome) = (item.clone(), select.handle(&key));
                 let built = |item, content, add, remove, all| Op::Assignees {
                     item,
@@ -773,11 +800,19 @@ impl App {
                     remove,
                     all,
                 };
-                if let Some(cmds) = self.apply_checklist(outcome, item, OpKind::Assignees, built) {
+                if let Some(cmds) =
+                    self.apply_checklist(outcome, item, OpKind::Assignees, back, built)
+                {
                     return cmds;
                 }
             }
-            Popup::Labels { item, select, .. } => {
+            Popup::Labels {
+                item,
+                select,
+                from_menu,
+                ..
+            } => {
+                let back = from_menu.then_some(FieldTarget::Labels);
                 let (item, outcome) = (item.clone(), select.handle(&key));
                 let built = |item, content, add, remove, _all| Op::Labels {
                     item,
@@ -785,18 +820,24 @@ impl App {
                     add,
                     remove,
                 };
-                if let Some(cmds) = self.apply_checklist(outcome, item, OpKind::Labels, built) {
+                if let Some(cmds) = self.apply_checklist(outcome, item, OpKind::Labels, back, built)
+                {
                     return cmds;
                 }
             }
-            Popup::Milestone { item, picker, .. } => match picker.handle(&key) {
+            Popup::Milestone {
+                item,
+                picker,
+                from_menu,
+                ..
+            } => match picker.handle(&key) {
                 ListOutcome::Chosen(milestone) => {
                     let item = item.clone();
                     self.close_popup();
                     let current = self
                         .item(&item)
                         .and_then(|i| i.content_fields.milestone.clone());
-                    if current == milestone {
+                    if current.as_ref().map(|m| &m.id) == milestone.as_ref().map(|m| &m.id) {
                         return Vec::new();
                     }
                     self.selected_id = Some(item.clone());
@@ -810,6 +851,9 @@ impl App {
                     });
                 }
                 ListOutcome::Cancel => {
+                    if *from_menu {
+                        return self.back_to_menu(&FieldTarget::Milestone);
+                    }
                     self.close_popup();
                     return Vec::new();
                 }
@@ -831,8 +875,8 @@ impl App {
                     Err(e) => *error = Some(e),
                 },
                 LineOutcome::Cancel => {
-                    let field = field.clone();
-                    return self.back_to_menu(&field);
+                    let target = FieldTarget::Field(field.clone());
+                    return self.back_to_menu(&target);
                 }
                 LineOutcome::Typing => *error = None,
             },
@@ -842,14 +886,11 @@ impl App {
     }
 
     /// Esc in a value editor: back to the field menu, on the field that was being edited.
-    fn back_to_menu(&mut self, field: &FieldId) -> Vec<Command> {
+    fn back_to_menu(&mut self, target: &FieldTarget) -> Vec<Command> {
         self.close_popup();
         let cmds = self.open_field_menu();
         if let Some(Popup::Fields { picker, .. }) = &mut self.popup
-            && let Some(at) = picker
-                .choices
-                .iter()
-                .position(|c| c.value == FieldTarget::Field(field.clone()))
+            && let Some(at) = picker.choices.iter().position(|c| c.value == *target)
         {
             picker.selected = at;
         }
@@ -1779,5 +1820,187 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn replace_item(a: &mut App, edit: impl FnOnce(&mut crate::model::Item)) {
+        let mut snap = a.snapshot().unwrap().clone();
+        edit(snap.items.get_mut(&ItemId::new("a")).unwrap());
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+    }
+
+    fn ready(a: &mut App) {
+        a.on_sync(SyncEvent::Candidates {
+            repo: repo(),
+            candidates: candidates(),
+        });
+    }
+
+    #[test]
+    fn esc_from_a_built_in_opened_via_e_goes_back_to_the_menu_on_its_entry() {
+        for (name, target) in [
+            ("assignees", FieldTarget::Assignees),
+            ("labels", FieldTarget::Labels),
+            ("milestone", FieldTarget::Milestone),
+        ] {
+            let mut a = test_app();
+            ready(&mut a);
+            a.handle_key(key('e'));
+            type_text(&mut a, name);
+            a.handle_key(code(KeyCode::Enter));
+            assert!(!matches!(a.popup, Some(Popup::Fields { .. })), "{name}");
+            a.handle_key(code(KeyCode::Esc));
+            let Some(Popup::Fields { picker, .. }) = &a.popup else {
+                panic!("{name}: back to the field menu")
+            };
+            assert_eq!(picker.current().unwrap().value, target, "{name}");
+            a.handle_key(code(KeyCode::Esc));
+            assert!(a.popup.is_none());
+        }
+    }
+
+    #[test]
+    fn esc_from_a_and_t_closes_and_returns_to_the_detail() {
+        for key_char in ['a', 't'] {
+            for detail in [false, true] {
+                let mut a = test_app();
+                ready(&mut a);
+                if detail {
+                    a.handle_key(code(KeyCode::Enter));
+                }
+                let base = a.mode;
+                a.handle_key(key(key_char));
+                assert_eq!(a.mode, Mode::Popup);
+                a.handle_key(code(KeyCode::Esc));
+                assert!(a.popup.is_none(), "closed, not the menu");
+                assert_eq!(a.mode, base);
+            }
+        }
+        let mut a = test_app();
+        ready(&mut a);
+        a.handle_key(code(KeyCode::Enter));
+        a.handle_key(key('a'));
+        a.handle_key(code(KeyCode::Down));
+        a.handle_key(key(' '));
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(a.mode, Mode::Detail);
+    }
+
+    #[test]
+    fn a_milestone_opened_from_the_space_menu_closes_on_esc() {
+        let mut a = test_app();
+        ready(&mut a);
+        a.handle_key(key(' '));
+        let Some(Popup::Actions { picker, .. }) = &a.popup else {
+            panic!("menu")
+        };
+        let at = picker
+            .choices
+            .iter()
+            .position(|c| c.label == "Milestone")
+            .unwrap();
+        for _ in 0..at {
+            a.handle_key(key('j'));
+        }
+        a.handle_key(code(KeyCode::Enter));
+        assert!(matches!(a.popup, Some(Popup::Milestone { .. })));
+        a.handle_key(code(KeyCode::Esc));
+        assert!(a.popup.is_none());
+    }
+
+    #[test]
+    fn a_renamed_current_milestone_is_matched_by_id() {
+        let mut a = test_app();
+        replace_item(&mut a, |i| {
+            i.content_fields.milestone = Some(MilestoneRef {
+                id: "MI_1".into(),
+                title: "old name".into(),
+            });
+        });
+        ready(&mut a);
+        a.handle_key(key('e'));
+        type_text(&mut a, "milestone");
+        a.handle_key(code(KeyCode::Enter));
+        let Some(Popup::Milestone { picker, .. }) = &a.popup else {
+            panic!("milestone")
+        };
+        let titles: Vec<_> = picker.choices.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(titles, ["v1", "v2", "No milestone"], "no duplicate row");
+        assert_eq!(picker.choices[0].detail, "✓");
+        assert_eq!(picker.current().unwrap().label, "v1");
+        // Choosing it again is a no-op even though the title differs.
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        assert_eq!(a.pending_count(), 0);
+    }
+
+    #[test]
+    fn an_item_that_leaves_while_candidates_load_stops_the_spinner() {
+        for key_char in ['a', 't'] {
+            let mut a = test_app();
+            a.handle_key(key(key_char));
+            let mut snap = a.snapshot().unwrap().clone();
+            snap.items.remove(&ItemId::new("a"));
+            a.store.apply(crate::store::StoreUpdate::Replace(snap));
+            ready(&mut a);
+            let (loading, error) = match &a.popup {
+                Some(Popup::Assignees { select, .. }) => (select.loading, select.error.clone()),
+                Some(Popup::Labels { select, .. }) => (select.loading, select.error.clone()),
+                other => panic!("{other:?}"),
+            };
+            assert!(!loading);
+            assert_eq!(
+                error.as_deref(),
+                Some("This item is no longer on the board")
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_draft_with_an_unreadable_repository_is_not_blamed_on_drafts() {
+        let mut a = test_app();
+        replace_item(&mut a, |i| {
+            if let crate::model::ItemContent::Issue { reference, .. } = &mut i.content {
+                reference.repo = "not a slug".into();
+            }
+        });
+        assert!(a.handle_key(key('a')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Can't tell this item's repository; refresh with r")
+        );
+    }
+
+    #[test]
+    fn labels_with_spaces_and_emoji_are_prechecked_when_the_item_has_them() {
+        let mut a = test_app();
+        replace_item(&mut a, |i| {
+            i.values.insert(
+                FieldId::new("F_labels"),
+                FieldValue::Labels(vec![
+                    crate::model::Label {
+                        name: "Good First Issue".into(),
+                        color: "0075ca".into(),
+                    },
+                    crate::model::Label {
+                        name: "🐛 triage".into(),
+                        color: "0075ca".into(),
+                    },
+                ]),
+            );
+        });
+        ready(&mut a);
+        a.handle_key(key('t'));
+        let Some(Popup::Labels { select, .. }) = &a.popup else {
+            panic!("labels")
+        };
+        let on: Vec<_> = select
+            .options
+            .iter()
+            .zip(&select.checked)
+            .filter(|(_, c)| **c)
+            .map(|(o, _)| o.label.as_str())
+            .collect();
+        assert_eq!(on, ["Good First Issue", "🐛 triage"]);
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(a.pending_count(), 0, "unchanged sends nothing");
     }
 }

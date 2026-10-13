@@ -536,7 +536,23 @@ fn status_line_with(left: &str, keep: Option<&str>, width: usize) -> String {
         };
         return truncate_to_width(bare, width);
     }
-    format!("{}{tail}", truncate_to_width(left, room))
+    format!("{}{tail}", fit_entries(left, room))
+}
+
+/// `left` cut to `room`: whole ` · ` entries are dropped from the end, never cut through; only
+/// when not even the first fits is it cut with `…`.
+fn fit_entries(left: &str, room: usize) -> String {
+    if display_width(left) <= room {
+        return left.to_string();
+    }
+    let entries: Vec<&str> = left.split(" · ").collect();
+    for n in (1..entries.len()).rev() {
+        let joined = entries[..n].join(" · ");
+        if display_width(&joined) <= room {
+            return joined;
+        }
+    }
+    truncate_to_width(left, room)
 }
 
 /// The help overlay: every action with its keys. When the pane is too short for all of them
@@ -1013,12 +1029,18 @@ mod tests {
         let last = screen.lines().last().unwrap();
         assert!(last.ends_with(" · ? help"), "{last}");
         assert!(
-            last.contains('…'),
-            "the edit hints are cut, not ? help: {last}"
+            !last.contains('…') && last.starts_with("a assignees"),
+            "whole hints are dropped, none is cut through: {last}"
         );
         assert!(display_width(last) <= 50);
         assert_eq!(status_line("", 10), "? help");
         assert_eq!(status_line("e field", 40), "e field · ? help");
+        assert_eq!(
+            status_line("a assignees · t labels · e field", 26),
+            "a assignees · ? help",
+            "entries drop from the end, whole"
+        );
+        assert_eq!(status_line("a long single entry", 14), "a lo… · ? help");
     }
 
     #[test]
