@@ -5,6 +5,7 @@ use super::*;
 use crate::model::{Denial, EditContext, OpKind, check};
 use crate::ops::{Confirmed, Op, OpId};
 use crate::store::BoardSnapshot;
+use crate::ui::marks::ItemMarks;
 use crate::ui::table::Row;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -65,6 +66,27 @@ impl App {
             viewer_can_update: self.project().is_some_and(|p| p.viewer_can_update),
             scopes: self.scopes.clone(),
             refused: self.refused_scopes.clone(),
+        }
+    }
+
+    /// What the table and the board mark: items with edits sending, sticky items the view no
+    /// longer matches, and the new item to highlight.
+    pub fn marks(&self) -> ItemMarks {
+        ItemMarks {
+            pending: self
+                .store
+                .pending()
+                .iter()
+                .map(|p| p.op.item().clone())
+                .collect(),
+            unmatched: self
+                .view_items()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|i| self.unmatched(i))
+                .map(|i| i.id.clone())
+                .collect(),
+            highlight: self.highlight.clone(),
         }
     }
 
@@ -1394,6 +1416,42 @@ mod tests {
             !a.unmatched(&a.snapshot().unwrap().items[&ItemId::new("c")].clone()),
             "untouched items are not marked"
         );
+    }
+
+    #[test]
+    fn marks_name_sending_and_unmatched_items_and_a_key_press_clears_the_highlight() {
+        let mut a = app_edited(|s| s.project.views[1].filter = "-status:Done".into());
+        let board = crate::model::ViewId::new("V_board");
+        a.select_view(&board);
+        a.on_sync(SyncEvent::ViewIds {
+            view: board.clone(),
+            filter: "-status:Done".into(),
+            list: list(&["a", "b", "c", "e"]),
+        });
+        assert_eq!(a.marks(), ItemMarks::default());
+        a.submit(OpKind::SetField, set_status("a", "o_done", "Done"));
+        let marks = a.marks();
+        let id = ItemId::new("a");
+        assert!(marks.pending.contains(&id) && marks.unmatched.contains(&id));
+        assert_eq!(marks.pending.len() + marks.unmatched.len(), 2);
+        let screen =
+            crate::ui::fixtures::render_to_string(120, 12, |f| crate::ui::chrome::draw(f, &mut a));
+        assert!(
+            screen.lines().next().unwrap().contains("saving 1…"),
+            "{screen}"
+        );
+        assert!(
+            screen
+                .lines()
+                .last()
+                .unwrap()
+                .contains("⊘ no longer matches filter · ? help"),
+            "{screen}"
+        );
+        a.highlight = Some(id.clone());
+        assert_eq!(a.marks().highlight, Some(id));
+        a.handle_key(key('j'));
+        assert_eq!(a.marks().highlight, None);
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub mod detail;
 pub mod keymap;
 pub mod labels;
 pub mod markdown;
+pub mod marks;
 pub mod picker;
 pub mod pills;
 pub mod runtime;

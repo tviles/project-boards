@@ -99,6 +99,8 @@ pub struct App {
     current: Option<ViewId>,
     /// The selected item, so polls, re-sorts and search never move the cursor to another one.
     selected_id: Option<ItemId>,
+    /// A new item to highlight until the next key press.
+    pub highlight: Option<ItemId>,
     /// Items edited during this visit of the current view: they stay where they are, even
     /// when the view's filter no longer matches them, until the view or its filter changes
     /// or `r` (spec section 5, "Items that stop matching the view").
@@ -167,6 +169,7 @@ impl App {
             quit: false,
             current: None,
             selected_id: None,
+            highlight: None,
             sticky: Vec::new(),
             search: String::new(),
             layout_toggle: HashMap::new(),
@@ -618,6 +621,7 @@ impl App {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Vec<Command> {
         self.status.flash = None;
+        self.highlight = None;
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.quit = true;
             return vec![Command::Quit];

@@ -3,11 +3,11 @@
 
 use crate::model::Layout;
 use crate::ui::app::{App, Mode};
-use crate::ui::board::render_board;
+use crate::ui::board::render_board_with;
 use crate::ui::detail::{build_doc, render_detail};
 use crate::ui::keymap::Action;
 use crate::ui::picker::render_picker;
-use crate::ui::table::{render_table, table_columns};
+use crate::ui::table::{render_table_with, table_columns};
 use crate::ui::text::{display_width, pad_to_width, truncate_to_width};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout as Split, Rect};
@@ -70,6 +70,28 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
+/// The header flags about writing: edits sending, a rate-limit pause, and why the board is
+/// read-only.
+pub fn write_flags(app: &App, now: std::time::Instant) -> Vec<String> {
+    let mut flags = Vec::new();
+    let pending = app.pending_count();
+    if pending > 0 {
+        flags.push(format!("saving {pending}…"));
+    }
+    if let Some(until) = app.status.write_pause {
+        let left = until.saturating_duration_since(now).as_secs();
+        if left > 0 {
+            flags.push(format!("writes paused {left}s"));
+        }
+    }
+    if app.project().is_some_and(|p| !p.viewer_can_update) {
+        flags.push("read-only".into());
+    } else if app.project().is_some() && !app.edit_context().has_project_scope() {
+        flags.push("read-only: token lacks the project scope".into());
+    }
+    flags
+}
+
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let title = app
         .project()
@@ -81,9 +103,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     } else if app.status.stale {
         flags.push("stale".into());
     }
-    if app.project().is_some_and(|p| !p.viewer_can_update) {
-        flags.push("read-only".into());
-    }
+    flags.extend(write_flags(app, std::time::Instant::now()));
     if app.status.rate_low {
         flags.push("rate limit low".into());
     }
@@ -164,28 +184,31 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
         );
         return;
     }
+    let marks = app.marks();
     match app.layout().0 {
         Layout::Board => {
             if let Some(field) = app.column_field() {
-                render_board(
+                render_board_with(
                     frame,
                     area,
                     &app.board_columns(),
                     &app.board_sel,
                     field,
                     &app.card_fields(),
+                    &marks,
                     &app.theme,
                 );
             }
         }
         _ => {
             let view = app.current_view().expect("a project with views");
-            render_table(
+            render_table_with(
                 frame,
                 area,
                 &app.table_rows(),
                 &table_columns(view, project),
                 app.table_selected,
+                &marks,
                 &app.theme,
             );
         }
@@ -277,6 +300,17 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
                 parts.push(format!(
                     "? help · / search · f filter{clear} · L layout · q quit"
                 ));
+                // The reminder is only worth the room when `? help` still fits after it.
+                if !app.marks().unmatched.is_empty() {
+                    let mut with = parts.clone();
+                    with.insert(
+                        parts.len() - 1,
+                        crate::ui::marks::UNMATCHED_TEXT.to_string(),
+                    );
+                    if display_width(&with.join(" · ")) <= area.width as usize {
+                        parts = with;
+                    }
+                }
                 Line::styled(
                     truncate_to_width(&parts.join(" · "), area.width as usize),
                     app.theme.dim(),
@@ -332,6 +366,39 @@ mod tests {
             Keymap::defaults(),
             Theme::plain(),
         )
+    }
+
+    #[test]
+    fn the_header_says_saving_paused_and_read_only() {
+        use crate::model::{FieldId, FieldValue, ItemId, OpKind, OptionId};
+        use crate::ops::Op;
+        let now = std::time::Instant::now();
+        let mut a = app();
+        assert!(write_flags(&a, now).is_empty());
+        a.submit(
+            OpKind::Move,
+            Op::SetField {
+                item: ItemId::new("a"),
+                field: FieldId::new("F_status"),
+                value: FieldValue::SingleSelect {
+                    option_id: OptionId::new("o_done"),
+                    name: "Done".into(),
+                },
+            },
+        );
+        a.status.write_pause = Some(now + std::time::Duration::from_secs(30));
+        assert_eq!(write_flags(&a, now), ["saving 1…", "writes paused 30s"]);
+        a.on_sync(crate::sync::SyncEvent::Access {
+            scopes: Some(vec!["repo".into()]),
+        });
+        assert!(
+            write_flags(&a, now).contains(&"read-only: token lacks the project scope".to_string())
+        );
+        let screen = render_to_string(100, 12, |f| draw(f, &mut a));
+        assert!(
+            screen.lines().next().unwrap().contains("saving 1…"),
+            "{screen}"
+        );
     }
 
     #[test]

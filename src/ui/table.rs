@@ -1,5 +1,6 @@
 use crate::model::*;
 use crate::ui::labels::{label_spans, spans_width};
+use crate::ui::marks::ItemMarks;
 use crate::ui::text::{pad_to_width, truncate_to_width};
 use crate::ui::theme::Theme;
 use ratatui::Frame;
@@ -189,12 +190,36 @@ fn widths(columns: &[&Field], total: usize) -> Vec<usize> {
     }
 }
 
+/// `render_table_with` and no marks.
+#[cfg(test)]
 pub fn render_table(
     frame: &mut Frame,
     area: Rect,
     rows: &[Row],
     columns: &[&Field],
     selected: usize,
+    theme: &Theme,
+) {
+    render_table_with(
+        frame,
+        area,
+        rows,
+        columns,
+        selected,
+        &ItemMarks::default(),
+        theme,
+    )
+}
+
+/// Draws the table. Marked items show their marks before the title; one the view no longer
+/// matches is dimmed unless it is under the cursor.
+pub fn render_table_with(
+    frame: &mut Frame,
+    area: Rect,
+    rows: &[Row],
+    columns: &[&Field],
+    selected: usize,
+    marks: &ItemMarks,
     theme: &Theme,
 ) {
     if rows.is_empty() {
@@ -252,17 +277,34 @@ pub fn render_table(
                     ),
                 ])
             }
-            Row::Item(item) => Line::from(
-                shown
-                    .iter()
-                    .zip(&widths)
-                    .flat_map(|(f, w)| {
-                        let mut cell = item_cell(item, f, *w, is_selected, theme);
-                        cell.push(Span::styled(" ", style));
-                        cell
-                    })
-                    .collect::<Vec<_>>(),
-            ),
+            Row::Item(item) => {
+                let dim = marks.unmatched.contains(&item.id) && !is_selected;
+                Line::from(
+                    shown
+                        .iter()
+                        .zip(&widths)
+                        .flat_map(|(f, w)| {
+                            let mut cell = if f.kind == FieldKind::Title {
+                                let text =
+                                    format!("{}{}", marks.prefix(&item.id), cell_text(item, f));
+                                vec![Span::styled(
+                                    pad_to_width(&truncate_to_width(&text, *w), *w),
+                                    style,
+                                )]
+                            } else {
+                                item_cell(item, f, *w, is_selected, theme)
+                            };
+                            if dim {
+                                for span in &mut cell {
+                                    span.style = span.style.patch(theme.dim());
+                                }
+                            }
+                            cell.push(Span::styled(" ", style));
+                            cell
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }
         };
         lines.push(line);
     }
@@ -486,5 +528,22 @@ mod tests {
         }
         assert!(buf[(2, 1)].modifier.contains(Modifier::REVERSED));
         assert!(!buf[(2, 2)].modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn marks_go_before_the_title() {
+        use crate::ui::marks::ItemMarks;
+        let all = items();
+        let p = project();
+        let rows = build_rows(&refs(&all), None, &HashSet::new());
+        let cols = table_columns(&p.views[0], &p);
+        let mut marks = ItemMarks::default();
+        marks.pending.insert(crate::model::ItemId::new("a"));
+        marks.unmatched.insert(crate::model::ItemId::new("c"));
+        let screen = render_to_string(70, 7, |f| {
+            render_table_with(f, f.area(), &rows, &cols, 1, &marks, &Theme::plain())
+        });
+        assert!(screen.contains("⋯ #1 Fix crash"), "{screen}");
+        assert!(screen.contains("⊘ #3 Emoji"), "{screen}");
     }
 }
