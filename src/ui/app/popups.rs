@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::model::{
-    FieldValue, Iteration, OptionId, check, format_iso_date, parse_date_input, parse_iso_date,
+    FieldValue, Iteration, OptionId, format_iso_date, parse_date_input, parse_iso_date,
     parse_number_input,
 };
 use crate::ops::Op;
@@ -53,11 +53,6 @@ pub enum Popup {
     },
 }
 
-/// The date "today" means. UTC: a typed `+1d` near midnight may be a day off locally.
-fn today() -> time::Date {
-    time::OffsetDateTime::now_utc().date()
-}
-
 fn editable(kind: &FieldKind) -> bool {
     matches!(
         kind,
@@ -98,10 +93,10 @@ pub(crate) fn iteration_choices(
     let mut done: Vec<&Iteration> = completed.iter().collect();
     done.sort_by(|a, b| b.start_date.cmp(&a.start_date));
     let choice = |i: &Iteration, detail: &str| {
-        let detail = if set.as_deref() == Some(i.id.as_str()) {
-            "✓".to_string()
-        } else {
-            detail.to_string()
+        let detail = match (set.as_deref() == Some(i.id.as_str()), detail) {
+            (true, "") => "✓".to_string(),
+            (true, d) => format!("✓ {d}"),
+            (false, d) => d.to_string(),
         };
         Choice::new(
             i.title.clone(),
@@ -122,20 +117,60 @@ pub(crate) fn iteration_choices(
     out
 }
 
+/// The date at `offset` when it is `now`.
+fn local_date(now: time::OffsetDateTime, offset: time::UtcOffset) -> time::Date {
+    now.to_offset(offset).date()
+}
+
+/// A value picker with the cursor on the row that marks the current value.
+fn value_picker(
+    title: String,
+    choices: Vec<Choice<Option<FieldValue>>>,
+) -> ListPicker<Option<FieldValue>> {
+    let at = choices.iter().position(|c| c.detail.starts_with('✓'));
+    let mut picker = ListPicker::new(title, choices);
+    picker.selected = at.unwrap_or(0);
+    picker
+}
+
+/// Whether `new` leaves the field as it is: the same value, or (for single-selects and
+/// iterations) an option in the same bucket as the current one.
+fn is_unchanged(field: &Field, current: Option<&FieldValue>, new: &FieldValue) -> bool {
+    let Some(current) = current else { return false };
+    match (current.bucket_key(), new.bucket_key()) {
+        (Some(have), Some(want)) => field
+            .buckets()
+            .unwrap_or_default()
+            .iter()
+            .any(|b| b.matches(&have) && b.matches(&want)),
+        _ => current == new,
+    }
+}
+
 /// What a submitted line means for a field of `kind`: `Ok(None)` clears it.
-fn line_value(kind: LineKind, input: &str) -> Result<Option<FieldValue>, String> {
+fn line_value(
+    kind: LineKind,
+    input: &str,
+    today: time::Date,
+) -> Result<Option<FieldValue>, String> {
     match kind {
         LineKind::Text => {
             let t = input.trim();
             Ok((!t.is_empty()).then(|| FieldValue::Text(t.to_string())))
         }
         LineKind::Number => parse_number_input(input).map(|n| n.map(FieldValue::Number)),
-        LineKind::Date => parse_date_input(input, today())
-            .map(|d| d.map(|d| FieldValue::Date(format_iso_date(d)))),
+        LineKind::Date => {
+            parse_date_input(input, today).map(|d| d.map(|d| FieldValue::Date(format_iso_date(d))))
+        }
     }
 }
 
 impl App {
+    /// The user's local date.
+    pub(crate) fn today(&self) -> time::Date {
+        local_date(time::OffsetDateTime::now_utc(), self.utc_offset)
+    }
+
     pub(crate) fn open_popup(&mut self, popup: Popup) {
         self.popup = Some(popup);
         self.mode = Mode::Popup;
@@ -149,10 +184,11 @@ impl App {
     /// `e`: the menu of the item's editable fields, each with its current value.
     pub(crate) fn open_field_menu(&mut self) -> Vec<Command> {
         let Some(item) = self.action_item().cloned() else {
+            self.status.flash = Some("Select an item first".into());
             return Vec::new();
         };
-        if let Err(denial) = check(OpKind::SetField, &item, &self.edit_context()) {
-            self.status.flash = Some(self.denial_text(denial));
+        if let Err(reason) = self.check_here(OpKind::SetField, &item) {
+            self.status.flash = Some(reason);
             return Vec::new();
         }
         let Some(project) = self.project() else {
@@ -201,24 +237,22 @@ impl App {
             error: None,
         };
         let popup = match &f.kind {
-            FieldKind::SingleSelect { options } => {
+            FieldKind::SingleSelect { .. } => {
+                // One row per bucket: options sharing a name are one row, and the
+                // canonical (last) option's id is what gets sent.
                 let set = current.as_ref().and_then(|v| v.bucket_key());
-                let mut choices: Vec<Choice<Option<FieldValue>>> = options
+                let mut choices: Vec<Choice<Option<FieldValue>>> = f
+                    .buckets()
+                    .unwrap_or_default()
                     .iter()
-                    .map(|o| {
-                        let mark = if set.as_deref() == Some(o.id.as_str()) {
+                    .filter_map(|b| {
+                        let value = f.value_for_bucket(b.key.as_deref()?)?;
+                        let mark = if set.as_deref().is_some_and(|k| b.matches(k)) {
                             "✓"
                         } else {
                             ""
                         };
-                        Choice::new(
-                            o.name.clone(),
-                            Some(FieldValue::SingleSelect {
-                                option_id: o.id.clone(),
-                                name: o.name.clone(),
-                            }),
-                        )
-                        .with_detail(mark)
+                        Some(Choice::new(b.title.clone(), Some(value)).with_detail(mark))
                     })
                     .collect();
                 if current.is_some() {
@@ -227,15 +261,15 @@ impl App {
                 Popup::Value {
                     item,
                     field,
-                    picker: ListPicker::new(title, choices),
+                    picker: value_picker(title, choices),
                 }
             }
             FieldKind::Iteration { .. } => {
-                let choices = iteration_choices(&f, current.as_ref(), today());
+                let choices = iteration_choices(&f, current.as_ref(), self.today());
                 Popup::Value {
                     item,
                     field,
-                    picker: ListPicker::new(title, choices),
+                    picker: value_picker(title, choices),
                 }
             }
             FieldKind::MultiSelect { options } => {
@@ -289,14 +323,24 @@ impl App {
         self.close_popup();
         // Keep the cursor on this item when the edit re-sorts or regroups the view.
         self.selected_id = Some(item.clone());
+        let current = self
+            .snapshot()
+            .and_then(|s| s.items.get(&item))
+            .and_then(|i| i.value(&field))
+            .cloned();
         match value {
-            Some(value) => self.submit(OpKind::SetField, Op::SetField { item, field, value }),
+            Some(value) => {
+                let same = self
+                    .project()
+                    .and_then(|p| p.field(&field))
+                    .is_some_and(|f| is_unchanged(f, current.as_ref(), &value));
+                if same {
+                    return Vec::new();
+                }
+                self.submit(OpKind::SetField, Op::SetField { item, field, value })
+            }
             None => {
-                let has_value = self
-                    .snapshot()
-                    .and_then(|s| s.items.get(&item))
-                    .is_some_and(|i| i.value(&field).is_some());
-                if has_value {
+                if current.is_some() {
                     self.submit(OpKind::SetField, Op::ClearField { item, field })
                 } else {
                     Vec::new()
@@ -310,6 +354,7 @@ impl App {
             self.mode = self.base_mode();
             return Vec::new();
         };
+        let today = self.today();
         match &mut popup {
             Popup::Fields { item, picker } => match picker.handle(&key) {
                 ListOutcome::Chosen(FieldTarget::Field(field)) => {
@@ -332,8 +377,8 @@ impl App {
                     return self.submit_value(item, field, value);
                 }
                 ListOutcome::Cancel => {
-                    self.close_popup();
-                    return Vec::new();
+                    let field = field.clone();
+                    return self.back_to_menu(&field);
                 }
                 ListOutcome::None | ListOutcome::Key(_) => {}
             },
@@ -360,8 +405,8 @@ impl App {
                     return self.submit_value(item, field, value);
                 }
                 MultiOutcome::Cancel => {
-                    self.close_popup();
-                    return Vec::new();
+                    let field = field.clone();
+                    return self.back_to_menu(&field);
                 }
                 MultiOutcome::None => {}
             },
@@ -373,7 +418,7 @@ impl App {
                 error,
                 ..
             } => match edit_line(input, &key) {
-                LineOutcome::Submit => match line_value(*kind, input) {
+                LineOutcome::Submit => match line_value(*kind, input, today) {
                     Ok(value) => {
                         let (item, field) = (item.clone(), field.clone());
                         return self.submit_value(item, field, value);
@@ -381,14 +426,29 @@ impl App {
                     Err(e) => *error = Some(e),
                 },
                 LineOutcome::Cancel => {
-                    self.close_popup();
-                    return Vec::new();
+                    let field = field.clone();
+                    return self.back_to_menu(&field);
                 }
                 LineOutcome::Typing => *error = None,
             },
         }
         self.popup = Some(popup);
         Vec::new()
+    }
+
+    /// Esc in a value editor: back to the field menu, on the field that was being edited.
+    fn back_to_menu(&mut self, field: &FieldId) -> Vec<Command> {
+        self.close_popup();
+        let cmds = self.open_field_menu();
+        if let Some(Popup::Fields { picker, .. }) = &mut self.popup
+            && let Some(at) = picker
+                .choices
+                .iter()
+                .position(|c| c.value == FieldTarget::Field(field.clone()))
+        {
+            picker.selected = at;
+        }
+        cmds
     }
 
     /// The names of multi-select options, in the order given.
@@ -600,5 +660,259 @@ mod tests {
                 .unwrap()
                 .starts_with("You can't see")
         );
+    }
+
+    fn two_todos(a: &mut App) {
+        let mut snap = a.snapshot().unwrap().clone();
+        let f = snap
+            .project
+            .fields
+            .iter_mut()
+            .find(|f| f.name == "Status")
+            .unwrap();
+        let FieldKind::SingleSelect { options } = &mut f.kind else {
+            unreachable!()
+        };
+        let todo = options.iter().find(|o| o.name == "Todo").unwrap().clone();
+        options.push(crate::model::SelectOption {
+            id: OptionId::new("todo_dup"),
+            ..todo
+        });
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+    }
+
+    fn rows(a: &App) -> Vec<(String, String)> {
+        match &a.popup {
+            Some(Popup::Value { picker, .. }) => picker
+                .choices
+                .iter()
+                .map(|c| (c.label.clone(), c.detail.clone()))
+                .collect(),
+            other => panic!("expected a value picker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn options_sharing_a_name_are_one_row_and_send_the_canonical_id() {
+        let mut a = test_app();
+        two_todos(&mut a);
+        a.handle_key(key('e'));
+        a.handle_key(code(KeyCode::Enter));
+        let rows = rows(&a);
+        assert_eq!(rows.iter().filter(|r| r.0 == "Todo").count(), 1, "{rows:?}");
+        assert!(rows.contains(&("Todo".into(), "✓".into())));
+        // The item is on the alias (`o_todo`); the dup is canonical.
+        a.handle_key(code(KeyCode::Esc));
+        a.handle_key(code(KeyCode::Esc));
+        a.handle_key(key('e'));
+        a.handle_key(code(KeyCode::Enter));
+        assert!(rows_checked(&a, "Todo"));
+        type_text(&mut a, "in");
+        a.handle_key(code(KeyCode::Enter));
+        a.handle_key(key('e'));
+        a.handle_key(code(KeyCode::Enter));
+        // Back to Todo: sends the canonical (last) id.
+        type_text(&mut a, "todo");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(2)]);
+        assert_eq!(
+            value(&a, "a", "F_status"),
+            Some(FieldValue::SingleSelect {
+                option_id: OptionId::new("todo_dup"),
+                name: "Todo".into()
+            })
+        );
+    }
+
+    fn rows_checked(a: &App, label: &str) -> bool {
+        rows(a).iter().any(|r| r.0 == label && r.1.starts_with('✓'))
+    }
+
+    #[test]
+    fn the_cursor_starts_on_the_current_value_and_choosing_it_sends_nothing() {
+        let mut a = test_app();
+        a.handle_key(key('e'));
+        a.handle_key(code(KeyCode::Enter));
+        let Some(Popup::Value { picker, .. }) = &a.popup else {
+            panic!()
+        };
+        assert_eq!(picker.current().unwrap().label, "Todo");
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        assert_eq!(a.pending_count(), 0);
+        assert_eq!(a.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn an_unchanged_line_or_multi_select_sends_nothing() {
+        let mut a = test_app();
+        a.handle_key(key('e'));
+        type_text(&mut a, "notes");
+        a.handle_key(code(KeyCode::Enter));
+        type_text(&mut a, "x");
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(a.pending_count(), 1);
+        a.handle_key(key('e'));
+        type_text(&mut a, "notes");
+        a.handle_key(code(KeyCode::Enter));
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        assert_eq!(a.pending_count(), 1);
+        a.handle_key(key('e'));
+        type_text(&mut a, "areas");
+        a.handle_key(code(KeyCode::Enter));
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        assert_eq!(a.pending_count(), 1);
+    }
+
+    #[test]
+    fn an_invalid_number_stays_open_with_the_reason() {
+        let mut a = test_app();
+        a.handle_key(key('e'));
+        type_text(&mut a, "size");
+        a.handle_key(code(KeyCode::Enter));
+        type_text(&mut a, "abc");
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        let Some(Popup::Line { error, .. }) = &a.popup else {
+            panic!("still open")
+        };
+        assert!(error.is_some());
+        assert_eq!(a.pending_count(), 0);
+    }
+
+    #[test]
+    fn esc_goes_back_one_level_from_the_board_and_from_the_detail() {
+        for detail in [false, true] {
+            let mut a = test_app();
+            if detail {
+                a.handle_key(code(KeyCode::Enter));
+            }
+            let base = a.mode;
+            a.handle_key(key('e'));
+            type_text(&mut a, "notes");
+            a.handle_key(code(KeyCode::Enter));
+            assert!(matches!(a.popup, Some(Popup::Line { .. })));
+            a.handle_key(code(KeyCode::Esc));
+            assert!(
+                matches!(a.popup, Some(Popup::Fields { .. })),
+                "back to the menu"
+            );
+            assert_eq!(a.mode, Mode::Popup);
+            a.handle_key(code(KeyCode::Esc));
+            assert!(a.popup.is_none());
+            assert_eq!(a.mode, base);
+        }
+    }
+
+    #[test]
+    fn submitting_from_the_detail_returns_to_it() {
+        let mut a = test_app();
+        a.handle_key(code(KeyCode::Enter));
+        a.handle_key(key('e'));
+        type_text(&mut a, "notes");
+        a.handle_key(code(KeyCode::Enter));
+        type_text(&mut a, "hi");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(a.mode, Mode::Detail);
+    }
+
+    #[test]
+    fn the_iteration_picker_marks_current_and_chosen_through_the_app() {
+        let mut a = test_app();
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.items
+            .get_mut(&ItemId::new("a"))
+            .unwrap()
+            .values
+            .insert(
+                FieldId::new("F_sprint"),
+                FieldValue::Iteration {
+                    iteration_id: IterationId::new("it1"),
+                    title: "Sprint 1".into(),
+                    start_date: "2026-09-17".into(),
+                },
+            );
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        a.handle_key(key('e'));
+        type_text(&mut a, "sprint");
+        a.handle_key(code(KeyCode::Enter));
+        assert!(rows_checked(&a, "Sprint 1"));
+        let Some(Popup::Value { picker, .. }) = &a.popup else {
+            panic!()
+        };
+        assert_eq!(
+            picker.current().unwrap().label,
+            "Sprint 1",
+            "cursor on the current value"
+        );
+        type_text(&mut a, "sprint 3");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(
+            value(&a, "a", "F_sprint").map(|v| v.display()).as_deref(),
+            Some("Sprint 3")
+        );
+    }
+
+    #[test]
+    fn the_current_iteration_keeps_its_label_when_chosen() {
+        let p = crate::ui::fixtures::project();
+        let sprint = p.fields.iter().find(|f| f.name == "Sprint").unwrap();
+        let current = FieldValue::Iteration {
+            iteration_id: IterationId::new("it2"),
+            title: "Sprint 2".into(),
+            start_date: "2026-10-01".into(),
+        };
+        let choices = iteration_choices(sprint, Some(&current), date!(2026 - 10 - 12));
+        assert_eq!(choices[0].detail, "✓ current");
+    }
+
+    #[test]
+    fn today_is_the_local_date() {
+        use time::macros::{datetime, offset};
+        let now = datetime!(2026-10-12 02:00 UTC);
+        assert_eq!(local_date(now, offset!(-5)), date!(2026 - 10 - 11));
+        assert_eq!(local_date(now, time::UtcOffset::UTC), date!(2026 - 10 - 12));
+        let mut a = test_app();
+        a.utc_offset = offset!(+14);
+        assert_eq!(
+            a.today(),
+            local_date(time::OffsetDateTime::now_utc(), offset!(+14))
+        );
+    }
+
+    #[test]
+    fn archived_and_read_only_items_refuse_with_their_reason() {
+        let mut a = test_app();
+        a.handle_key(code(KeyCode::Enter));
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.items.get_mut(&ItemId::new("a")).unwrap().archived = true;
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        assert!(a.handle_key(key('e')).is_empty());
+        assert_eq!(a.mode, Mode::Detail);
+        assert!(
+            a.status
+                .flash
+                .as_deref()
+                .unwrap()
+                .starts_with("Archived items")
+        );
+
+        let mut a = test_app();
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.project.viewer_can_update = false;
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        a.handle_key(key('e'));
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("This board is read-only for you")
+        );
+    }
+
+    #[test]
+    fn e_with_no_item_says_so() {
+        let mut a = test_app();
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.items.clear();
+        snap.order.clear();
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        a.handle_key(key('e'));
+        assert_eq!(a.status.flash.as_deref(), Some("Select an item first"));
     }
 }

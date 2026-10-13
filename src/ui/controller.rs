@@ -33,6 +33,9 @@ pub struct PaneOptions {
     pub repo: Option<RepoSlug>,
     pub board: Option<BoardRef>,
     pub picker: bool,
+    /// The local UTC offset, read once before any thread starts (the `time` crate refuses
+    /// to read it afterwards); "today" in date input and iterations is the date at this offset.
+    pub utc_offset: time::UtcOffset,
 }
 
 // One short-lived value per event; boxing would change the public `Input::Sync` shape.
@@ -172,6 +175,7 @@ impl Controller {
             keymap,
             Theme::from_env(|k| std::env::var(k).ok()),
         );
+        app.utc_offset = options.utc_offset;
         app.status.notes = options
             .warnings
             .iter()
@@ -706,6 +710,7 @@ mod tests {
             repo: Some("tviles/app".parse().unwrap()),
             board: board.map(|b| b.parse().unwrap()),
             picker: false,
+            utc_offset: time::UtcOffset::UTC,
         }
     }
 

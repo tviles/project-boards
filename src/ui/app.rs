@@ -124,6 +124,8 @@ pub struct App {
     pub confirm: Option<Confirm>,
     /// The popover `Mode::Popup` shows.
     pub popup: Option<Popup>,
+    /// The local UTC offset, for "today".
+    pub utc_offset: time::UtcOffset,
     /// Detail width used to number targets; kept in sync by the renderer.
     pub detail_width: u16,
 }
@@ -186,6 +188,7 @@ impl App {
             errors: Vec::new(),
             confirm: None,
             popup: None,
+            utc_offset: time::UtcOffset::UTC,
             detail_width: 80,
         }
     }
