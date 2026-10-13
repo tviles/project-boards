@@ -29,6 +29,7 @@ pub enum Action {
     MoveNextColumn,
     ReorderUp,
     ReorderDown,
+    EditField,
 }
 
 use crate::model::OpKind;
@@ -40,6 +41,7 @@ impl Action {
         match self {
             Action::MovePrevColumn | Action::MoveNextColumn => &[OpKind::Move],
             Action::ReorderUp | Action::ReorderDown => &[OpKind::Reorder],
+            Action::EditField => &[OpKind::SetField],
             _ => &[],
         }
     }
@@ -52,7 +54,7 @@ impl Action {
             .find(|a| a.kinds().contains(&kind))
     }
 
-    pub const ALL: [Action; 26] = [
+    pub const ALL: [Action; 27] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -79,6 +81,7 @@ impl Action {
         Action::MoveNextColumn,
         Action::ReorderUp,
         Action::ReorderDown,
+        Action::EditField,
     ];
 
     /// The name used in `[keys]` of config.toml.
@@ -110,6 +113,7 @@ impl Action {
             Action::MoveNextColumn => "move_next_column",
             Action::ReorderUp => "reorder_up",
             Action::ReorderDown => "reorder_down",
+            Action::EditField => "edit_field",
         }
     }
 
@@ -141,6 +145,7 @@ impl Action {
             Action::MoveNextColumn => "move the item to the next column",
             Action::ReorderUp => "move the item up (reorder)",
             Action::ReorderDown => "move the item down (reorder)",
+            Action::EditField => "edit a field of the item",
         }
     }
 
@@ -272,6 +277,7 @@ const DEFAULTS: &[(&str, Action)] = &[
     (">", Action::MoveNextColumn),
     ("K", Action::ReorderUp),
     ("J", Action::ReorderDown),
+    ("e", Action::EditField),
 ];
 
 impl Keymap {

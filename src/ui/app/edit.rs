@@ -219,6 +219,7 @@ impl App {
             Action::MoveNextColumn => self.move_card(1),
             Action::ReorderUp => self.reorder(false),
             Action::ReorderDown => self.reorder(true),
+            Action::EditField => self.open_field_menu(),
             _ => return None,
         };
         Some(cmds)

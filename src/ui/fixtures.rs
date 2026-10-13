@@ -80,6 +80,44 @@ pub fn project() -> Project {
                 FieldKind::LinkedPullRequests,
             ),
             f("F_created", "Created", FieldKind::Created),
+            f("F_size", "Size", FieldKind::Number),
+            f("F_due", "Due", FieldKind::Date),
+            f(
+                "F_sprint",
+                "Sprint",
+                FieldKind::Iteration {
+                    iterations: vec![
+                        Iteration {
+                            id: IterationId::new("it2"),
+                            title: "Sprint 2".into(),
+                            start_date: "2026-10-01".into(),
+                            duration_days: 14,
+                        },
+                        Iteration {
+                            id: IterationId::new("it3"),
+                            title: "Sprint 3".into(),
+                            start_date: "2026-10-15".into(),
+                            duration_days: 14,
+                        },
+                    ],
+                    completed: vec![Iteration {
+                        id: IterationId::new("it1"),
+                        title: "Sprint 1".into(),
+                        start_date: "2026-09-17".into(),
+                        duration_days: 14,
+                    }],
+                },
+            ),
+            f(
+                "F_areas",
+                "Areas",
+                FieldKind::MultiSelect {
+                    options: vec![
+                        opt("m_api", "api", OptionColor::Blue),
+                        opt("m_ui", "ui", OptionColor::Green),
+                    ],
+                },
+            ),
         ],
         views: vec![
             view(

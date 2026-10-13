@@ -2,12 +2,14 @@
 //! and the help, picker and setup overlays.
 
 use crate::model::Layout;
-use crate::ui::app::{App, Mode};
+use crate::ui::app::{App, LineKind, Mode, Popup};
 use crate::ui::board::render_board_with;
 use crate::ui::detail::{build_doc, render_detail};
 use crate::ui::keymap::Action;
 use crate::ui::marks::ItemMarks;
+use crate::ui::multiselect::render_multiselect;
 use crate::ui::picker::render_picker;
+use crate::ui::popup::{render_line_popup, render_list_picker};
 use crate::ui::table::{render_table_with, table_columns};
 use crate::ui::text::{display_width, pad_to_width, truncate_to_width};
 use ratatui::Frame;
@@ -48,7 +50,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             ),
             body,
         );
-    } else if app.mode == Mode::Detail && app.detail.is_some() {
+    } else if app.detail.is_some() {
         if body.width >= SPLIT_DETAIL_AT {
             let [left, right] =
                 Split::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -69,6 +71,33 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         && let Some(p) = &app.picker
     {
         render_picker(frame, area, p, &app.theme);
+    }
+    if app.mode == Mode::Popup {
+        draw_popup(frame, body, app);
+    }
+}
+
+fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(popup) = &app.popup else { return };
+    let theme = &app.theme;
+    match popup {
+        Popup::Fields { picker, .. } => render_list_picker(frame, area, picker, theme),
+        Popup::Value { picker, .. } => render_list_picker(frame, area, picker, theme),
+        Popup::Options { select, .. } => render_multiselect(frame, area, select, theme),
+        Popup::Line {
+            kind,
+            title,
+            input,
+            error,
+            ..
+        } => {
+            let hint = match kind {
+                LineKind::Text => "enter saves · empty clears · esc cancels",
+                LineKind::Number => "a number · empty clears · esc cancels",
+                LineKind::Date => "2026-10-03, +3d, fri · empty clears · esc cancels",
+            };
+            render_line_popup(frame, area, title, input, hint, error.as_deref(), theme)
+        }
     }
 }
 
@@ -807,5 +836,20 @@ mod tests {
                 assert!(has_reminder, "{line}");
             }
         }
+    }
+
+    #[test]
+    fn a_popover_opened_from_the_detail_draws_over_it() {
+        let mut a = app();
+        a.handle_key(code(KeyCode::Enter));
+        a.handle_key(key('e'));
+        assert_eq!(a.mode, Mode::Popup);
+        let screen = render_to_string(100, 40, |f| draw(f, &mut a));
+        let lines: Vec<&str> = screen.lines().collect();
+        assert!(
+            lines[2].starts_with('│'),
+            "the detail's border, not the table header: {screen}"
+        );
+        assert!(screen.contains("Edit · Fix crash"), "{screen}");
     }
 }

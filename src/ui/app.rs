@@ -15,9 +15,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::{HashMap, HashSet};
 
 mod edit;
+mod popups;
 
 use crate::ops::OpId;
 pub use edit::{Confirm, ConfirmAction, FailedEdit};
+pub use popups::{FieldTarget, LineKind, Popup};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -30,6 +32,8 @@ pub enum Mode {
     Setup,
     /// A yes/no question on the status line.
     Confirm,
+    /// A popover editing a field of the item.
+    Popup,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -118,6 +122,8 @@ pub struct App {
     pub errors: Vec<FailedEdit>,
     /// The question `Mode::Confirm` asks.
     pub confirm: Option<Confirm>,
+    /// The popover `Mode::Popup` shows.
+    pub popup: Option<Popup>,
     /// Detail width used to number targets; kept in sync by the renderer.
     pub detail_width: u16,
 }
@@ -179,6 +185,7 @@ impl App {
             pending_kinds: HashMap::new(),
             errors: Vec::new(),
             confirm: None,
+            popup: None,
             detail_width: 80,
         }
     }
@@ -682,6 +689,7 @@ impl App {
             },
             Mode::Picker => self.handle_picker_key(key),
             Mode::Confirm => self.handle_confirm_key(&key),
+            Mode::Popup => self.handle_popup_key(key),
             Mode::Detail => {
                 if let Some(a) = action
                     && let Some(cmds) = self.edit_key(a)
