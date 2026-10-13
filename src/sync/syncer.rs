@@ -112,6 +112,19 @@ impl Syncer {
             total,
             truncated,
         });
+        self.send(SyncEvent::Access {
+            scopes: self.gh.scopes(),
+        });
+        self.send(SyncEvent::Rate(self.gh.rate()));
+    }
+
+    /// Sends one edit. The log names the op and the error, never titles or values.
+    pub async fn mutate(&self, id: crate::ops::OpId, project: &ProjectId, op: &crate::ops::Op) {
+        let result = crate::ops::send::send(&self.gh, project, op).await;
+        if let Err(e) = &result {
+            tracing::warn!(op = op.name(), item = %op.item(), error = %e, "edit failed");
+        }
+        self.send(SyncEvent::OpDone { id, result });
         self.send(SyncEvent::Rate(self.gh.rate()));
     }
 
@@ -520,5 +533,50 @@ mod tests {
         );
         assert!(matches!(&events[1], SyncEvent::Detail { older: true, .. }));
         assert_eq!(t.requests()[1].variables["before"], "cur");
+    }
+
+    #[tokio::test]
+    async fn mutate_reports_the_result_then_the_rate() {
+        let (t, s, mut rx) = setup(2000);
+        t.push(
+            "ClearFieldValue",
+            json!({"clearProjectV2ItemFieldValue": {"projectV2Item": item_json()}}),
+        );
+        t.push_error("ClearFieldValue", GithubError::Network("offline".into()));
+        let op = crate::ops::Op::ClearField {
+            item: ItemId::new("PVTI_1"),
+            field: FieldId::new("F_notes"),
+        };
+        s.mutate(7, &ProjectId::new("P"), &op).await;
+        s.mutate(8, &ProjectId::new("P"), &op).await;
+        let events = drain(&mut rx);
+        assert!(matches!(
+            &events[0],
+            SyncEvent::OpDone {
+                id: 7,
+                result: Ok(crate::ops::Confirmed::Item(_))
+            }
+        ));
+        assert!(matches!(&events[1], SyncEvent::Rate(_)));
+        assert!(matches!(
+            &events[2],
+            SyncEvent::OpDone {
+                id: 8,
+                result: Err(GithubError::Network(_))
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_full_load_reports_the_token_scopes() {
+        let (t, s, mut rx) = setup(2000);
+        t.set_scopes(Some(vec!["project".into()]));
+        t.push("ItemsPage", page(&["a"], 1, None));
+        s.full_load(&ProjectId::new("P")).await;
+        let events = drain(&mut rx);
+        assert!(events.iter().any(
+            |e| matches!(e, SyncEvent::Access { scopes: Some(s) } if s == &["project".to_string()])
+        ));
+        assert!(matches!(events.last(), Some(SyncEvent::Rate(_))));
     }
 }

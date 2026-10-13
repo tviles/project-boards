@@ -73,6 +73,12 @@ pub enum SyncJob {
     },
     RepoProjects(RepoSlug),
     Projects(Option<RepoSlug>),
+    /// Send one pending edit.
+    Mutate {
+        id: crate::ops::OpId,
+        project: ProjectId,
+        op: crate::ops::Op,
+    },
 }
 
 impl SyncJob {
@@ -86,6 +92,7 @@ impl SyncJob {
             Self::Detail { .. } => "Detail",
             Self::RepoProjects(_) => "RepoProjects",
             Self::Projects(_) => "Projects",
+            Self::Mutate { .. } => "Mutate",
         }
     }
 }

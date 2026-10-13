@@ -6,6 +6,7 @@ pub mod syncer;
 use crate::github::GithubError;
 use crate::github::transport::RateInfo;
 use crate::model::{Item, ItemDetail, ItemId, Project, ProjectSummary, ViewId};
+use crate::ops::{Confirmed, OpId};
 use crate::store::{StoreUpdate, ViewList};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +77,16 @@ pub enum SyncEvent {
         detail: ItemDetail,
         older: bool,
     },
+    /// An edit finished. A secondary rate limit arrives as `Err(RateLimited)`; the controller
+    /// re-queues those instead of failing them.
+    OpDone {
+        id: OpId,
+        result: Result<Confirmed, GithubError>,
+    },
+    /// The token's classic scopes as the last response reported them (`None`: none reported).
+    Access {
+        scopes: Option<Vec<String>>,
+    },
     Failed {
         task: SyncTask,
         error: GithubError,
@@ -99,6 +110,8 @@ pub fn store_update(event: &SyncEvent) -> Option<StoreUpdate> {
         | SyncEvent::Projects(_)
         | SyncEvent::Detail { .. }
         | SyncEvent::Rate(_)
+        | SyncEvent::OpDone { .. }
+        | SyncEvent::Access { .. }
         | SyncEvent::Failed { .. } => None,
     }
 }

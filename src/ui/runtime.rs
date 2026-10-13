@@ -198,6 +198,7 @@ impl Runner {
                 SyncJob::Detail { item, before } => s.detail(&item, before).await,
                 SyncJob::RepoProjects(repo) => s.repo_projects(&repo).await,
                 SyncJob::Projects(repo) => s.projects(repo.as_ref()).await,
+                SyncJob::Mutate { id, project, op } => s.mutate(id, &project, &op).await,
             }
         });
     }

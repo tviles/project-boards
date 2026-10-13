@@ -851,7 +851,11 @@ impl App {
                     self.status.error = Some(format!("{}: {error}", task_words(&task)));
                 }
             }
-            SyncEvent::ViewIds { .. } | SyncEvent::Hydrated(_) | SyncEvent::RepoProjects(_) => {}
+            SyncEvent::ViewIds { .. }
+            | SyncEvent::Hydrated(_)
+            | SyncEvent::RepoProjects(_)
+            | SyncEvent::OpDone { .. }
+            | SyncEvent::Access { .. } => {}
         }
         self.restore_selection();
         cmds
