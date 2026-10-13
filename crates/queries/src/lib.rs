@@ -65,6 +65,11 @@ operation!(
     ConvertDraft,
     ArchiveItem,
     UnarchiveItem,
+    RepoCandidates,
+    PushableRepos,
+    RepoLookup,
+    SearchContent,
+    ContentByNumber,
 );
 
 /// The live suite's cleanup only: release builds do not contain this operation.

@@ -4,6 +4,7 @@ pub mod client;
 pub mod convert;
 pub mod error;
 pub mod fixture;
+pub mod lookups;
 pub mod mutations;
 pub mod queries;
 pub mod record;

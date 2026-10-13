@@ -44,6 +44,9 @@ const REQUIRED: &[&str] = &[
     "archiveProjectV2Item(",
     "unarchiveProjectV2Item(",
     "deleteIssue(",
+    "assignableUsers(",
+    "issueOrPullRequest(",
+    "viewerPermission: RepositoryPermission",
 ];
 
 #[test]

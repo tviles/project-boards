@@ -359,3 +359,50 @@ mutation ArchiveItem($project: ID!, $item: ID!) {
 mutation UnarchiveItem($project: ID!, $item: ID!) {
   unarchiveProjectV2Item(input: {projectId: $project, itemId: $item}) { item { id } }
 }
+
+# --- Lookups for the editors (0.3) ---------------------------------------------------------
+# Cost (nodes requested / 100, rounded up, minimum 1): RepoCandidates 1+100+100+50 = 251 -> 3;
+# PushableRepos 1+1+100 = 102 -> 2; RepoLookup 1; SearchContent 1+20 = 21 -> 1; ContentByNumber 1.
+
+query RepoCandidates($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    id
+    assignableUsers(first: 100) { nodes { id login } }
+    labels(first: 100) { nodes { id name color } }
+    milestones(first: 50, states: [OPEN], orderBy: {field: DUE_DATE, direction: ASC}) { nodes { id title } }
+  }
+}
+
+query PushableRepos {
+  viewer {
+    repositories(first: 100, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER],
+                 ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER],
+                 isArchived: false, orderBy: {field: PUSHED_AT, direction: DESC}) {
+      nodes { id nameWithOwner viewerPermission hasIssuesEnabled }
+    }
+  }
+}
+
+query RepoLookup($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) { id nameWithOwner viewerPermission hasIssuesEnabled }
+}
+
+query SearchContent($query: String!) {
+  search(query: $query, type: ISSUE, first: 20) {
+    nodes {
+      __typename
+      ... on Issue { id number title state repository { nameWithOwner } }
+      ... on PullRequest { id number title state repository { nameWithOwner } }
+    }
+  }
+}
+
+query ContentByNumber($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issueOrPullRequest(number: $number) {
+      __typename
+      ... on Issue { id number title state repository { nameWithOwner } }
+      ... on PullRequest { id number title state repository { nameWithOwner } }
+    }
+  }
+}
