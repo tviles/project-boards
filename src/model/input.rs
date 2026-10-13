@@ -129,6 +129,9 @@ mod tests {
             "{err}"
         );
         assert!(parse_date_input("2026-02-30", TODAY).is_err());
+        for bad in ["2026-13-01", "2026-00-10", "2026-04-31", "2026-1-"] {
+            assert!(parse_date_input(bad, TODAY).is_err(), "{bad}");
+        }
         assert!(parse_date_input("+xd", TODAY).is_err());
     }
 
@@ -139,5 +142,8 @@ mod tests {
         assert_eq!(parse_number_input(""), Ok(None));
         assert!(parse_number_input("three").is_err());
         assert!(parse_number_input("inf").is_err());
+        for bad in ["NaN", "nan", "-inf", "infinity", "-Infinity"] {
+            assert!(parse_number_input(bad).is_err(), "{bad}");
+        }
     }
 }
