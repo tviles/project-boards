@@ -648,6 +648,11 @@ impl App {
             Mode::Picker => self.handle_picker_key(key),
             Mode::Confirm => self.handle_confirm_key(&key),
             Mode::Detail => {
+                if let Some(a) = action
+                    && let Some(cmds) = self.edit_key(a)
+                {
+                    return cmds;
+                }
                 let targets = self.detail_targets();
                 let Some(state) = self.detail.as_mut() else {
                     self.mode = Mode::Normal;
@@ -673,111 +678,118 @@ impl App {
                         .unwrap_or_default(),
                 }
             }
-            Mode::Normal => match action {
-                Some(
-                    a @ (Action::Up
-                    | Action::Down
-                    | Action::Left
-                    | Action::Right
-                    | Action::Top
-                    | Action::Bottom),
-                ) => {
-                    self.move_selection(a);
-                    self.sync_selected_id();
-                    Vec::new()
+            Mode::Normal => {
+                if let Some(a) = action
+                    && let Some(cmds) = self.edit_key(a)
+                {
+                    return cmds;
                 }
-                Some(Action::NextView) => self.switch_view(true),
-                Some(Action::PrevView) => self.switch_view(false),
-                Some(Action::ToggleLayout) => {
-                    if let Some(view) = self.current_view().cloned() {
-                        let next = if self.layout().0 == Layout::Board {
-                            Layout::Table
-                        } else {
-                            Layout::Board
-                        };
+                match action {
+                    Some(
+                        a @ (Action::Up
+                        | Action::Down
+                        | Action::Left
+                        | Action::Right
+                        | Action::Top
+                        | Action::Bottom),
+                    ) => {
+                        self.move_selection(a);
                         self.sync_selected_id();
-                        let cmd = if next == view.layout {
-                            self.layout_toggle.remove(&view.id);
-                            Command::ClearLayout { view: view.id }
-                        } else {
-                            self.layout_toggle.insert(view.id.clone(), next);
-                            Command::SaveLayout {
-                                view: view.id,
-                                layout: next,
-                                github_layout: view.layout,
-                            }
-                        };
-                        self.restore_selection();
-                        return vec![cmd];
+                        Vec::new()
                     }
-                    Vec::new()
-                }
-                Some(Action::Open) => {
-                    if self.layout().0 == Layout::Table
-                        && matches!(
-                            self.table_rows().get(self.table_selected),
-                            Some(Row::Group { .. })
-                        )
-                    {
+                    Some(Action::NextView) => self.switch_view(true),
+                    Some(Action::PrevView) => self.switch_view(false),
+                    Some(Action::ToggleLayout) => {
+                        if let Some(view) = self.current_view().cloned() {
+                            let next = if self.layout().0 == Layout::Board {
+                                Layout::Table
+                            } else {
+                                Layout::Board
+                            };
+                            self.sync_selected_id();
+                            let cmd = if next == view.layout {
+                                self.layout_toggle.remove(&view.id);
+                                Command::ClearLayout { view: view.id }
+                            } else {
+                                self.layout_toggle.insert(view.id.clone(), next);
+                                Command::SaveLayout {
+                                    view: view.id,
+                                    layout: next,
+                                    github_layout: view.layout,
+                                }
+                            };
+                            self.restore_selection();
+                            return vec![cmd];
+                        }
+                        Vec::new()
+                    }
+                    Some(Action::Open) => {
+                        if self.layout().0 == Layout::Table
+                            && matches!(
+                                self.table_rows().get(self.table_selected),
+                                Some(Row::Group { .. })
+                            )
+                        {
+                            self.toggle_group();
+                            return Vec::new();
+                        }
+                        match self.selected_item().map(|i| i.id.clone()) {
+                            Some(id) => self.open_detail(id),
+                            None => Vec::new(),
+                        }
+                    }
+                    Some(Action::ToggleGroup) => {
                         self.toggle_group();
-                        return Vec::new();
+                        Vec::new()
                     }
-                    match self.selected_item().map(|i| i.id.clone()) {
-                        Some(id) => self.open_detail(id),
-                        None => Vec::new(),
+                    Some(Action::Search) => {
+                        self.sync_selected_id();
+                        self.input = self.search.clone();
+                        self.mode = Mode::Search;
+                        Vec::new()
                     }
+                    Some(Action::Filter) => {
+                        self.input = self.extra_filter().unwrap_or_default().to_string();
+                        self.mode = Mode::Filter;
+                        Vec::new()
+                    }
+                    Some(Action::ClearFilter) if self.extra_filter().is_some() => {
+                        self.set_extra_filter("")
+                    }
+                    Some(Action::Refresh) => vec![Command::Refresh],
+                    Some(Action::OpenBrowser) => {
+                        let url = self
+                            .selected_item()
+                            .and_then(|i| i.url())
+                            .map(String::from)
+                            .or_else(|| self.project().map(|p| p.url.clone()));
+                        url.map(|u| vec![Command::OpenUrl(u)]).unwrap_or_default()
+                    }
+                    Some(Action::Help) => {
+                        self.mode = Mode::Help;
+                        Vec::new()
+                    }
+                    Some(Action::Back) => {
+                        self.search.clear();
+                        self.status.error = None;
+                        self.sync_selected_id();
+                        self.restore_selection();
+                        Vec::new()
+                    }
+                    Some(Action::PickBoard) if self.pending_count() > 0 => {
+                        let n = self.pending_count();
+                        self.status.flash = Some(format!(
+                            "{n} edit{} still sending; switch boards when {} done",
+                            if n == 1 { " is" } else { "s are" },
+                            if n == 1 { "it is" } else { "they are" }
+                        ));
+                        Vec::new()
+                    }
+                    Some(Action::PickBoard) => vec![Command::ShowPicker],
+                    Some(Action::Quit) => self.request_quit(),
+                    _ => Vec::new(),
                 }
-                Some(Action::ToggleGroup) => {
-                    self.toggle_group();
-                    Vec::new()
-                }
-                Some(Action::Search) => {
-                    self.sync_selected_id();
-                    self.input = self.search.clone();
-                    self.mode = Mode::Search;
-                    Vec::new()
-                }
-                Some(Action::Filter) => {
-                    self.input = self.extra_filter().unwrap_or_default().to_string();
-                    self.mode = Mode::Filter;
-                    Vec::new()
-                }
-                Some(Action::ClearFilter) if self.extra_filter().is_some() => {
-                    self.set_extra_filter("")
-                }
-                Some(Action::Refresh) => vec![Command::Refresh],
-                Some(Action::OpenBrowser) => {
-                    let url = self
-                        .selected_item()
-                        .and_then(|i| i.url())
-                        .map(String::from)
-                        .or_else(|| self.project().map(|p| p.url.clone()));
-                    url.map(|u| vec![Command::OpenUrl(u)]).unwrap_or_default()
-                }
-                Some(Action::Help) => {
-                    self.mode = Mode::Help;
-                    Vec::new()
-                }
-                Some(Action::Back) => {
-                    self.search.clear();
-                    self.status.error = None;
-                    self.sync_selected_id();
-                    self.restore_selection();
-                    Vec::new()
-                }
-                Some(Action::PickBoard) if self.pending_count() > 0 => {
-                    let n = self.pending_count();
-                    self.status.flash = Some(format!(
-                        "{n} edit{} still sending; switch boards when {} done",
-                        if n == 1 { " is" } else { "s are" },
-                        if n == 1 { "it is" } else { "they are" }
-                    ));
-                    Vec::new()
-                }
-                Some(Action::PickBoard) => vec![Command::ShowPicker],
-                Some(Action::Quit) => self.request_quit(),
-                _ => Vec::new(),
-            },
+            }
         }
     }
 

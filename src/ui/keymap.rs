@@ -25,6 +25,10 @@ pub enum Action {
     ToggleGroup,
     ToggleRaw,
     LoadOlder,
+    MovePrevColumn,
+    MoveNextColumn,
+    ReorderUp,
+    ReorderDown,
 }
 
 use crate::model::OpKind;
@@ -33,7 +37,11 @@ impl Action {
     /// The operations this action's key runs; empty for actions that edit nothing. Later
     /// tasks fill this in as they add edit keys.
     pub fn kinds(self) -> &'static [OpKind] {
-        &[]
+        match self {
+            Action::MovePrevColumn | Action::MoveNextColumn => &[OpKind::Move],
+            Action::ReorderUp | Action::ReorderDown => &[OpKind::Reorder],
+            _ => &[],
+        }
     }
 
     /// The action whose key runs `kind`, for hints such as "(C)" in messages.
@@ -44,7 +52,7 @@ impl Action {
             .find(|a| a.kinds().contains(&kind))
     }
 
-    pub const ALL: [Action; 22] = [
+    pub const ALL: [Action; 26] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -67,6 +75,10 @@ impl Action {
         Action::ToggleGroup,
         Action::ToggleRaw,
         Action::LoadOlder,
+        Action::MovePrevColumn,
+        Action::MoveNextColumn,
+        Action::ReorderUp,
+        Action::ReorderDown,
     ];
 
     /// The name used in `[keys]` of config.toml.
@@ -94,6 +106,10 @@ impl Action {
             Action::ToggleGroup => "toggle_group",
             Action::ToggleRaw => "toggle_raw",
             Action::LoadOlder => "load_older",
+            Action::MovePrevColumn => "move_prev_column",
+            Action::MoveNextColumn => "move_next_column",
+            Action::ReorderUp => "reorder_up",
+            Action::ReorderDown => "reorder_down",
         }
     }
 
@@ -121,6 +137,10 @@ impl Action {
             Action::ToggleGroup => "collapse or expand the group",
             Action::ToggleRaw => "detail: rendered / raw text",
             Action::LoadOlder => "detail: load older comments",
+            Action::MovePrevColumn => "move the item to the previous column",
+            Action::MoveNextColumn => "move the item to the next column",
+            Action::ReorderUp => "move the item up (reorder)",
+            Action::ReorderDown => "move the item down (reorder)",
         }
     }
 
@@ -248,6 +268,10 @@ const DEFAULTS: &[(&str, Action)] = &[
     ("z", Action::ToggleGroup),
     ("m", Action::ToggleRaw),
     ("P", Action::LoadOlder),
+    ("<", Action::MovePrevColumn),
+    (">", Action::MoveNextColumn),
+    ("K", Action::ReorderUp),
+    ("J", Action::ReorderDown),
 ];
 
 impl Keymap {
@@ -418,6 +442,20 @@ mod tests {
                 continue;
             }
             assert_eq!(KeySpec::parse(&spec.label()).unwrap(), *spec);
+        }
+    }
+
+    #[test]
+    fn no_key_is_bound_twice_by_default() {
+        let km = Keymap::defaults();
+        let mut seen = std::collections::HashSet::new();
+        for (spec, action) in km.bindings() {
+            assert!(
+                seen.insert(*spec),
+                "{} is bound twice (again to {})",
+                spec.label(),
+                action.name()
+            );
         }
     }
 }

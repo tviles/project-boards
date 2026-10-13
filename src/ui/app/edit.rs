@@ -4,6 +4,7 @@
 use super::*;
 use crate::model::{Denial, EditContext, OpKind, check};
 use crate::ops::{Confirmed, Op, OpId};
+use crate::ui::table::Row;
 use std::time::Instant;
 
 /// An edit GitHub refused, for the error log.
@@ -88,8 +89,6 @@ impl App {
 
     /// Runs `op` when the capability matrix allows `kind` on its item: the edit shows at once
     /// and `Command::Send` asks the controller to send it. Otherwise shows the reason.
-    // Edit keys (later tasks) call this; until then only the tests do.
-    #[allow(dead_code)]
     pub(crate) fn submit(&mut self, kind: OpKind, op: Op) -> Vec<Command> {
         let Some(item) = self
             .snapshot()
@@ -107,6 +106,185 @@ impl App {
         self.pending_kinds.insert(id, kind);
         self.restore_selection();
         vec![Command::Send(id)]
+    }
+
+    /// Runs an edit key on `action_item`. `None` when `action` is not an edit key.
+    pub(crate) fn edit_key(&mut self, action: Action) -> Option<Vec<Command>> {
+        let cmds = match action {
+            Action::MovePrevColumn => self.move_card(-1),
+            Action::MoveNextColumn => self.move_card(1),
+            Action::ReorderUp => self.reorder(false),
+            Action::ReorderDown => self.reorder(true),
+            _ => return None,
+        };
+        Some(cmds)
+    }
+
+    /// `check`, plus what the current view rules out: moving needs a column field, and
+    /// reordering needs an unsorted view (GitHub's rule). Every edit key, the action menu and
+    /// the hints ask this, so the UI never offers what it would then refuse. The reason is
+    /// the one-line message to show.
+    pub(crate) fn check_here(&self, kind: OpKind, item: &Item) -> Result<(), String> {
+        check(kind, item, &self.edit_context()).map_err(|d| self.denial_text(d))?;
+        match kind {
+            OpKind::Move if self.column_field().is_none() => {
+                Err("This view has no single-select or iteration field to move along".into())
+            }
+            OpKind::Reorder => match self.current_view().and_then(|v| v.sort_by.first()) {
+                Some(sort) => {
+                    let name = self
+                        .project()
+                        .and_then(|p| p.field(&sort.field))
+                        .map_or_else(|| "a field".to_string(), |f| f.name.clone());
+                    Err(format!(
+                        "This view is sorted by {name}; reordering needs an unsorted view"
+                    ))
+                }
+                None => Ok(()),
+            },
+            _ => Ok(()),
+        }
+    }
+
+    /// Moves the item to the neighbouring column among those the board shows (a column the
+    /// filter hides is not shown, so it is skipped), purely by position (Decision 12, user-
+    /// confirmed): never wraps, never clears. It stops at the first and the last option;
+    /// "No <field>", drawn last, is never a destination, and from it `<` goes to the column
+    /// before it. Clearing a field is `e`'s job. The table uses the same columns.
+    fn move_card(&mut self, step: isize) -> Vec<Command> {
+        let Some(item) = self.action_item().cloned() else {
+            return Vec::new();
+        };
+        if let Err(reason) = self.check_here(OpKind::Move, &item) {
+            self.status.flash = Some(reason);
+            return Vec::new();
+        }
+        let Some(field) = self.column_field().cloned() else {
+            return Vec::new();
+        };
+        let columns = self.board_columns();
+        let Some(pos) = columns
+            .iter()
+            .position(|c| c.items().iter().any(|i| i.id == item.id))
+        else {
+            self.status.flash = Some("This item is not shown in this view".into());
+            return Vec::new();
+        };
+        // `None`: past either edge, or the "No <field>" column (its key is `None`).
+        let target: Option<String> = pos
+            .checked_add_signed(step)
+            .and_then(|i| columns.get(i))
+            .and_then(|c| c.bucket.key.clone());
+        let Some(key) = target else {
+            self.status.flash = Some(
+                if step < 0 {
+                    "Already in the first column"
+                } else {
+                    "Already in the last column"
+                }
+                .into(),
+            );
+            return Vec::new();
+        };
+        let Some(value) = field.value_for_bucket(&key) else {
+            return Vec::new();
+        };
+        self.submit(
+            OpKind::Move,
+            Op::SetField {
+                item: item.id.clone(),
+                field: field.id.clone(),
+                value,
+            },
+        )
+    }
+
+    /// Moves the item one place up or down among its neighbours: `K` puts it after its upper
+    /// neighbour's predecessor in project order (first when there is none), `J` after its
+    /// lower neighbour. Needs an unsorted view; stays inside the swimlane or group.
+    fn reorder(&mut self, down: bool) -> Vec<Command> {
+        let Some(item) = self.action_item().cloned() else {
+            return Vec::new();
+        };
+        if let Err(reason) = self.check_here(OpKind::Reorder, &item) {
+            self.status.flash = Some(reason);
+            return Vec::new();
+        }
+        let Some(scope) = self.reorder_scope(&item.id) else {
+            return Vec::new();
+        };
+        let Some(pos) = scope.iter().position(|i| *i == item.id) else {
+            return Vec::new();
+        };
+        let neighbour = if down {
+            scope.get(pos + 1)
+        } else {
+            pos.checked_sub(1).and_then(|p| scope.get(p))
+        };
+        let Some(neighbour) = neighbour.cloned() else {
+            self.status.flash = Some(
+                if down {
+                    "Already last here"
+                } else {
+                    "Already first here"
+                }
+                .into(),
+            );
+            return Vec::new();
+        };
+        let after = if down {
+            Some(neighbour)
+        } else {
+            self.predecessor(&neighbour, &item.id)
+        };
+        self.submit(
+            OpKind::Reorder,
+            Op::Reorder {
+                item: item.id,
+                after,
+            },
+        )
+    }
+
+    /// The ids `id` can be reordered among, in display order: its swimlane on a board; its
+    /// group, or the whole table, otherwise.
+    fn reorder_scope(&self, id: &ItemId) -> Option<Vec<ItemId>> {
+        if self.layout().0 == Layout::Board {
+            return self
+                .board_columns()
+                .iter()
+                .flat_map(|c| c.lanes.iter())
+                .find(|l| l.items.iter().any(|i| &i.id == id))
+                .map(|l| l.items.iter().map(|i| i.id.clone()).collect());
+        }
+        let rows = self.table_rows();
+        let at = rows
+            .iter()
+            .position(|r| matches!(r, Row::Item(i) if &i.id == id))?;
+        let start = rows[..at]
+            .iter()
+            .rposition(|r| matches!(r, Row::Group { .. }))
+            .map_or(0, |g| g + 1);
+        let end = rows[at..]
+            .iter()
+            .position(|r| matches!(r, Row::Group { .. }))
+            .map_or(rows.len(), |g| at + g);
+        Some(
+            rows[start..end]
+                .iter()
+                .filter_map(|r| match r {
+                    Row::Item(i) => Some(i.id.clone()),
+                    Row::Group { .. } => None,
+                })
+                .collect(),
+        )
+    }
+
+    /// The item before `of` in project order, skipping `skip` (the item being moved).
+    fn predecessor(&self, of: &ItemId, skip: &ItemId) -> Option<ItemId> {
+        let order = &self.snapshot()?.order;
+        let at = order.iter().position(|i| i == of)?;
+        order[..at].iter().rev().find(|i| *i != skip).cloned()
     }
 
     /// GitHub answered edit `id`. A failure leaves the pending list (the view rebuilds
@@ -588,5 +766,219 @@ mod tests {
             kind: None,
         }]);
         assert_eq!(error_message(&blank), "GitHub returned an error");
+    }
+
+    fn on_board(a: &mut App) {
+        a.select_view(&crate::model::ViewId::new("V_board"));
+        a.handle_key(code(KeyCode::Home));
+    }
+
+    fn selected(a: &App) -> String {
+        a.selected_item()
+            .map(|i| i.id.0.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn moving_follows_the_columns_and_the_cursor_follows_the_card() {
+        let mut a = test_app();
+        on_board(&mut a);
+        assert_eq!(selected(&a), "a");
+        assert_eq!(a.handle_key(key('>')), vec![Command::Send(1)]);
+        assert_eq!(status(a.snapshot(), "a"), "In Progress");
+        assert_eq!(selected(&a), "a", "the cursor moved with the card");
+        assert_eq!(a.board_sel.column, 1);
+        assert_eq!(a.handle_key(key('<')), vec![Command::Send(2)]);
+        assert_eq!(status(a.snapshot(), "a"), "Todo");
+    }
+
+    /// Review Focus 2.
+    #[test]
+    fn quick_moves_follow_the_shown_columns_and_stop_at_the_last_option() {
+        let mut a = test_app();
+        on_board(&mut a);
+        assert_eq!(a.handle_key(key('>')), vec![Command::Send(1)]);
+        assert_eq!(a.handle_key(key('>')), vec![Command::Send(2)]);
+        assert_eq!(
+            status(a.snapshot(), "a"),
+            "Done",
+            "Todo → In Progress → Done"
+        );
+        assert_eq!(
+            a.handle_key(key('>')),
+            Vec::<Command>::new(),
+            "never into No Status: clearing is e's job"
+        );
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Already in the last column")
+        );
+        let names: Vec<&str> = a.store.pending().iter().map(|p| p.op.name()).collect();
+        assert_eq!(names, ["SetField", "SetField"], "no ClearField ever");
+    }
+
+    #[test]
+    fn the_first_column_stops_a_left_move() {
+        let mut a = test_app();
+        on_board(&mut a);
+        assert!(a.handle_key(key('<')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Already in the first column")
+        );
+    }
+
+    #[test]
+    fn a_card_on_a_deleted_option_moves_from_no_status() {
+        let mut a = test_app();
+        on_board(&mut a);
+        for _ in 0..3 {
+            a.handle_key(key('l'));
+        }
+        assert_eq!(selected(&a), "e");
+        assert!(
+            a.handle_key(key('>')).is_empty(),
+            "No Status is last: nothing to the right"
+        );
+        a.handle_key(key('<'));
+        assert_eq!(status(a.snapshot(), "e"), "Done");
+    }
+
+    #[test]
+    fn moves_skip_columns_the_filter_hides_and_stop_before_no_status() {
+        let mut snap = snapshot();
+        snap.project.views[1].filter = "-status:\"In Progress\"".into();
+        let mut a = App::new(
+            Box::new(crate::store::MemoryStore::new(Some(snap))),
+            crate::ui::keymap::Keymap::defaults(),
+            crate::ui::theme::Theme::plain(),
+        );
+        let board = crate::model::ViewId::new("V_board");
+        a.select_view(&board);
+        a.on_sync(SyncEvent::ViewIds {
+            view: board,
+            filter: "-status:\"In Progress\"".into(),
+            list: crate::store::ViewList {
+                ids: ["a", "c", "d", "e"]
+                    .iter()
+                    .map(|i| ItemId::new(*i))
+                    .collect(),
+                total: 4,
+                truncated: false,
+            },
+        });
+        a.handle_key(code(KeyCode::Home));
+        assert_eq!(a.handle_key(key('>')), vec![Command::Send(1)]);
+        assert_eq!(
+            status(a.snapshot(), "a"),
+            "Done",
+            "the hidden In Progress column is skipped"
+        );
+        assert!(a.handle_key(key('>')).is_empty());
+    }
+
+    #[test]
+    fn table_moves_use_the_views_column_field() {
+        let mut a = test_app();
+        assert_eq!(selected(&a), "a");
+        a.handle_key(key('>'));
+        assert_eq!(status(a.snapshot(), "a"), "In Progress");
+    }
+
+    #[test]
+    fn reorder_moves_past_the_neighbour_in_the_table() {
+        let mut a = test_app();
+        a.handle_key(key('J'));
+        assert_eq!(
+            a.store.pending()[0].op,
+            Op::Reorder {
+                item: ItemId::new("a"),
+                after: Some(ItemId::new("b"))
+            }
+        );
+        let mut b = test_app();
+        b.handle_key(key('j'));
+        b.handle_key(key('j'));
+        b.handle_key(key('K'));
+        assert_eq!(
+            b.store.pending()[0].op,
+            Op::Reorder {
+                item: ItemId::new("c"),
+                after: Some(ItemId::new("a"))
+            }
+        );
+        let mut c = test_app();
+        c.handle_key(key('j'));
+        c.handle_key(key('K'));
+        assert_eq!(
+            c.store.pending()[0].op,
+            Op::Reorder {
+                item: ItemId::new("b"),
+                after: None
+            }
+        );
+        assert_eq!(selected(&c), "b", "the cursor stays on the moved item");
+        let mut d = test_app();
+        assert!(d.handle_key(key('K')).is_empty());
+        assert_eq!(d.status.flash.as_deref(), Some("Already first here"));
+    }
+
+    #[test]
+    fn reorder_stays_inside_a_swimlane() {
+        let mut a = test_app();
+        on_board(&mut a);
+        // Todo holds a (lane P0) and c (lane P2).
+        assert!(a.handle_key(key('J')).is_empty());
+        assert_eq!(a.status.flash.as_deref(), Some("Already last here"));
+    }
+
+    #[test]
+    fn a_sorted_view_refuses_reorder() {
+        let mut snap = snapshot();
+        snap.project.views[0].sort_by = vec![crate::model::SortSpec {
+            field: FieldId::new("F_prio"),
+            direction: crate::model::SortDirection::Desc,
+        }];
+        let mut a = App::new(
+            Box::new(crate::store::MemoryStore::new(Some(snap))),
+            crate::ui::keymap::Keymap::defaults(),
+            crate::ui::theme::Theme::plain(),
+        );
+        assert!(a.handle_key(key('J')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("This view is sorted by Priority; reordering needs an unsorted view")
+        );
+    }
+
+    #[test]
+    fn a_private_item_moves_but_does_not_reorder() {
+        let mut snap = snapshot();
+        snap.items.get_mut(&ItemId::new("a")).unwrap().content =
+            crate::model::ItemContent::Redacted;
+        let mut a = App::new(
+            Box::new(crate::store::MemoryStore::new(Some(snap))),
+            crate::ui::keymap::Keymap::defaults(),
+            crate::ui::theme::Theme::plain(),
+        );
+        assert!(a.handle_key(key('J')).is_empty());
+        assert!(
+            a.status
+                .flash
+                .as_deref()
+                .unwrap()
+                .starts_with("You can't see this item's content")
+        );
+        assert_eq!(a.handle_key(key('>')), vec![Command::Send(1)]);
+    }
+
+    #[test]
+    fn edit_keys_act_on_the_open_detail_item() {
+        let mut a = test_app();
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(a.mode, Mode::Detail);
+        assert_eq!(a.handle_key(key('>')), vec![Command::Send(1)]);
+        assert_eq!(status(a.snapshot(), "a"), "In Progress");
+        assert_eq!(a.mode, Mode::Detail);
     }
 }
