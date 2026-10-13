@@ -2,7 +2,7 @@
 //! settles when GitHub answers. Failed edits go to the error log.
 
 use super::*;
-use crate::model::{Denial, EditContext, OpKind, check, check_new};
+use crate::model::{ContentId, Denial, EditContext, OpKind, check, check_new};
 use crate::ops::{Confirmed, NewItem, Op, OpId};
 use crate::store::BoardSnapshot;
 use crate::ui::app::popups::{
@@ -121,6 +121,7 @@ pub(crate) const EDIT_ACTIONS: &[Action] = &[
     Action::Assignees,
     Action::Labels,
     Action::EditField,
+    Action::Comment,
 ];
 
 /// The menu's words for an action.
@@ -151,7 +152,12 @@ fn hint_word(action: Action, kind: OpKind) -> &'static str {
 }
 
 /// The single-action keys the hints list before move and reorder.
-const HINTED: &[Action] = &[Action::Assignees, Action::Labels, Action::EditField];
+const HINTED: &[Action] = &[
+    Action::Assignees,
+    Action::Labels,
+    Action::EditField,
+    Action::Comment,
+];
 
 /// A lookup an editor waits on.
 #[derive(Debug, Clone, PartialEq)]
@@ -580,11 +586,156 @@ impl App {
             Action::Assignees => self.open_candidates(OpKind::Assignees, false),
             Action::Labels => self.open_candidates(OpKind::Labels, false),
             Action::EditField => self.open_field_menu(),
+            Action::Comment => self.comment(),
             Action::ActionMenu => self.open_action_menu(),
             Action::ErrorLog => self.open_error_log(),
             _ => return None,
         };
         Some(cmds)
+    }
+
+    /// The item `kind` would act on, when `check_here` allows it; otherwise shows why.
+    fn guarded(&mut self, kind: OpKind) -> Option<Item> {
+        let Some(item) = self.action_item().cloned() else {
+            self.status.flash = Some("Select an item first".into());
+            return None;
+        };
+        match self.check_here(kind, &item) {
+            Ok(()) => Some(item),
+            Err(reason) => {
+                self.status.flash = Some(reason);
+                None
+            }
+        }
+    }
+
+    /// Opens `$EDITOR` on the item's title.
+    pub(crate) fn edit_title(&mut self) -> Vec<Command> {
+        let Some(item) = self.guarded(OpKind::Title) else {
+            return Vec::new();
+        };
+        vec![Command::Edit {
+            initial: item.title().to_string(),
+            purpose: EditPurpose::Title(item.id),
+        }]
+    }
+
+    /// Opens `$EDITOR` on the item's body. The body is only known once the item detail has
+    /// loaded it (Decision 27): until then this opens the detail (or loads it again after a
+    /// failure) and asks to try again.
+    pub(crate) fn edit_body(&mut self) -> Vec<Command> {
+        let Some(item) = self.guarded(OpKind::Body) else {
+            return Vec::new();
+        };
+        if let Some(body) = self.loaded_body(&item.id) {
+            return vec![Command::Edit {
+                purpose: EditPurpose::Body(item.id),
+                initial: body,
+            }];
+        }
+        let cmds = match self.detail.as_ref().filter(|d| d.item == item.id) {
+            // Still loading.
+            Some(d) if d.error.is_none() => Vec::new(),
+            Some(_) => vec![Command::LoadDetail {
+                item: item.id.clone(),
+                before: None,
+            }],
+            None => self.open_detail(item.id.clone()),
+        };
+        self.status.flash = Some("Loading the body; choose Edit body again once it shows".into());
+        cmds
+    }
+
+    /// `c`: opens `$EDITOR` on an empty comment.
+    pub(crate) fn comment(&mut self) -> Vec<Command> {
+        let Some(item) = self.guarded(OpKind::Comment) else {
+            return Vec::new();
+        };
+        vec![Command::Edit {
+            purpose: EditPurpose::Comment(item.id),
+            initial: String::new(),
+        }]
+    }
+
+    /// The body the open detail has loaded for `item`.
+    fn loaded_body(&self, item: &ItemId) -> Option<String> {
+        let d = self.detail.as_ref().filter(|d| &d.item == item)?;
+        d.detail.as_ref().map(|x| x.body.clone())
+    }
+
+    /// The editor closed with `text` (`None`: it exited with an error). Sends the edit unless
+    /// that, or the text is empty or unchanged; the status line says which.
+    pub(crate) fn on_edited(&mut self, purpose: EditPurpose, text: Option<String>) -> Vec<Command> {
+        let Some(text) = text else {
+            return self.say("The editor exited with an error; nothing was sent");
+        };
+        match purpose {
+            EditPurpose::Title(id) => {
+                let title = text
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("")
+                    .to_string();
+                if title.is_empty() {
+                    return self.say("Empty title; nothing was sent");
+                }
+                if self.item(&id).is_some_and(|i| i.title() == title) {
+                    return self.say("Title unchanged");
+                }
+                self.submit_content(OpKind::Title, id, |item, content| Op::Title {
+                    item,
+                    content,
+                    title,
+                })
+            }
+            EditPurpose::Body(id) => {
+                let body = text.trim_end().to_string();
+                let current = self.loaded_body(&id).unwrap_or_default();
+                if body == current.trim_end() {
+                    return self.say("Body unchanged");
+                }
+                self.submit_content(OpKind::Body, id, |item, content| Op::Body {
+                    item,
+                    content,
+                    body,
+                })
+            }
+            EditPurpose::Comment(id) => {
+                let body = text.trim().to_string();
+                if body.is_empty() {
+                    return self.say("Empty comment; nothing was sent");
+                }
+                self.submit_content(OpKind::Comment, id, |item, content| Op::Comment {
+                    item,
+                    content,
+                    body,
+                })
+            }
+        }
+    }
+
+    /// Submits an edit of the item's issue, pull request or draft, which needs the item still
+    /// on the board and its content node id.
+    fn submit_content(
+        &mut self,
+        kind: OpKind,
+        id: ItemId,
+        op: impl FnOnce(ItemId, ContentId) -> Op,
+    ) -> Vec<Command> {
+        let Some(item) = self.item(&id) else {
+            return self.say("That item is no longer on the board");
+        };
+        let Some(content) = item.content_id() else {
+            return self.say(&self.denial_text(Denial::NeedsRefresh));
+        };
+        self.submit(kind, op(id, content))
+    }
+
+    /// Shows `message` on the status line; nothing to do.
+    fn say(&mut self, message: &str) -> Vec<Command> {
+        self.status.flash = Some(message.to_string());
+        Vec::new()
     }
 
     /// `check`, plus what the current view rules out: moving needs a column field, and
@@ -809,18 +960,25 @@ impl App {
                         self.record_refused_scopes(e);
                     }
                 }
-                let Some((temp, real)) = self.store.settle_ok(id, confirmed) else {
-                    return Vec::new();
+                // A new body or comment shows in the open detail once it is reloaded.
+                let reload = pending
+                    .as_ref()
+                    .and_then(|op| match op {
+                        Op::Body { item, .. } | Op::Comment { item, .. } => Some(item.clone()),
+                        _ => None,
+                    })
+                    .filter(|item| self.detail.as_ref().is_some_and(|d| &d.item == item));
+                // A new item replaces its placeholder; an open detail of it loads the real one.
+                let load = match self.store.settle_ok(id, confirmed) {
+                    Some((temp, real)) => {
+                        self.renamed(&temp, &real);
+                        Some(real)
+                            .filter(|real| self.detail.as_ref().is_some_and(|d| &d.item == real))
+                    }
+                    None => reload,
                 };
-                self.renamed(&temp, &real);
-                if self.detail.as_ref().is_some_and(|d| d.item == real) {
-                    vec![Command::LoadDetail {
-                        item: real,
-                        before: None,
-                    }]
-                } else {
-                    Vec::new()
-                }
+                load.map(|item| vec![Command::LoadDetail { item, before: None }])
+                    .unwrap_or_default()
             }
             Err(error) => {
                 // The answer was lost, not refused: the draft or issue may exist.
@@ -3073,5 +3231,216 @@ mod tests {
         });
         assert!(cmds.is_empty());
         assert_eq!(b.detail.as_ref().unwrap().item.as_str(), "a");
+    }
+
+    use crate::ui::app::EditPurpose;
+
+    fn open_detail_with_body(a: &mut App, body: &str) {
+        a.handle_key(code(KeyCode::Enter));
+        a.on_sync(SyncEvent::Detail {
+            item: ItemId::new("a"),
+            detail: crate::model::ItemDetail {
+                body: body.into(),
+                ..Default::default()
+            },
+            older: false,
+        });
+    }
+
+    #[test]
+    fn a_title_edit_opens_the_editor_with_the_title_and_sends_the_new_one() {
+        let mut a = test_app();
+        assert_eq!(
+            a.edit_title(),
+            vec![Command::Edit {
+                purpose: EditPurpose::Title(ItemId::new("a")),
+                initial: "Fix crash".into()
+            }]
+        );
+        let cmds = a.on_edited(
+            EditPurpose::Title(ItemId::new("a")),
+            Some("Fix the crash on start\n".into()),
+        );
+        assert_eq!(cmds, vec![Command::Send(1)]);
+        assert_eq!(
+            a.item(&ItemId::new("a")).unwrap().title(),
+            "Fix the crash on start"
+        );
+    }
+
+    /// Review Focus 5.
+    #[test]
+    fn an_aborted_empty_or_unchanged_edit_sends_nothing() {
+        let mut a = test_app();
+        let title = || EditPurpose::Title(ItemId::new("a"));
+        assert!(a.on_edited(title(), None).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("The editor exited with an error; nothing was sent")
+        );
+        assert!(a.on_edited(title(), Some("\n  \n".into())).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Empty title; nothing was sent")
+        );
+        assert!(a.on_edited(title(), Some("Fix crash\n".into())).is_empty());
+        assert_eq!(a.status.flash.as_deref(), Some("Title unchanged"));
+        assert!(
+            a.on_edited(EditPurpose::Comment(ItemId::new("a")), Some(" \n".into()))
+                .is_empty()
+        );
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Empty comment; nothing was sent")
+        );
+        open_detail_with_body(&mut a, "Steps\n");
+        assert!(
+            a.on_edited(
+                EditPurpose::Body(ItemId::new("a")),
+                Some("Steps\n\n".into())
+            )
+            .is_empty()
+        );
+        assert_eq!(a.status.flash.as_deref(), Some("Body unchanged"));
+        assert_eq!(a.pending_count(), 0);
+    }
+
+    #[test]
+    fn a_body_edit_needs_the_body_loaded_first() {
+        let mut a = test_app();
+        let cmds = a.edit_body();
+        assert_eq!(
+            cmds,
+            vec![Command::LoadDetail {
+                item: ItemId::new("a"),
+                before: None
+            }]
+        );
+        assert_eq!(a.mode, Mode::Detail);
+        assert!(a.status.flash.as_deref().unwrap().contains("again"));
+        a.on_sync(SyncEvent::Detail {
+            item: ItemId::new("a"),
+            detail: crate::model::ItemDetail {
+                body: "Steps".into(),
+                ..Default::default()
+            },
+            older: false,
+        });
+        assert_eq!(
+            a.edit_body(),
+            vec![Command::Edit {
+                purpose: EditPurpose::Body(ItemId::new("a")),
+                initial: "Steps".into()
+            }]
+        );
+        assert_eq!(
+            a.on_edited(
+                EditPurpose::Body(ItemId::new("a")),
+                Some("Steps\n\nMore".into())
+            ),
+            vec![Command::Send(1)]
+        );
+    }
+
+    #[test]
+    fn a_comment_is_sent_and_the_open_detail_reloads_once_it_lands() {
+        let mut a = test_app();
+        open_detail_with_body(&mut a, "Steps");
+        assert_eq!(
+            a.handle_key(key('c')),
+            vec![Command::Edit {
+                purpose: EditPurpose::Comment(ItemId::new("a")),
+                initial: String::new()
+            }]
+        );
+        assert_eq!(
+            a.on_edited(
+                EditPurpose::Comment(ItemId::new("a")),
+                Some("LGTM\n".into())
+            ),
+            vec![Command::Send(1)]
+        );
+        let cmds = a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Ok(Confirmed::Applied),
+        });
+        assert_eq!(
+            cmds,
+            vec![Command::LoadDetail {
+                item: ItemId::new("a"),
+                before: None
+            }]
+        );
+    }
+
+    #[test]
+    fn edit_body_loads_again_after_a_failed_load_and_waits_while_loading() {
+        let mut a = test_app();
+        a.edit_body();
+        assert!(
+            a.edit_body().is_empty(),
+            "still loading: nothing more to ask"
+        );
+        a.on_sync(SyncEvent::Failed {
+            task: crate::sync::SyncTask::Detail(ItemId::new("a")),
+            error: GithubError::Network("offline".into()),
+        });
+        assert_eq!(
+            a.edit_body(),
+            vec![Command::LoadDetail {
+                item: ItemId::new("a"),
+                before: None
+            }]
+        );
+    }
+
+    #[test]
+    fn an_edit_for_an_item_that_left_the_board_sends_nothing() {
+        let mut a = test_app();
+        assert_eq!(a.comment().len(), 1);
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.items.remove(&ItemId::new("a"));
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        let comment = EditPurpose::Comment(ItemId::new("a"));
+        assert!(a.on_edited(comment, Some("LGTM".into())).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("That item is no longer on the board")
+        );
+        assert_eq!(a.pending_count(), 0);
+    }
+
+    #[test]
+    fn a_title_edit_takes_the_first_line_and_a_body_edit_reloads_the_detail() {
+        let mut a = test_app();
+        let title = EditPurpose::Title(ItemId::new("a"));
+        assert_eq!(
+            a.on_edited(title, Some("\n  New title  \nignored\n".into())),
+            vec![Command::Send(1)]
+        );
+        assert_eq!(a.item(&ItemId::new("a")).unwrap().title(), "New title");
+        let cmds = a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Ok(Confirmed::Applied),
+        });
+        assert!(cmds.is_empty(), "a title needs no detail reload");
+        open_detail_with_body(&mut a, "Steps");
+        let body = EditPurpose::Body(ItemId::new("a"));
+        assert_eq!(
+            a.on_edited(body, Some("".into())),
+            vec![Command::Send(2)],
+            "a body can be emptied"
+        );
+        let cmds = a.on_sync(SyncEvent::OpDone {
+            id: 2,
+            result: Ok(Confirmed::Applied),
+        });
+        assert_eq!(
+            cmds,
+            vec![Command::LoadDetail {
+                item: ItemId::new("a"),
+                before: None
+            }]
+        );
     }
 }

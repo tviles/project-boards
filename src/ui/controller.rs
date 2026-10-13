@@ -13,7 +13,7 @@ use crate::store::MemoryStore;
 use crate::store::cache::{cache_path, load_cache, save_cache};
 use crate::sync::scheduler::{PollConfig, PollKind, Scheduler};
 use crate::sync::{IncrementalMode, SyncEvent, SyncTask};
-use crate::ui::app::{App, Command, Mode, setup_message};
+use crate::ui::app::{App, Command, EditPurpose, Mode, setup_message};
 use crate::ui::keymap::Keymap;
 use crate::ui::picker::PickerState;
 use crate::ui::theme::Theme;
@@ -50,6 +50,11 @@ pub enum Input {
     Sync {
         generation: u64,
         event: SyncEvent,
+    },
+    /// `$EDITOR` closed (`Effect::Editor`); `None` when it failed or could not run.
+    Edited {
+        purpose: EditPurpose,
+        text: Option<String>,
     },
 }
 
@@ -124,6 +129,12 @@ pub enum Effect {
     OpenUrl(String),
     /// Resolve the token again and call `start` (after Retry).
     ResolveToken,
+    /// Run `$EDITOR` on `initial` with the TUI suspended, then answer with `Input::Edited`.
+    /// Only ever produced by a key press (Decision 27).
+    Editor {
+        purpose: EditPurpose,
+        initial: String,
+    },
     Exit,
 }
 
@@ -422,6 +433,10 @@ impl Controller {
                     return Vec::new();
                 }
                 self.on_sync(event, now)
+            }
+            Input::Edited { purpose, text } => {
+                let cmds = self.app.on_edited(purpose, text);
+                self.commands(cmds, now)
             }
         }
     }
@@ -724,6 +739,9 @@ impl Controller {
                     effects.extend(self.show_picker(required));
                 }
                 Command::Retry => effects.push(Effect::ResolveToken),
+                Command::Edit { purpose, initial } => {
+                    effects.push(Effect::Editor { purpose, initial })
+                }
                 Command::Quit => effects.push(Effect::Exit),
             }
         }
@@ -2093,5 +2111,28 @@ mod tests {
             mutates(&submit(&mut c, set_status("PVTI_new", "o_done"), t0)),
             [3]
         );
+    }
+
+    #[test]
+    fn the_editor_runs_as_an_effect_and_its_text_comes_back_as_input() {
+        use crate::ui::app::EditPurpose;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        let effects = c.handle(Input::Key(key('c')), t0);
+        assert_eq!(
+            effects,
+            vec![Effect::Editor {
+                purpose: EditPurpose::Comment(ItemId::new("a")),
+                initial: String::new()
+            }]
+        );
+        let effects = c.handle(
+            Input::Edited {
+                purpose: EditPurpose::Comment(ItemId::new("a")),
+                text: Some("LGTM".into()),
+            },
+            t0,
+        );
+        assert_eq!(mutates(&effects), [1]);
     }
 }

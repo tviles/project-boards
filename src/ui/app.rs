@@ -39,6 +39,14 @@ pub enum Mode {
     ErrorLog,
 }
 
+/// What a `$EDITOR` session is for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EditPurpose {
+    Title(ItemId),
+    Body(ItemId),
+    Comment(ItemId),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     FetchViewIds {
@@ -75,6 +83,11 @@ pub enum Command {
     Retry,
     /// Send the pending edit with this id (the controller queues it).
     Send(OpId),
+    /// Open `$EDITOR` on `initial`; the text comes back through `App::on_edited`.
+    Edit {
+        purpose: EditPurpose,
+        initial: String,
+    },
     Quit,
 }
 

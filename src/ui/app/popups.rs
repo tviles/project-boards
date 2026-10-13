@@ -21,6 +21,8 @@ pub enum LineKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldTarget {
     Field(FieldId),
+    /// The title, in `$EDITOR`.
+    Title,
     Assignees,
     Labels,
     Milestone,
@@ -33,6 +35,10 @@ pub enum MenuEntry {
     Key(Action),
     /// The milestone picker (it has no key of its own; `e` reaches it too).
     Milestone,
+    /// The title in `$EDITOR` (`e` reaches it too).
+    EditTitle,
+    /// The body in `$EDITOR`; it has no key.
+    EditBody,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -373,6 +379,14 @@ impl App {
                 );
             }
         }
+        for (kind, label, entry) in [
+            (OpKind::Title, "Edit title", MenuEntry::EditTitle),
+            (OpKind::Body, "Edit body", MenuEntry::EditBody),
+        ] {
+            if self.allowed(kind, &item) {
+                choices.push(Choice::new(label, entry));
+            }
+        }
         if self.allowed(OpKind::Milestone, &item) {
             choices.push(Choice::new("Milestone", MenuEntry::Milestone));
         }
@@ -424,12 +438,14 @@ impl App {
             })
             .collect();
         for (kind, label, target) in [
+            (OpKind::Title, "Title", FieldTarget::Title),
             (OpKind::Assignees, "Assignees", FieldTarget::Assignees),
             (OpKind::Labels, "Labels", FieldTarget::Labels),
             (OpKind::Milestone, "Milestone", FieldTarget::Milestone),
         ] {
             if self.allowed(kind, &item) {
                 let current = match kind {
+                    OpKind::Title => item.title().to_string(),
                     OpKind::Assignees => item.assignees().join(", "),
                     OpKind::Labels => item.label_names().join(", "),
                     _ => item
@@ -706,6 +722,14 @@ impl App {
                     self.close_popup();
                     return self.open_candidates(OpKind::Milestone, false);
                 }
+                ListOutcome::Chosen(MenuEntry::EditTitle) => {
+                    self.close_popup();
+                    return self.edit_title();
+                }
+                ListOutcome::Chosen(MenuEntry::EditBody) => {
+                    self.close_popup();
+                    return self.edit_body();
+                }
                 ListOutcome::Key(k) => {
                     let listed = self
                         .keymap
@@ -726,6 +750,12 @@ impl App {
                 ListOutcome::Chosen(FieldTarget::Field(field)) => {
                     let item = item.clone();
                     return self.open_field_editor(&item, &field);
+                }
+                ListOutcome::Chosen(FieldTarget::Title) => {
+                    // The editor is a program of its own: the menu closes rather than
+                    // waiting behind it.
+                    self.close_popup();
+                    return self.edit_title();
                 }
                 ListOutcome::Chosen(FieldTarget::Assignees) => {
                     return self.open_candidates(OpKind::Assignees, true);
@@ -953,6 +983,7 @@ mod tests {
                 "Due",
                 "Sprint",
                 "Areas",
+                "Title",
                 "Assignees",
                 "Labels",
                 "Milestone"
@@ -2002,5 +2033,94 @@ mod tests {
         assert_eq!(on, ["Good First Issue", "🐛 triage"]);
         a.handle_key(code(KeyCode::Enter));
         assert_eq!(a.pending_count(), 0, "unchanged sends nothing");
+    }
+
+    #[test]
+    fn title_in_the_e_menu_opens_the_editor_and_closes_the_menu() {
+        use crate::ui::app::EditPurpose;
+        let mut a = test_app();
+        a.handle_key(key('e'));
+        let Some(Popup::Fields { picker, .. }) = &a.popup else {
+            unreachable!()
+        };
+        let at = picker
+            .choices
+            .iter()
+            .position(|c| c.value == FieldTarget::Title)
+            .unwrap();
+        assert_eq!(picker.choices[at].detail, "Fix crash");
+        for _ in 0..at {
+            a.handle_key(code(KeyCode::Down));
+        }
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::Edit {
+                purpose: EditPurpose::Title(ItemId::new("a")),
+                initial: "Fix crash".into()
+            }]
+        );
+        assert!(a.popup.is_none());
+        assert_eq!(a.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn the_action_menu_offers_comment_edit_title_and_edit_body() {
+        use crate::ui::app::EditPurpose;
+        let mut a = test_app();
+        a.handle_key(key(' '));
+        let rows = menu(&a);
+        for row in [("Comment", "c"), ("Edit title", ""), ("Edit body", "")] {
+            assert!(
+                rows.iter().any(|(l, d)| l == row.0 && d == row.1),
+                "{row:?} in {rows:?}"
+            );
+        }
+        let at = rows.iter().position(|(l, _)| l == "Edit title").unwrap();
+        for _ in 0..at {
+            a.handle_key(code(KeyCode::Down));
+        }
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::Edit {
+                purpose: EditPurpose::Title(ItemId::new("a")),
+                initial: "Fix crash".into()
+            }]
+        );
+        assert!(a.popup.is_none());
+        a.handle_key(key(' '));
+        let at = menu(&a).iter().position(|(l, _)| l == "Edit body").unwrap();
+        for _ in 0..at {
+            a.handle_key(code(KeyCode::Down));
+        }
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::LoadDetail {
+                item: ItemId::new("a"),
+                before: None
+            }],
+            "the body loads first"
+        );
+        assert_eq!(a.mode, Mode::Detail);
+    }
+
+    #[test]
+    fn a_draft_offers_title_and_body_but_no_comment() {
+        let mut a = test_app();
+        replace_item(&mut a, |i| {
+            i.content = crate::model::ItemContent::Draft {
+                title: "Idea".into(),
+            }
+        });
+        a.handle_key(key(' '));
+        let rows = menu(&a);
+        let labels: Vec<&str> = rows.iter().map(|(l, _)| l.as_str()).collect();
+        assert!(
+            labels.contains(&"Edit title") && labels.contains(&"Edit body"),
+            "{labels:?}"
+        );
+        assert!(!labels.contains(&"Comment"), "{labels:?}");
+        a.handle_key(code(KeyCode::Esc));
+        assert!(a.handle_key(key('c')).is_empty());
+        assert!(a.status.flash.is_some(), "c says why");
     }
 }

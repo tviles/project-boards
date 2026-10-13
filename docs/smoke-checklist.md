@@ -34,3 +34,8 @@ Setup: `cargo build --release && herdr plugin link .`, keybinding for `tviles.pr
 - [ ] A board you can only read shows `read-only` in the header; `>` says "This board is read-only for you".
 - [ ] With a token lacking the `project` scope, the header shows `read-only: token lacks the project scope` (`read-only (no scope)` when narrow).
 - [ ] `doctor` says "can edit boards and issues" with a token that has `project` and `repo`.
+
+## Editing (0.3)
+
+- [ ] In `$EDITOR` (opened with `c`), type `q`, `j`, `x`, `X`, `>` and arrow keys, then save and quit: back on the board nothing quit, moved, closed or changed filters (no keystroke typed in the editor reached the board), and the whole screen is redrawn.
+- [ ] With `VISUAL='code -w'`, `c` then `Ctrl+C` in the pane cancels the comment ("The editor exited with an error; nothing was sent") and the board stays open.

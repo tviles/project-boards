@@ -32,6 +32,7 @@ pub enum Action {
     Assignees,
     Labels,
     EditField,
+    Comment,
     ActionMenu,
     ErrorLog,
     Retry,
@@ -49,6 +50,7 @@ impl Action {
             Action::Assignees => &[OpKind::Assignees],
             Action::Labels => &[OpKind::Labels],
             Action::EditField => &[OpKind::SetField],
+            Action::Comment => &[OpKind::Comment],
             _ => &[],
         }
     }
@@ -61,7 +63,7 @@ impl Action {
             .find(|a| a.kinds().contains(&kind))
     }
 
-    pub const ALL: [Action; 32] = [
+    pub const ALL: [Action; 33] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -91,6 +93,7 @@ impl Action {
         Action::Assignees,
         Action::Labels,
         Action::EditField,
+        Action::Comment,
         Action::ActionMenu,
         Action::ErrorLog,
         Action::Retry,
@@ -128,6 +131,7 @@ impl Action {
             Action::Assignees => "assignees",
             Action::Labels => "labels",
             Action::EditField => "edit_field",
+            Action::Comment => "comment",
             Action::ActionMenu => "action_menu",
             Action::ErrorLog => "error_log",
             Action::Retry => "retry",
@@ -165,6 +169,7 @@ impl Action {
             Action::Assignees => "assign people to the item",
             Action::Labels => "set the item's labels",
             Action::EditField => "edit a field of the item",
+            Action::Comment => "comment on the item",
             Action::ActionMenu => "actions: every operation the item allows",
             Action::ErrorLog => "error log: failed edits",
             Action::Retry => "error log: retry the selected edit",
@@ -302,6 +307,7 @@ const DEFAULTS: &[(&str, Action)] = &[
     ("a", Action::Assignees),
     ("t", Action::Labels),
     ("e", Action::EditField),
+    ("c", Action::Comment),
     ("space", Action::ActionMenu),
     ("E", Action::ErrorLog),
     ("R", Action::Retry),
@@ -512,7 +518,7 @@ mod tests {
             km.action(&ev(KeyCode::Char('e'), KeyModifiers::NONE)),
             Some(Action::EditField)
         );
-        assert_eq!(Action::ALL.len(), 32);
+        assert_eq!(Action::ALL.len(), 33);
         assert_eq!(
             km.action(&ev(KeyCode::Char('a'), KeyModifiers::NONE)),
             Some(Action::Assignees)
@@ -521,5 +527,10 @@ mod tests {
             km.action(&ev(KeyCode::Char('t'), KeyModifiers::NONE)),
             Some(Action::Labels)
         );
+        assert_eq!(
+            km.action(&ev(KeyCode::Char('c'), KeyModifiers::NONE)),
+            Some(Action::Comment)
+        );
+        assert_eq!(Action::for_kind(OpKind::Comment), Some(Action::Comment));
     }
 }

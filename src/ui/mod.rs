@@ -5,6 +5,7 @@ pub mod board;
 pub mod chrome;
 pub mod controller;
 pub mod detail;
+pub mod editor;
 pub mod keymap;
 pub mod labels;
 pub mod markdown;

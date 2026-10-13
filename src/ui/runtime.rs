@@ -6,10 +6,14 @@ use crate::sync::INCREMENTAL_MODE;
 use crate::sync::syncer::Syncer;
 use crate::ui::chrome;
 use crate::ui::controller::{Controller, Effect, Input, PaneOptions, SyncJob};
+use anyhow::Context;
+use crossterm::cursor::Show;
 use crossterm::event::{DisableFocusChange, EnableFocusChange, Event, EventStream};
 use crossterm::execute;
-use futures::StreamExt;
+use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
+use futures::{FutureExt, StreamExt};
 use ratatui::DefaultTerminal;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
@@ -23,6 +27,7 @@ pub async fn run(options: PaneOptions) -> anyhow::Result<()> {
     let signals = Signals {
         term: signal(SignalKind::terminate())?,
         hup: signal(SignalKind::hangup())?,
+        int: signal(SignalKind::interrupt())?,
     };
     let mut terminal = ratatui::try_init()?;
     keep_terminal_on_worker_panics(std::thread::current().id());
@@ -83,9 +88,13 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
         .unwrap_or("non-string panic payload")
 }
 
+/// SIGTERM, SIGHUP and SIGINT take the clean exit path. In raw mode `Ctrl+C` is a key, so
+/// SIGINT only comes from outside, or from `Ctrl+C` while `$EDITOR` has the terminal: that one
+/// is the editor's and is dropped (`suspended_edit`).
 struct Signals {
     term: tokio::signal::unix::Signal,
     hup: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
 }
 
 type Tagged = (u64, crate::sync::SyncEvent);
@@ -99,6 +108,7 @@ async fn event_loop(
     let settings = StartSettings {
         max_items: options.config.max_items,
         gh_user: options.config.gh_user.clone(),
+        state_dir: options.state_dir.clone(),
     };
     // Events arrive tagged with the generation of the job that produced them.
     let (tx, rx) = mpsc::unbounded_channel::<Tagged>();
@@ -122,6 +132,8 @@ async fn drive(
     let mut pending = start(controller, &mut runner, &tx, settings);
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    // Ticks missed while the editor ran are skipped, not fired in a burst.
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         while !pending.is_empty() {
             for effect in std::mem::take(&mut pending) {
@@ -141,6 +153,15 @@ async fn drive(
                     Effect::OpenUrl(url) => open_url(&url),
                     Effect::ResolveToken => {
                         pending.extend(start(controller, &mut runner, &tx, settings))
+                    }
+                    Effect::Editor { purpose, initial } => {
+                        let dir = settings.state_dir.join("edit");
+                        let text = suspended_edit(terminal, &initial, &dir, &mut signals)?;
+                        // A fresh reader: nothing typed into the editor reaches the board
+                        // (pre-flight ruling 10; `suspended_edit` drained what was buffered).
+                        events = EventStream::new();
+                        let edited = Input::Edited { purpose, text };
+                        pending.extend(controller.handle(edited, Instant::now()));
                     }
                     Effect::Exit => return Ok(()),
                 }
@@ -163,6 +184,7 @@ async fn drive(
             _ = tick.tick() => controller.handle(Input::Tick, now),
             _ = signals.term.recv() => return Ok(()),
             _ = signals.hup.recv() => return Ok(()),
+            _ = signals.int.recv() => return Ok(()),
         };
     }
 }
@@ -176,10 +198,60 @@ struct Runner {
     max_items: usize,
 }
 
-/// What `start` needs from the config to build the GitHub client and sync jobs.
+/// What `start` needs from the config to build the GitHub client and sync jobs, and where
+/// the editor's file goes.
 struct StartSettings {
     max_items: usize,
     gh_user: Option<String>,
+    state_dir: PathBuf,
+}
+
+/// Runs `$EDITOR` on `initial` with the TUI suspended, then restores it. `Ok(None)` when the
+/// editor could not run or exited with an error; `Err` when the terminal could not be taken
+/// back (the board then exits through the usual clean path).
+///
+/// The editor only ever starts from a key press, which the loop handles before it reads input
+/// again, so no reader waits on the terminal meanwhile (Decision 27). Afterwards whatever
+/// input is still buffered is dropped, never replayed on the board (pre-flight ruling 10),
+/// and so is a SIGINT from `Ctrl+C` in the editor's terminal.
+fn suspended_edit(
+    terminal: &mut DefaultTerminal,
+    initial: &str,
+    dir: &Path,
+    signals: &mut Signals,
+) -> anyhow::Result<Option<String>> {
+    let _ = execute!(std::io::stdout(), DisableFocusChange, Show);
+    ratatui::restore();
+    let command = crate::ui::editor::editor_command(|k| std::env::var(k).ok());
+    let result =
+        tokio::task::block_in_place(|| crate::ui::editor::edit_text(initial, &command, dir));
+    // Not `ratatui::try_init`: it would install another panic hook over
+    // `keep_terminal_on_worker_panics`, one that restores the terminal on any thread's panic.
+    enable_raw_mode().context("taking the terminal back after the editor")?;
+    execute!(std::io::stdout(), EnterAlternateScreen)
+        .context("taking the terminal back after the editor")?;
+    let _ = execute!(std::io::stdout(), EnableFocusChange);
+    // The editor drew over the screen: the next draw repaints all of it.
+    terminal.clear()?;
+    drain_input();
+    while let Some(Some(())) = signals.int.recv().now_or_never() {}
+    match result {
+        Ok(text) => Ok(text),
+        Err(e) => {
+            // The error names the failure only, never the text or the file's contents.
+            tracing::warn!(error = %e, "could not run the editor");
+            Ok(None)
+        }
+    }
+}
+
+/// Drops every input event already waiting: keys typed while the editor ran, or right after.
+fn drain_input() {
+    while crossterm::event::poll(Duration::ZERO).unwrap_or(false) {
+        if crossterm::event::read().is_err() {
+            break;
+        }
+    }
 }
 
 /// Resolves the token, builds the GitHub client, and starts the controller.
