@@ -2,6 +2,7 @@
 
 use crate::github::Github;
 use crate::github::GithubError;
+use crate::github::GraphqlErrorEntry;
 use crate::github::convert;
 use crate::github::queries;
 use crate::github::transport::{GraphqlRequest, GraphqlResponse};
@@ -183,6 +184,14 @@ impl Github {
     }
 }
 
+/// An operation the item type cannot take, refused before any request is sent.
+fn refused(message: &str) -> GithubError {
+    GithubError::Graphql(vec![GraphqlErrorEntry {
+        message: message.into(),
+        kind: None,
+    }])
+}
+
 impl Github {
     /// Runs a mutation whose payload carries nothing the board needs.
     async fn mutate_ok<V: serde::Serialize>(
@@ -194,7 +203,11 @@ impl Github {
         payload(&response, name).map(|_| ())
     }
 
+    /// Adding nobody sends nothing.
     pub async fn add_assignees(&self, content: &str, users: &[String]) -> Result<(), GithubError> {
+        if users.is_empty() {
+            return Ok(());
+        }
         let vars = queries::add_assignees::Variables {
             id: content.into(),
             users: users.to_vec(),
@@ -211,6 +224,9 @@ impl Github {
         content: &str,
         users: &[String],
     ) -> Result<(), GithubError> {
+        if users.is_empty() {
+            return Ok(());
+        }
         let vars = queries::remove_assignees::Variables {
             id: content.into(),
             users: users.to_vec(),
@@ -222,7 +238,8 @@ impl Github {
         .await
     }
 
-    /// Replaces a draft's assignees (drafts have no add/remove mutation).
+    /// Replaces a draft's assignees (drafts have no add/remove mutation); an empty list
+    /// clears them all.
     pub async fn set_draft_assignees(
         &self,
         draft: &str,
@@ -240,6 +257,9 @@ impl Github {
     }
 
     pub async fn add_labels(&self, content: &str, labels: &[String]) -> Result<(), GithubError> {
+        if labels.is_empty() {
+            return Ok(());
+        }
         let vars = queries::add_labels::Variables {
             id: content.into(),
             labels: labels.to_vec(),
@@ -252,6 +272,9 @@ impl Github {
     }
 
     pub async fn remove_labels(&self, content: &str, labels: &[String]) -> Result<(), GithubError> {
+        if labels.is_empty() {
+            return Ok(());
+        }
         let vars = queries::remove_labels::Variables {
             id: content.into(),
             labels: labels.to_vec(),
@@ -357,7 +380,7 @@ impl Github {
                 )
                 .await
             }
-            ContentId::Draft(_) => Err(GithubError::Decode("drafts have no milestone".into())),
+            ContentId::Draft(_) => Err(refused("Drafts have no milestone")),
         }
     }
 
@@ -402,7 +425,7 @@ impl Github {
                 )
                 .await
             }
-            ContentId::Draft(_) => Err(GithubError::Decode("drafts cannot be closed".into())),
+            ContentId::Draft(_) => Err(refused("Drafts cannot be closed")),
         }
     }
 
@@ -425,7 +448,7 @@ impl Github {
                 )
                 .await
             }
-            ContentId::Draft(_) => Err(GithubError::Decode("drafts cannot be reopened".into())),
+            ContentId::Draft(_) => Err(refused("Drafts cannot be reopened")),
         }
     }
 }
@@ -694,6 +717,7 @@ mod tests {
         );
         assert_eq!(r[1].variables["item"], "PVTI_1");
     }
+
     fn ok_payload(t: &FixtureTransport, op: &str, mutation: &str) {
         let mut data = serde_json::Map::new();
         data.insert(mutation.into(), json!({"clientMutationId": null}));
@@ -841,6 +865,100 @@ mod tests {
             gh.close(&ContentId::Draft("DI_1".into()), None)
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_lists_send_nothing_except_clearing_draft_assignees() {
+        let t = Arc::new(FixtureTransport::new());
+        ok_payload(&t, "SetDraftAssignees", "updateProjectV2DraftIssue");
+        let gh = Github::new(t.clone());
+        gh.add_assignees("I_1", &[]).await.unwrap();
+        gh.remove_assignees("I_1", &[]).await.unwrap();
+        gh.add_labels("I_1", &[]).await.unwrap();
+        gh.remove_labels("I_1", &[]).await.unwrap();
+        assert!(t.requests().is_empty());
+        gh.set_draft_assignees("DI_1", &[]).await.unwrap();
+        assert_eq!(t.requests()[0].variables["users"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_surfaces_githubs_message() {
+        let t = Arc::new(FixtureTransport::new());
+        for op in ["AddLabels", "CloseIssue"] {
+            t.push_body(
+                op,
+                json!({"data": {"addLabelsToLabelable": null, "closeIssue": null},
+                       "errors": [{"type": "FORBIDDEN", "message": "Resource not accessible"}]}),
+            );
+        }
+        let gh = Github::new(t.clone());
+        let e = gh.add_labels("I_1", &["LA_1".into()]).await.unwrap_err();
+        assert!(matches!(&e, GithubError::Graphql(m) if m[0].message == "Resource not accessible"));
+        let e = gh
+            .close(&ContentId::Issue("I_1".into()), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(&e, GithubError::Graphql(m) if m[0].message == "Resource not accessible"));
+    }
+
+    #[tokio::test]
+    async fn drafts_are_refused_and_remaining_operations_are_named() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push(
+            "UpdateDraftBody",
+            json!({"updateProjectV2DraftIssue": {"draftIssue": {"id": "DI_1"}}}),
+        );
+        t.push(
+            "UpdateIssueBody",
+            json!({"updateIssue": {"issue": {"id": "I_1"}}}),
+        );
+        t.push(
+            "UpdatePullRequestTitle",
+            json!({"updatePullRequest": {"pullRequest": {"id": "PR_1"}}}),
+        );
+        t.push(
+            "ReopenPullRequest",
+            json!({"reopenPullRequest": {"pullRequest": {"id": "PR_1"}}}),
+        );
+        let gh = Github::new(t.clone());
+        gh.set_body(&ContentId::Draft("DI_1".into()), "b")
+            .await
+            .unwrap();
+        gh.set_body(&ContentId::Issue("I_1".into()), "b")
+            .await
+            .unwrap();
+        gh.set_title(&ContentId::PullRequest("PR_1".into()), "t")
+            .await
+            .unwrap();
+        gh.reopen(&ContentId::PullRequest("PR_1".into()))
+            .await
+            .unwrap();
+        let names: Vec<String> = t
+            .requests()
+            .iter()
+            .map(|q| q.operation_name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "UpdateDraftBody",
+                "UpdateIssueBody",
+                "UpdatePullRequestTitle",
+                "ReopenPullRequest"
+            ]
+        );
+        let draft = ContentId::Draft("DI_1".into());
+        let e = gh.reopen(&draft).await.unwrap_err();
+        assert!(
+            matches!(&e, GithubError::Graphql(m) if m[0].message == "Drafts cannot be reopened")
+        );
+        assert!(gh.close(&draft, None).await.is_err());
+        assert!(gh.set_milestone(&draft, None).await.is_err());
+        assert_eq!(
+            t.requests().len(),
+            4,
+            "no request for a refused draft operation"
         );
     }
 }
