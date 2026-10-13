@@ -226,6 +226,7 @@ impl Github {
     }
 
     /// Creates an issue and returns its node id; `add_item_by_id` puts it on the board.
+    /// `repo` is the repository's node id (`RepoRef::id`), not an `owner/name` slug.
     pub async fn create_issue(
         &self,
         repo: &str,
@@ -251,6 +252,7 @@ impl Github {
             .ok_or_else(|| GithubError::Decode("createIssue returned no issue id".into()))
     }
 
+    /// Turns a draft into an issue in `repo`, the repository's node id (`RepoRef::id`).
     pub async fn convert_draft(&self, item: &ItemId, repo: &str) -> Result<Item, GithubError> {
         let vars = queries::convert_draft::Variables {
             item: item.0.clone(),
