@@ -79,6 +79,8 @@ pub struct EditContext {
     /// the first response: nothing is known, so nothing is blocked up front.
     pub scopes: Option<Vec<String>>,
     /// Scopes GitHub refused an edit for (`INSUFFICIENT_SCOPES`), whatever `scopes` says.
+    /// A repo refusal must record both "repo" and "public_repo", because either grants repo
+    /// access and only a refusal of every alias counts.
     pub refused: Vec<String>,
 }
 
@@ -110,6 +112,8 @@ pub enum Denial {
     NotArchived,
     Creating,
     Private,
+    /// A content type newer than this build.
+    Unsupported,
     DraftHasNo(OpKind),
     DraftNotClosable,
     NotADraft,
@@ -126,7 +130,7 @@ impl Denial {
     /// bound to an operation, for hints such as "(C)"; without one the hint is left out.
     pub fn message(&self, key: &dyn Fn(OpKind) -> Option<String>) -> String {
         let hint = |kind: OpKind, text: &str| match key(kind) {
-            Some(k) => format!(" ({k}{text})"),
+            Some(k) => format!(" (`{k}`{text})"),
             None => String::new(),
         };
         match self {
@@ -146,6 +150,7 @@ impl Denial {
             Denial::Private => {
                 "You can't see this item's content; only move, archive and remove work".into()
             }
+            Denial::Unsupported => "This item type isn't supported yet".into(),
             Denial::DraftHasNo(kind) => {
                 let what = match kind {
                     OpKind::Labels => "labels",
@@ -232,7 +237,8 @@ pub fn check(kind: OpKind, item: &Item, ctx: &EditContext) -> Result<(), Denial>
                 Move | Archive | Unarchive | Remove => Ok(()),
             };
         }
-        ItemContent::Redacted | ItemContent::Unknown { .. } => return Err(Denial::Private),
+        ItemContent::Redacted => return Err(Denial::Private),
+        ItemContent::Unknown { .. } => return Err(Denial::Unsupported),
     };
     match kind {
         Reorder | SetField => return Ok(()),
@@ -499,7 +505,7 @@ mod tests {
         };
         assert_eq!(
             Denial::DraftHasNo(Labels).message(&keys),
-            "Drafts have no labels — convert to issue first (C)"
+            "Drafts have no labels — convert to issue first (`C`)"
         );
         assert_eq!(
             Denial::DraftHasNo(Labels).message(&|_| None),
@@ -515,10 +521,141 @@ mod tests {
                 .message(&keys)
                 .contains("gh auth refresh -s repo")
         );
-        assert!(Denial::Archived.message(&keys).contains("(A unarchives)"));
+        assert!(Denial::Archived.message(&keys).contains("(`A` unarchives)"));
         assert_eq!(
             Denial::ReadOnly.message(&keys),
             "This board is read-only for you"
+        );
+    }
+
+    #[test]
+    fn every_denial_has_its_exact_message() {
+        let keys = |k: OpKind| match k {
+            Convert => Some("C".to_string()),
+            Unarchive => Some("U".to_string()),
+            Archive => Some("A".to_string()),
+            _ => None,
+        };
+        let cases: Vec<(Denial, &str)> = vec![
+            (Denial::ReadOnly, "This board is read-only for you"),
+            (
+                Denial::NoProjectScope,
+                "Editing needs the token's project scope: run `gh auth refresh -s project` and reopen the board",
+            ),
+            (
+                Denial::NoRepoScope,
+                "Editing issues needs the repo scope: run `gh auth refresh -s repo` (or public_repo) and reopen the board",
+            ),
+            (
+                Denial::Archived,
+                "Archived items can only be unarchived or removed (`U` unarchives)",
+            ),
+            (Denial::NotArchived, "Only archived items can be unarchived"),
+            (
+                Denial::Creating,
+                "Still being created on GitHub; try again in a moment",
+            ),
+            (
+                Denial::Private,
+                "You can't see this item's content; only move, archive and remove work",
+            ),
+            (Denial::Unsupported, "This item type isn't supported yet"),
+            (
+                Denial::DraftHasNo(Labels),
+                "Drafts have no labels — convert to issue first (`C`)",
+            ),
+            (
+                Denial::DraftHasNo(Milestone),
+                "Drafts have no milestone — convert to issue first (`C`)",
+            ),
+            (
+                Denial::DraftHasNo(Comment),
+                "Drafts have no comments — convert to issue first (`C`)",
+            ),
+            (
+                Denial::DraftNotClosable,
+                "Drafts can't be closed — archive (`A`) or remove it instead",
+            ),
+            (Denial::NotADraft, "Only drafts convert to issues"),
+            (Denial::AlreadyClosed, "Already closed"),
+            (Denial::AlreadyOpen, "Already open"),
+            (Denial::Merged, "Merged pull requests can't be reopened"),
+            (
+                Denial::StateUnknown,
+                "This item's state is unknown; refresh with r",
+            ),
+            (
+                Denial::NeedsRefresh,
+                "This item was loaded by an older version; refresh with r to edit it",
+            ),
+        ];
+        for (denial, want) in cases {
+            assert_eq!(denial.message(&keys), want, "{denial:?}");
+        }
+        assert_eq!(
+            Denial::DraftNotClosable.message(&|_| None),
+            "Drafts can't be closed — archive or remove it instead"
+        );
+    }
+
+    #[test]
+    fn archived_items_of_every_kind_allow_only_unarchive_and_remove() {
+        for content in [
+            ItemContent::Draft { title: "d".into() },
+            ItemContent::Redacted,
+            ItemContent::Unknown {
+                type_name: "Discussion".into(),
+            },
+        ] {
+            let mut i = with(content);
+            i.archived = true;
+            assert_eq!(capabilities(&i, &ctx()), [Unarchive, Remove]);
+            assert_eq!(check(Move, &i, &ctx()), Err(Denial::Archived));
+        }
+        let mut i = issue("i", 1, "x");
+        i.archived = true;
+        assert_eq!(check(Remove, &i, &ctx()), Ok(()));
+    }
+
+    #[test]
+    fn unsupported_content_has_its_own_reason() {
+        let i = with(ItemContent::Unknown {
+            type_name: "Discussion".into(),
+        });
+        assert_eq!(check(Title, &i, &ctx()), Err(Denial::Unsupported));
+        assert_eq!(
+            check(Title, &with(ItemContent::Redacted), &ctx()),
+            Err(Denial::Private)
+        );
+    }
+
+    #[test]
+    fn a_read_only_board_blocks_drafts_and_pull_requests_too() {
+        let ro = EditContext {
+            viewer_can_update: false,
+            ..ctx()
+        };
+        assert!(capabilities(&with(ItemContent::Draft { title: "d".into() }), &ro).is_empty());
+        assert!(capabilities(&pull(ContentState::Open), &ro).is_empty());
+        assert_eq!(
+            check(Close, &pull(ContentState::Open), &ro),
+            Err(Denial::ReadOnly)
+        );
+    }
+
+    #[test]
+    fn without_the_repo_scope_project_level_edits_still_work() {
+        let no_repo = EditContext {
+            scopes: Some(vec!["project".into()]),
+            ..ctx()
+        };
+        let i = issue("i", 1, "x");
+        for k in [Move, Reorder, SetField] {
+            assert_eq!(check(k, &i, &no_repo), Ok(()), "{k:?}");
+        }
+        assert_eq!(
+            check(Close, &pull(ContentState::Open), &no_repo),
+            Err(Denial::NoRepoScope)
         );
     }
 }
