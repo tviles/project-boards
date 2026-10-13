@@ -148,7 +148,109 @@ fn hint_word(action: Action, kind: OpKind) -> &'static str {
 /// The single-action keys the hints list before move and reorder.
 const HINTED: &[Action] = &[Action::EditField];
 
+/// A lookup an editor waits on.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Lookup<T> {
+    Loading,
+    Ready(T),
+    Failed(String),
+}
+
 impl App {
+    pub fn item(&self, id: &ItemId) -> Option<&Item> {
+        self.snapshot()?.items.get(id)
+    }
+
+    /// Asks for `repo`'s candidates unless they are loaded or loading; after a failure, again.
+    #[allow(dead_code)] // the editors that ask arrive in Tasks 30, 34 and 35
+    pub(crate) fn need_candidates(&mut self, repo: &RepoSlug) -> Vec<Command> {
+        if matches!(
+            self.candidates.get(repo),
+            Some(Lookup::Ready(_) | Lookup::Loading)
+        ) {
+            return Vec::new();
+        }
+        self.candidates.insert(repo.clone(), Lookup::Loading);
+        vec![Command::LoadCandidates(repo.clone())]
+    }
+
+    #[allow(dead_code)] // the editors that ask arrive in Tasks 30, 34 and 35
+    pub(crate) fn need_repos(&mut self) -> Vec<Command> {
+        if matches!(self.repos, Some(Lookup::Ready(_) | Lookup::Loading)) {
+            return Vec::new();
+        }
+        self.repos = Some(Lookup::Loading);
+        vec![Command::LoadRepos]
+    }
+
+    #[allow(dead_code)] // the editors that ask arrive in Tasks 30, 34 and 35
+    pub(crate) fn need_repo_lookup(&mut self, slug: &RepoSlug) -> Vec<Command> {
+        if matches!(
+            self.repo_lookups.get(slug),
+            Some(Lookup::Ready(_) | Lookup::Loading)
+        ) {
+            return Vec::new();
+        }
+        self.repo_lookups.insert(slug.clone(), Lookup::Loading);
+        vec![Command::LookupRepo(slug.clone())]
+    }
+
+    #[allow(dead_code)] // the editors that ask arrive in Tasks 30, 34 and 35
+    pub(crate) fn start_search(&mut self, query: &str, scope: Vec<RepoSlug>) -> Vec<Command> {
+        self.content_search = Some((query.to_string(), Lookup::Loading));
+        vec![Command::Search {
+            query: query.to_string(),
+            scope,
+        }]
+    }
+
+    /// Where a draft's assignees come from: the pane's repository, else the project's first
+    /// linked repository.
+    pub fn draft_repo(&self) -> Option<RepoSlug> {
+        self.pane_repo
+            .clone()
+            .or_else(|| self.project()?.linked_repos.first().map(|r| r.slug.clone()))
+    }
+
+    /// The repository whose users, labels and milestones `item` can take.
+    pub fn candidate_repo(&self, item: &Item) -> Option<RepoSlug> {
+        match item.reference() {
+            Some(r) => r.repo.parse().ok(),
+            None => self.draft_repo(),
+        }
+    }
+
+    /// Records a failed lookup where its popover shows it. False for other failures.
+    pub(super) fn lookup_failed(&mut self, task: &SyncTask, error: &GithubError) -> bool {
+        let message = format!("{}: {}", task_words(task), error_message(error));
+        match task {
+            SyncTask::Candidates(repo) => {
+                self.candidates
+                    .insert(repo.clone(), Lookup::Failed(message));
+            }
+            SyncTask::Repos => self.repos = Some(Lookup::Failed(message)),
+            SyncTask::RepoLookup(slug) => {
+                self.repo_lookups
+                    .insert(slug.clone(), Lookup::Failed(message));
+            }
+            SyncTask::Search(query) => {
+                self.content_search = Some((query.clone(), Lookup::Failed(message)));
+            }
+            _ => return false,
+        }
+        self.refresh_popup();
+        true
+    }
+
+    /// Fills a popover that waits on a lookup which has landed or failed. Later tasks add
+    /// the popovers that wait.
+    pub(crate) fn refresh_popup(&mut self) {
+        let Some(popup) = self.popup.take() else {
+            return;
+        };
+        self.popup = Some(popup);
+    }
+
     /// The first operation of `action` allowed on `item` here (`check_here`: the matrix and
     /// the view's rules).
     pub(crate) fn allowed_kind(&self, action: Action, item: &Item) -> Option<OpKind> {
@@ -950,6 +1052,93 @@ mod tests {
             .value(&FieldId::new("F_status"))
             .map(|v| v.display())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn candidates_load_once_per_repository_and_a_failure_can_be_retried() {
+        let mut a = test_app();
+        let repo: RepoSlug = "tviles/t".parse().unwrap();
+        assert_eq!(
+            a.need_candidates(&repo),
+            vec![Command::LoadCandidates(repo.clone())]
+        );
+        assert!(a.need_candidates(&repo).is_empty(), "already loading");
+        a.on_sync(SyncEvent::Failed {
+            task: crate::sync::SyncTask::Candidates(repo.clone()),
+            error: GithubError::Network("offline".into()),
+        });
+        assert!(
+            matches!(a.candidates.get(&repo), Some(Lookup::Failed(m)) if m.contains("offline"))
+        );
+        assert_eq!(
+            a.status.error, None,
+            "the popover shows it, not the status line"
+        );
+        assert_eq!(
+            a.need_candidates(&repo),
+            vec![Command::LoadCandidates(repo.clone())]
+        );
+        let candidates = crate::model::RepoCandidates {
+            repo: crate::model::RepoRef {
+                id: "R_1".into(),
+                slug: repo.clone(),
+            },
+            users: vec![],
+            labels: vec![],
+            milestones: vec![],
+            truncated: false,
+        };
+        a.on_sync(SyncEvent::Candidates {
+            repo: repo.clone(),
+            candidates,
+        });
+        assert!(matches!(a.candidates.get(&repo), Some(Lookup::Ready(_))));
+        assert!(a.need_candidates(&repo).is_empty());
+    }
+
+    #[test]
+    fn drafts_take_candidates_from_the_pane_repository_then_the_first_linked_one() {
+        let mut a = test_app();
+        let draft = a.item(&ItemId::new("d")).unwrap().clone();
+        assert_eq!(a.candidate_repo(&draft), None);
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.project.linked_repos = vec![crate::model::RepoRef {
+            id: "R_2".into(),
+            slug: "acme/api".parse().unwrap(),
+        }];
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        assert_eq!(
+            a.candidate_repo(&draft).map(|r| r.to_string()).as_deref(),
+            Some("acme/api")
+        );
+        a.pane_repo = Some("acme/app".parse().unwrap());
+        assert_eq!(
+            a.candidate_repo(&draft).map(|r| r.to_string()).as_deref(),
+            Some("acme/app")
+        );
+        let issue = a.item(&ItemId::new("a")).unwrap().clone();
+        assert_eq!(
+            a.candidate_repo(&issue).map(|r| r.to_string()).as_deref(),
+            Some("tviles/t"),
+            "its own repository"
+        );
+    }
+
+    #[test]
+    fn only_the_latest_search_answer_is_kept() {
+        let mut a = test_app();
+        a.start_search("one", vec![]);
+        a.start_search("two", vec![]);
+        a.on_sync(SyncEvent::SearchResults {
+            query: "one".into(),
+            hits: vec![],
+        });
+        assert!(matches!(&a.content_search, Some((q, Lookup::Loading)) if q == "two"));
+        a.on_sync(SyncEvent::SearchResults {
+            query: "two".into(),
+            hits: vec![],
+        });
+        assert!(matches!(&a.content_search, Some((q, Lookup::Ready(_))) if q == "two"));
     }
 
     #[test]

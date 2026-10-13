@@ -19,7 +19,7 @@ pub use edit::ago as edit_ago;
 mod popups;
 
 use crate::ops::OpId;
-pub use edit::{Confirm, ConfirmAction, FailedEdit};
+pub use edit::{Confirm, ConfirmAction, FailedEdit, Lookup};
 pub use popups::{FieldTarget, LineKind, MenuEntry, Popup};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +50,13 @@ pub enum Command {
         before: Option<String>,
     },
     OpenUrl(String),
+    LoadCandidates(RepoSlug),
+    LoadRepos,
+    LookupRepo(RepoSlug),
+    Search {
+        query: String,
+        scope: Vec<RepoSlug>,
+    },
     Refresh,
     SaveLastView(ViewId),
     /// The user chose `layout` for `view`, whose own layout on GitHub is `github_layout`.
@@ -129,6 +136,15 @@ pub struct App {
     pub confirm: Option<Confirm>,
     /// The popover `Mode::Popup` shows.
     pub popup: Option<Popup>,
+    /// Assignable users, labels and milestones per repository, loaded when first needed.
+    pub(crate) candidates: HashMap<RepoSlug, Lookup<RepoCandidates>>,
+    /// Repositories the user can push to, for the repository picker.
+    pub(crate) repos: Option<Lookup<PushableRepos>>,
+    pub(crate) repo_lookups: HashMap<RepoSlug, Lookup<Option<RepoRef>>>,
+    /// The latest "add existing" search and its results (`search` is the quick-search text).
+    pub(crate) content_search: Option<(String, Lookup<Vec<ContentHit>>)>,
+    /// The focused pane's repository when the board opened.
+    pub pane_repo: Option<RepoSlug>,
     /// The local UTC offset, for "today".
     pub utc_offset: time::UtcOffset,
     /// Detail width used to number targets; kept in sync by the renderer.
@@ -138,7 +154,7 @@ pub struct App {
     pub help_visible: usize,
 }
 
-fn task_words(task: &SyncTask) -> &'static str {
+pub(crate) fn task_words(task: &SyncTask) -> &'static str {
     match task {
         SyncTask::Resolve => "could not load the board",
         SyncTask::FullLoad => "could not load items",
@@ -147,6 +163,9 @@ fn task_words(task: &SyncTask) -> &'static str {
         SyncTask::Hydrate => "could not load some items",
         SyncTask::Detail(_) => "could not load the item",
         SyncTask::Projects => "could not list boards",
+        SyncTask::Candidates(_) => "could not load the repository's users and labels",
+        SyncTask::Repos | SyncTask::RepoLookup(_) => "could not list repositories",
+        SyncTask::Search(_) => "search failed",
     }
 }
 
@@ -197,6 +216,11 @@ impl App {
             error_sel: 0,
             confirm: None,
             popup: None,
+            candidates: HashMap::new(),
+            repos: None,
+            repo_lookups: HashMap::new(),
+            content_search: None,
+            pane_repo: None,
             utc_offset: time::UtcOffset::UTC,
             detail_width: 80,
             help_scroll: 0,
@@ -965,6 +989,10 @@ impl App {
             SyncEvent::Projects(list) => self.show_projects(list),
             SyncEvent::Rate(rate) => self.status.rate_low = rate.is_low(),
             SyncEvent::Failed { task, error } => {
+                if self.lookup_failed(&task, &error) {
+                    self.restore_selection();
+                    return cmds;
+                }
                 if matches!(task, SyncTask::FullLoad | SyncTask::Resolve) {
                     self.status.loading = None;
                 }
@@ -985,6 +1013,28 @@ impl App {
                 cmds.extend(self.refresh_quit_question());
             }
             SyncEvent::Access { scopes } => self.set_scopes(scopes),
+            SyncEvent::Candidates { repo, candidates } => {
+                self.candidates.insert(repo, Lookup::Ready(candidates));
+                self.refresh_popup();
+            }
+            SyncEvent::Repos(list) => {
+                self.repos = Some(Lookup::Ready(list));
+                self.refresh_popup();
+            }
+            SyncEvent::RepoFound { slug, repo } => {
+                self.repo_lookups.insert(slug, Lookup::Ready(repo));
+                self.refresh_popup();
+            }
+            SyncEvent::SearchResults { query, hits } => {
+                if self
+                    .content_search
+                    .as_ref()
+                    .is_some_and(|(q, _)| q == &query)
+                {
+                    self.content_search = Some((query, Lookup::Ready(hits)));
+                }
+                self.refresh_popup();
+            }
             SyncEvent::ViewIds { .. } | SyncEvent::Hydrated(_) | SyncEvent::RepoProjects(_) => {}
         }
         self.restore_selection();

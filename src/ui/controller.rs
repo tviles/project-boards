@@ -77,6 +77,14 @@ pub enum SyncJob {
     },
     RepoProjects(RepoSlug),
     Projects(Option<RepoSlug>),
+    /// Lookups for the editors; they never touch the poll scheduler.
+    Candidates(RepoSlug),
+    Repos,
+    LookupRepo(RepoSlug),
+    Search {
+        query: String,
+        scope: Vec<RepoSlug>,
+    },
     /// Send one pending edit.
     Mutate {
         id: crate::ops::OpId,
@@ -96,6 +104,10 @@ impl SyncJob {
             Self::Detail { .. } => "Detail",
             Self::RepoProjects(_) => "RepoProjects",
             Self::Projects(_) => "Projects",
+            Self::Candidates(_) => "Candidates",
+            Self::Repos => "Repos",
+            Self::LookupRepo(_) => "LookupRepo",
+            Self::Search { .. } => "Search",
             Self::Mutate { .. } => "Mutate",
         }
     }
@@ -178,6 +190,7 @@ impl Controller {
             Theme::from_env(|k| std::env::var(k).ok()),
         );
         app.utc_offset = options.utc_offset;
+        app.pane_repo = options.repo.clone();
         app.status.notes = options
             .warnings
             .iter()
@@ -649,6 +662,14 @@ impl Controller {
                 }
                 Command::LoadDetail { item, before } => {
                     effects.push(self.spawn(SyncJob::Detail { item, before }))
+                }
+                Command::LoadCandidates(repo) => {
+                    effects.push(self.spawn(SyncJob::Candidates(repo)))
+                }
+                Command::LoadRepos => effects.push(self.spawn(SyncJob::Repos)),
+                Command::LookupRepo(slug) => effects.push(self.spawn(SyncJob::LookupRepo(slug))),
+                Command::Search { query, scope } => {
+                    effects.push(self.spawn(SyncJob::Search { query, scope }))
                 }
                 Command::OpenUrl(url) if is_web_link(&url) => effects.push(Effect::OpenUrl(url)),
                 Command::OpenUrl(_) => self.app.status.flash = Some(NOT_A_WEB_LINK.into()),
@@ -1663,6 +1684,58 @@ mod tests {
                 name: option.into(),
             },
         }
+    }
+
+    #[test]
+    fn lookup_commands_become_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        let repo: RepoSlug = "acme/app".parse().unwrap();
+        let polling = c.scheduler.in_flight();
+        let effects = c.commands(
+            vec![
+                Command::LoadCandidates(repo.clone()),
+                Command::LoadRepos,
+                Command::LookupRepo(repo.clone()),
+                Command::Search {
+                    query: "crash".into(),
+                    scope: vec![repo.clone()],
+                },
+            ],
+            t0,
+        );
+        let jobs: Vec<&str> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Spawn { job, .. } => Some(job.kind()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(jobs, ["Candidates", "Repos", "LookupRepo", "Search"]);
+        assert_eq!(c.app.pane_repo, Some("tviles/app".parse().unwrap()));
+        assert_eq!(c.scheduler.in_flight(), polling, "lookups are not polls");
+    }
+
+    #[test]
+    fn a_stale_lookup_answer_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        let repo: RepoSlug = "acme/app".parse().unwrap();
+        c.app.need_repos();
+        let stale = c.generation().wrapping_add(1);
+        let effects = c.handle(
+            Input::Sync {
+                generation: stale,
+                event: SyncEvent::Repos(PushableRepos {
+                    repos: vec![],
+                    truncated: false,
+                }),
+            },
+            t0,
+        );
+        assert!(effects.is_empty());
+        assert!(matches!(c.app.repos, Some(crate::ui::app::Lookup::Loading)));
+        let _ = repo;
     }
 
     fn submit(c: &mut Controller, op: Op, now: Instant) -> Vec<Effect> {

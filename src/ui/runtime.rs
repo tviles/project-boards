@@ -242,6 +242,10 @@ impl Runner {
                 SyncJob::Detail { item, before } => s.detail(&item, before).await,
                 SyncJob::RepoProjects(repo) => s.repo_projects(&repo).await,
                 SyncJob::Projects(repo) => s.projects(repo.as_ref()).await,
+                SyncJob::Candidates(repo) => s.candidates(&repo).await,
+                SyncJob::Repos => s.repos().await,
+                SyncJob::LookupRepo(slug) => s.lookup_repo(&slug).await,
+                SyncJob::Search { query, scope } => s.search(&query, &scope).await,
                 SyncJob::Mutate { id, project, op } => s.mutate(id, &project, &op).await,
             }
         });
