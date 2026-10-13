@@ -11,6 +11,7 @@ use crossterm::execute;
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use std::sync::Arc;
+use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
@@ -24,6 +25,7 @@ pub async fn run(options: PaneOptions) -> anyhow::Result<()> {
         hup: signal(SignalKind::hangup())?,
     };
     let mut terminal = ratatui::try_init()?;
+    keep_terminal_on_worker_panics(std::thread::current().id());
     let _ = execute!(std::io::stdout(), EnableFocusChange);
     let result = event_loop(&mut terminal, options, herdr.clone(), signals).await;
     let _ = execute!(std::io::stdout(), DisableFocusChange);
@@ -41,6 +43,44 @@ pub async fn run(options: PaneOptions) -> anyhow::Result<()> {
         tracing::warn!(error = %e, "could not close the board pane");
     }
     result
+}
+
+/// `ratatui::try_init` installs a panic hook that restores the terminal. A panic in a tokio
+/// worker (a sync job; the syncer catches an edit's panic on purpose) must not do that while
+/// the board keeps running, nor print over it: such panics are logged instead. A panic on the
+/// UI thread still restores the terminal through the previous hook.
+fn keep_terminal_on_worker_panics(ui: ThreadId) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if should_restore(std::thread::current().id(), ui) {
+            previous(info);
+        } else {
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_default();
+            tracing::error!(
+                message = %panic_message(info.payload()),
+                %location,
+                "a background task panicked"
+            );
+        }
+    }));
+}
+
+/// Whether a panic on thread `current` should restore the terminal: only one on the thread
+/// that runs the UI (`ui`).
+fn should_restore(current: ThreadId, ui: ThreadId) -> bool {
+    current == ui
+}
+
+/// The text a panic was raised with.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
 }
 
 struct Signals {
@@ -91,7 +131,11 @@ async fn drive(
                         // controller.generation() here (a bump may have happened since).
                         Some(r) => r.spawn(job, generation),
                         None => {
-                            tracing::warn!(job = job.kind(), "no GitHub client yet; job dropped")
+                            tracing::warn!(job = job.kind(), "no GitHub client yet; job dropped");
+                            // An edit must still be answered, or it would stay "sending".
+                            if let Some(event) = unanswered_edit(&job) {
+                                let _ = tx.send((generation, event));
+                            }
                         }
                     },
                     Effect::OpenUrl(url) => open_url(&url),
@@ -198,8 +242,20 @@ impl Runner {
                 SyncJob::Detail { item, before } => s.detail(&item, before).await,
                 SyncJob::RepoProjects(repo) => s.repo_projects(&repo).await,
                 SyncJob::Projects(repo) => s.projects(repo.as_ref()).await,
+                SyncJob::Mutate { id, project, op } => s.mutate(id, &project, &op).await,
             }
         });
+    }
+}
+
+/// The `OpDone` that answers a Mutate job nobody could run (no token yet).
+fn unanswered_edit(job: &SyncJob) -> Option<crate::sync::SyncEvent> {
+    match job {
+        SyncJob::Mutate { id, .. } => Some(crate::sync::SyncEvent::OpDone {
+            id: *id,
+            result: Err(crate::github::GithubError::NoToken),
+        }),
+        _ => None,
     }
 }
 
@@ -221,5 +277,50 @@ fn open_url(url: &str) {
         .spawn();
     if let Err(e) = spawned {
         tracing::warn!(error = %e, "could not open the browser");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{FieldId, ItemId, ProjectId};
+    use crate::ops::Op;
+    use crate::sync::SyncEvent;
+
+    #[test]
+    fn only_a_panic_on_the_ui_thread_restores_the_terminal() {
+        let ui = std::thread::current().id();
+        assert!(should_restore(ui, ui));
+        let worker = std::thread::spawn(|| std::thread::current().id())
+            .join()
+            .unwrap();
+        assert!(!should_restore(worker, ui));
+    }
+
+    #[test]
+    fn a_panic_message_is_read_from_str_and_string_payloads() {
+        assert_eq!(panic_message(&"boom"), "boom");
+        assert_eq!(panic_message(&String::from("bang")), "bang");
+        assert_eq!(panic_message(&42_u8), "non-string panic payload");
+    }
+
+    #[test]
+    fn an_edit_with_no_client_is_answered_with_an_error() {
+        let job = SyncJob::Mutate {
+            id: 3,
+            project: ProjectId::new("P"),
+            op: Op::ClearField {
+                item: ItemId::new("I"),
+                field: FieldId::new("F"),
+            },
+        };
+        assert!(matches!(
+            unanswered_edit(&job),
+            Some(SyncEvent::OpDone {
+                id: 3,
+                result: Err(_)
+            })
+        ));
+        assert!(unanswered_edit(&SyncJob::Projects(None)).is_none());
     }
 }

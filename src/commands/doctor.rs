@@ -37,28 +37,42 @@ impl fmt::Display for Check {
     }
 }
 
-/// `project` (read and write) is what the board needs. `read:project` is enough for 0.1 but
-/// not for editing in later releases. `None` means a fine-grained token, which reports no
-/// scopes and cannot read boards owned by a user account at all.
+/// What the token can do. Editing boards needs `project`; editing issues and pull requests
+/// also needs `repo` (or `public_repo` for public repositories). `None` means a fine-grained
+/// token, which reports no scopes and cannot read boards owned by a user account at all.
 pub fn scope_check(scopes: &Option<Vec<String>>) -> Check {
-    let check = |level, detail: &str| Check {
+    let check = |level, detail: String| Check {
         level,
         name: "scopes",
-        detail: detail.to_string(),
+        detail,
     };
-    match scopes {
-        None => check(
+    let Some(s) = scopes else {
+        return check(
             Level::Warn,
-            "fine-grained token: works for organisation boards only; boards owned by a user account need `gh auth login`",
-        ),
-        Some(s) if s.iter().any(|x| x == "project") => check(Level::Ok, &s.join(", ")),
-        Some(s) if s.iter().any(|x| x == "read:project") => check(
+            "fine-grained token: works for organisation boards only; boards owned by a user account need `gh auth login`".into(),
+        );
+    };
+    let has = |x: &str| s.iter().any(|y| y == x);
+    let list = s.join(", ");
+    match (
+        has("project"),
+        has("repo") || has("public_repo"),
+        has("read:project"),
+    ) {
+        (true, true, _) => check(Level::Ok, format!("{list}; can edit boards and issues")),
+        (true, false, _) => check(
             Level::Warn,
-            "read:project only; editing needs `gh auth refresh -s project`",
+            format!(
+                "{list}; can edit boards; editing issues needs `gh auth refresh -s repo` (or public_repo)"
+            ),
         ),
-        Some(_) => check(
+        (false, _, true) => check(
+            Level::Warn,
+            format!("{list}; read:project only; editing needs `gh auth refresh -s project`"),
+        ),
+        (false, _, false) => check(
             Level::Fail,
-            "missing the project scope; run `gh auth refresh -s project`",
+            "missing the project scope; run `gh auth refresh -s project`".into(),
         ),
     }
 }
@@ -337,5 +351,29 @@ command = "true"
             detail: "not in a GitHub checkout".into(),
         };
         assert_eq!(c.to_string(), "! repo: not in a GitHub checkout");
+    }
+
+    #[test]
+    fn scopes_say_what_the_token_can_edit() {
+        let s = |list: &[&str]| scope_check(&Some(list.iter().map(|x| x.to_string()).collect()));
+        let full = s(&["repo", "project", "read:org"]);
+        assert_eq!(full.level, Level::Ok);
+        assert!(
+            full.detail.contains("can edit boards and issues"),
+            "{}",
+            full.detail
+        );
+        assert_eq!(s(&["public_repo", "project"]).level, Level::Ok);
+        let boards_only = s(&["project"]);
+        assert_eq!(boards_only.level, Level::Warn);
+        assert!(
+            boards_only.detail.contains("gh auth refresh -s repo"),
+            "{}",
+            boards_only.detail
+        );
+        let read = s(&["repo", "read:project"]);
+        assert_eq!(read.level, Level::Warn);
+        assert!(read.detail.contains("gh auth refresh -s project"));
+        assert_eq!(s(&["repo"]).level, Level::Fail);
     }
 }

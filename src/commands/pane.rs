@@ -7,6 +7,8 @@ use crate::ui::controller::PaneOptions;
 use crate::ui::runtime::run;
 
 pub fn run_pane() -> anyhow::Result<()> {
+    // Before logging or the runtime start threads: after that the offset cannot be read.
+    let utc_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
     let env = PluginEnv::from_system();
     let _log = crate::logging::init(&env.state_dir);
     let (config, warnings) = load_config(&env.config_dir);
@@ -25,6 +27,7 @@ pub fn run_pane() -> anyhow::Result<()> {
         repo,
         board,
         picker,
+        utc_offset,
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

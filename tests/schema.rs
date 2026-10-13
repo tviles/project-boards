@@ -16,9 +16,15 @@ const REQUIRED: &[&str] = &[
     "query: String = \"\"",
     "closedByPullRequestsReferences(",
     "subIssues(",
+    "addProjectV2DraftIssue(",
+    "deleteProjectV2Item(",
     "subIssuesSummary: SubIssuesSummary",
     "issueType: IssueType",
     "stateReason: IssueStateReason",
+    "updateProjectV2ItemFieldValue(",
+    "clearProjectV2ItemFieldValue(",
+    "updateProjectV2ItemPosition(",
+    "multiSelectOptionIds: [String!]",
 ];
 
 #[test]

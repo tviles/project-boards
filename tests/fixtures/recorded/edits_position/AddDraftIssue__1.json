@@ -1,0 +1,28 @@
+{
+  "data": {
+    "addProjectV2DraftIssue": {
+      "projectItem": {
+        "content": {
+          "__typename": "DraftIssue",
+          "title": "pb live: edits_position 1791909728023515000"
+        },
+        "fieldValues": {
+          "nodes": [
+            {
+              "__typename": "ProjectV2ItemFieldTextValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+              },
+              "text": "pb live: edits_position 1791909728023515000"
+            }
+          ]
+        },
+        "id": "PVTI_lAHOADq2Kc4Bl819zhAfVkQ",
+        "isArchived": false,
+        "type": "DRAFT_ISSUE",
+        "updatedAt": "2026-10-13T16:42:09Z"
+      }
+    }
+  }
+}

@@ -2,6 +2,7 @@
 
 use crate::model::*;
 use crate::ui::labels::{label_spans, spans_width};
+use crate::ui::marks::{ItemMarks, UNMATCHED_TEXT};
 use crate::ui::pills::{MAX_PILL_LINES, field_pills, pill_lines};
 use crate::ui::table::{bucket_of, buckets_for};
 use crate::ui::text::{display_width, pad_to_width, sanitize, truncate_to_width, wrap_to_width};
@@ -167,10 +168,26 @@ fn entries<'a>(column: &Column<'a>) -> Vec<Entry<'a>> {
     out
 }
 
+/// `card_lines_marked` and no marks.
+#[cfg(test)]
 fn card_lines(
     item: &Item,
     field: &Field,
     width: usize,
+    selected: bool,
+    theme: &Theme,
+) -> [Line<'static>; 2] {
+    card_lines_marked(item, field, width, "", false, selected, theme)
+}
+
+/// A narrow column's two-line card. `prefix` (the item's marks) goes before the title; an
+/// `unmatched` card is dimmed unless selected.
+fn card_lines_marked(
+    item: &Item,
+    field: &Field,
+    width: usize,
+    prefix: &str,
+    unmatched: bool,
     selected: bool,
     theme: &Theme,
 ) -> [Line<'static>; 2] {
@@ -180,8 +197,8 @@ fn card_lines(
         ""
     };
     let title = match item.number() {
-        Some(n) => format!("{marker}#{n} {}", item.title()),
-        None => format!("{marker}{}", item.title()),
+        Some(n) => format!("{prefix}{marker}#{n} {}", item.title()),
+        None => format!("{prefix}{marker}{}", item.title()),
     };
     let assignees: Vec<String> = item.assignees().iter().map(|a| format!("@{a}")).collect();
     let style = if selected {
@@ -219,13 +236,31 @@ fn card_lines(
             meta_style,
         ))
     };
-    [
+    let lines = [
         Line::from(Span::styled(
             pad_to_width(&truncate_to_width(&title, width), width),
             style.patch(theme.bold()),
         )),
         meta,
-    ]
+    ];
+    if unmatched && !selected {
+        lines.map(|l| dimmed(l, theme))
+    } else {
+        lines
+    }
+}
+
+/// `line` with every span dimmed: how a card the view no longer matches is drawn.
+fn dimmed(line: Line<'static>, theme: &Theme) -> Line<'static> {
+    Line::from(
+        line.spans
+            .into_iter()
+            .map(|mut span| {
+                span.style = span.style.patch(theme.dim());
+                span
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn border_line(
@@ -310,12 +345,21 @@ fn fit_reference(name: Option<&str>, number: Option<&str>, room: usize) -> Strin
 /// A bordered card's first line, exactly `width` cells: the unknown-option marker, the state
 /// dot and the reference on the left; the first assignee (and `+N` more) at the right edge.
 /// When both do not fit the reference is cut first, keeping `#number`, then the assignee.
-fn card_header(item: &Item, field: &Field, width: usize, theme: &Theme) -> Line<'static> {
-    let marker = if has_unknown_option(item, field) {
-        "? "
-    } else {
-        ""
-    };
+fn card_header(
+    item: &Item,
+    field: &Field,
+    width: usize,
+    prefix: &str,
+    theme: &Theme,
+) -> Line<'static> {
+    let marker = format!(
+        "{}{prefix}",
+        if has_unknown_option(item, field) {
+            "? "
+        } else {
+            ""
+        }
+    );
     let (glyph, dot, name, number) = card_reference(item, theme);
     let mut right = match item.assignees().split_first() {
         None => String::new(),
@@ -323,7 +367,7 @@ fn card_header(item: &Item, field: &Field, width: usize, theme: &Theme) -> Line<
         Some((first, rest)) => sanitize(&format!("@{first} +{}", rest.len())),
     };
     // The marker and the dot; a reference follows after a space.
-    let lead = display_width(marker) + 1;
+    let lead = display_width(&marker) + 1;
     let least = number
         .as_deref()
         .or(name.as_deref())
@@ -363,17 +407,22 @@ fn card_header(item: &Item, field: &Field, width: usize, theme: &Theme) -> Line<
 /// `MAX_TITLE_LINES` lines (bold when selected), then, when the card has any pills, a blank
 /// line, the pills for `pill_fields` (at most `MAX_PILL_LINES` lines) and the label pills,
 /// always last. Selection is marked by the border and the bold title alone.
-fn bordered_card(
+fn bordered_card_marked(
     item: &Item,
     field: &Field,
     pill_fields: &[&Field],
     width: usize,
     selected: bool,
+    marks: &ItemMarks,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let inner = width - 2;
+    let highlighted = marks.highlight.as_ref() == Some(&item.id);
+    let unmatched = marks.unmatched.contains(&item.id);
     let (set, style) = if selected {
         (border::THICK, theme.accent().add_modifier(Modifier::BOLD))
+    } else if highlighted {
+        (border::DOUBLE, theme.accent())
     } else if theme.color {
         (border::ROUNDED, Style::default().fg(Color::DarkGray))
     } else {
@@ -398,12 +447,24 @@ fn bordered_card(
             inner,
             style,
         ),
-        wrap(card_header(item, field, inner, theme)),
+        wrap(card_header(
+            item,
+            field,
+            inner,
+            &marks.prefix(&item.id),
+            theme,
+        )),
     ];
     for title in wrap_to_width(item.title(), inner, MAX_TITLE_LINES) {
         lines.push(wrap(Line::from(Span::styled(
             pad_to_width(&title, inner),
             title_style,
+        ))));
+    }
+    if unmatched {
+        lines.push(wrap(Line::from(Span::styled(
+            pad_to_width(&truncate_to_width(UNMATCHED_TEXT, inner), inner),
+            theme.dim(),
         ))));
     }
     let padded = |mut spans: Vec<Span<'static>>| {
@@ -432,7 +493,32 @@ fn bordered_card(
         inner,
         style,
     ));
+    // The whole card is dimmed, except under the cursor (its border and bold title stay).
+    if unmatched && !selected {
+        lines = lines.into_iter().map(|l| dimmed(l, theme)).collect();
+    }
     lines
+}
+
+/// `bordered_card_marked` and no marks.
+#[cfg(test)]
+fn bordered_card(
+    item: &Item,
+    field: &Field,
+    pill_fields: &[&Field],
+    width: usize,
+    selected: bool,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    bordered_card_marked(
+        item,
+        field,
+        pill_fields,
+        width,
+        selected,
+        &ItemMarks::default(),
+        theme,
+    )
 }
 
 /// The first line of a column shown in `rows` rows. The selected card, at `(top, height)`
@@ -452,6 +538,7 @@ thread_local! {
 
 /// Draws the board. `pill_fields` are the fields each card shows as pills (see
 /// `pills::card_fields`).
+#[cfg(test)]
 pub fn render_board(
     frame: &mut Frame,
     area: Rect,
@@ -459,6 +546,32 @@ pub fn render_board(
     selection: &BoardSelection,
     column_field: &Field,
     pill_fields: &[&Field],
+    theme: &Theme,
+) {
+    render_board_with(
+        frame,
+        area,
+        columns,
+        selection,
+        column_field,
+        pill_fields,
+        &ItemMarks::default(),
+        theme,
+    )
+}
+
+/// Draws the board with `marks` on its cards: `⋯` while edits are sending, `⊘` (and a dimmed
+/// card with a line saying so) for an item the view no longer matches, a double border for
+/// the highlighted new item.
+#[allow(clippy::too_many_arguments)]
+pub fn render_board_with(
+    frame: &mut Frame,
+    area: Rect,
+    columns: &[Column],
+    selection: &BoardSelection,
+    column_field: &Field,
+    pill_fields: &[&Field],
+    marks: &ItemMarks,
     theme: &Theme,
 ) {
     if columns.is_empty() {
@@ -526,9 +639,26 @@ pub fn render_board(
                 Entry::Card { item, index } => {
                     let is_sel = col_index == selection.column && index == selection.index;
                     let card = if width >= MIN_BORDERED {
-                        bordered_card(item, column_field, pill_fields, width, is_sel, theme)
+                        bordered_card_marked(
+                            item,
+                            column_field,
+                            pill_fields,
+                            width,
+                            is_sel,
+                            marks,
+                            theme,
+                        )
                     } else {
-                        card_lines(item, column_field, width, is_sel, theme).into()
+                        card_lines_marked(
+                            item,
+                            column_field,
+                            width,
+                            &marks.prefix(&item.id),
+                            marks.unmatched.contains(&item.id),
+                            is_sel,
+                            theme,
+                        )
+                        .into()
                     };
                     #[cfg(test)]
                     CARDS_BUILT.with(|n| n.set(n.get() + 1));
@@ -1515,5 +1645,164 @@ mod tests {
             rows[3].starts_with("#3 Emoj"),
             "cards two rows apart: {screen}"
         );
+    }
+
+    #[test]
+    fn cards_mark_pending_and_unmatched_items() {
+        use crate::ui::marks::ItemMarks;
+        let (p, all) = (project(), items());
+        let refs: Vec<&Item> = all.iter().collect();
+        let status = field(&p, "Status");
+        let cols = build_columns(&refs, status, None);
+        let mut marks = ItemMarks::default();
+        marks.pending.insert(ItemId::new("a"));
+        marks.unmatched.insert(ItemId::new("c"));
+        let sel = BoardSelection {
+            column: 1,
+            index: 0,
+        };
+        let screen = render_to_string(140, 30, |f| {
+            render_board_with(
+                f,
+                f.area(),
+                &cols,
+                &sel,
+                status,
+                &[],
+                &marks,
+                &Theme::plain(),
+            )
+        });
+        assert!(screen.contains("⋯ ● t #1"), "{screen}");
+        assert!(screen.contains("⊘ no longer matches filter"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn marked_cards_keep_their_width_and_dim_only_when_unmatched() {
+        use crate::ui::marks::ItemMarks;
+        use ratatui::style::Modifier;
+        let (p, all) = (project(), items());
+        let status = field(&p, "Status");
+        let item = &all[0];
+        let mut marks = ItemMarks::default();
+        marks.pending.insert(item.id.clone());
+        marks.unmatched.insert(item.id.clone());
+        marks.highlight = Some(item.id.clone());
+        let theme = Theme::plain();
+        for width in [10, 12, 20, 34, 60] {
+            for selected in [false, true] {
+                let lines =
+                    bordered_card_marked(item, status, &[], width, selected, &marks, &theme);
+                for l in &lines {
+                    assert_eq!(spans_width(&l.spans), width, "{l:?}");
+                }
+                let dim = lines[1]
+                    .spans
+                    .iter()
+                    .all(|s| s.style.add_modifier.contains(Modifier::DIM));
+                assert_eq!(dim, !selected, "width {width} selected {selected}");
+            }
+        }
+        // Pending alone dims nothing and adds no line; unmatched does both.
+        let mut only = ItemMarks::default();
+        only.pending.insert(item.id.clone());
+        let plain =
+            bordered_card_marked(item, status, &[], 34, false, &ItemMarks::default(), &theme);
+        let pending = bordered_card_marked(item, status, &[], 34, false, &only, &theme);
+        assert_eq!(plain.len(), pending.len());
+        // The plain theme dims the border itself, so compare the title row's inside.
+        let inner = |l: &Line<'static>| l.spans[1..l.spans.len() - 1].to_vec();
+        assert!(
+            !inner(&pending[2])
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::DIM))
+        );
+        let mut un = ItemMarks::default();
+        un.unmatched.insert(item.id.clone());
+        let unmatched = bordered_card_marked(item, status, &[], 34, false, &un, &theme);
+        assert_eq!(unmatched.len(), plain.len() + 1);
+        assert!(
+            inner(&unmatched[2])
+                .iter()
+                .all(|s| s.style.add_modifier.contains(Modifier::DIM))
+        );
+        // A highlighted card has a double border.
+        let hi = ItemMarks {
+            highlight: Some(item.id.clone()),
+            ..Default::default()
+        };
+        let lines = bordered_card_marked(item, status, &[], 34, false, &hi, &theme);
+        assert!(lines[0].spans[0].content.starts_with('╔'));
+    }
+
+    #[test]
+    fn narrow_cards_carry_the_marks_in_their_title_line() {
+        use crate::ui::marks::ItemMarks;
+        let (p, all) = (project(), items());
+        let status = field(&p, "Status");
+        let mut marks = ItemMarks::default();
+        marks.pending.insert(all[0].id.clone());
+        let lines = card_lines_marked(
+            &all[0],
+            status,
+            9,
+            &marks.prefix(&all[0].id),
+            false,
+            false,
+            &Theme::plain(),
+        );
+        assert!(lines[0].spans[0].content.starts_with("⋯ #1"), "{lines:?}");
+        assert_eq!(spans_width(&lines[0].spans), 9);
+    }
+
+    #[test]
+    fn the_unknown_option_marker_and_both_marks_fit_a_tight_card() {
+        use crate::ui::marks::ItemMarks;
+        let (p, all) = (project(), items());
+        let status = field(&p, "Status");
+        let old = all.iter().find(|i| has_unknown_option(i, status)).unwrap();
+        let mut marks = ItemMarks::default();
+        marks.pending.insert(old.id.clone());
+        marks.unmatched.insert(old.id.clone());
+        for width in 10..=16 {
+            let lines =
+                bordered_card_marked(old, status, &[], width, false, &marks, &Theme::plain());
+            for l in &lines {
+                assert_eq!(spans_width(&l.spans), width, "width {width}: {l:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_selected_unmatched_card_stays_whole_on_screen() {
+        use crate::ui::marks::ItemMarks;
+        let (p, all) = (project(), items());
+        let refs: Vec<&Item> = all.iter().collect();
+        let status = field(&p, "Status");
+        let cols = build_columns(&refs, status, None);
+        let mut marks = ItemMarks::default();
+        marks.unmatched.insert(ItemId::new("c"));
+        let sel = BoardSelection {
+            column: 0,
+            index: 1,
+        };
+        // Nine card rows: the unmatched card (eight lines, one more than usual) ends on the last.
+        let screen = render_to_string(140, 10, |f| {
+            render_board_with(
+                f,
+                f.area(),
+                &cols,
+                &sel,
+                status,
+                &[],
+                &marks,
+                &Theme::plain(),
+            )
+        });
+        let lines: Vec<&str> = screen.lines().collect();
+        assert!(lines[2].starts_with('┏'), "{screen}");
+        assert!(lines[3].contains("⊘ ● t #3"), "{screen}");
+        assert!(lines[9].starts_with('┗'), "{screen}");
     }
 }

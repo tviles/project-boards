@@ -1,0 +1,13 @@
+---
+source: src/ui/popup.rs
+expression: screen
+---
+
+
+
+  ┌ Status ──────────────────────────────────────────────┐
+  │> o                                                   │
+  │Todo                                                  │
+  │In Progress                                    current│
+  │Done                                                  │
+  └──────────────────────────────────────────────────────┘

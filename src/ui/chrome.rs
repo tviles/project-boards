@@ -2,12 +2,15 @@
 //! and the help, picker and setup overlays.
 
 use crate::model::Layout;
-use crate::ui::app::{App, Mode};
-use crate::ui::board::render_board;
+use crate::ui::app::{App, LineKind, Mode, Popup};
+use crate::ui::board::render_board_with;
 use crate::ui::detail::{build_doc, render_detail};
 use crate::ui::keymap::Action;
+use crate::ui::marks::ItemMarks;
+use crate::ui::multiselect::render_multiselect;
 use crate::ui::picker::render_picker;
-use crate::ui::table::{render_table, table_columns};
+use crate::ui::popup::{render_line_popup, render_list_picker};
+use crate::ui::table::{render_table_with, table_columns};
 use crate::ui::text::{display_width, pad_to_width, truncate_to_width};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout as Split, Rect};
@@ -34,6 +37,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(1),
     ])
     .areas(area);
+    let marks = app.marks();
     draw_header(frame, header, app);
     draw_tabs(frame, tabs, app);
     if app.mode == Mode::Setup {
@@ -46,20 +50,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             ),
             body,
         );
-    } else if app.mode == Mode::Detail && app.detail.is_some() {
+    } else if app.detail.is_some() {
         if body.width >= SPLIT_DETAIL_AT {
             let [left, right] =
                 Split::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .areas(body);
-            draw_body(frame, left, app);
+            draw_body(frame, left, app, &marks);
             draw_detail(frame, right, app);
         } else {
             draw_detail(frame, body, app);
         }
     } else {
-        draw_body(frame, body, app);
+        draw_body(frame, body, app, &marks);
     }
-    draw_status(frame, status, app);
+    draw_status(frame, status, app, &marks);
     if app.mode == Mode::Help {
         draw_help(frame, body, app);
     }
@@ -68,6 +72,166 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     {
         render_picker(frame, area, p, &app.theme);
     }
+    if app.mode == Mode::Popup {
+        draw_popup(frame, body, app);
+    }
+    if app.mode == Mode::ErrorLog {
+        draw_error_log(frame, body, app);
+    }
+}
+
+/// The failed edits, newest first, over the board (and the detail, if one is open).
+fn draw_error_log(frame: &mut Frame, area: Rect, app: &App) {
+    let rows = app.errors.len().max(1) as u16;
+    let rect = crate::ui::popup::centered(
+        area,
+        area.width.saturating_sub(4).min(100),
+        (rows + 2).min(area.height),
+    );
+    let inner = rect.width.saturating_sub(2) as usize;
+    let visible = rect.height.saturating_sub(2) as usize;
+    let start = (app.error_sel + 1).saturating_sub(visible.max(1));
+    let now = std::time::Instant::now();
+    let mut lines: Vec<Line> = Vec::new();
+    if app.errors.is_empty() {
+        lines.push(Line::styled("No failed edits", app.theme.dim()));
+    }
+    for (row, failed) in app
+        .errors
+        .iter()
+        .rev()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+    {
+        let text = format!(
+            "{:>7}  Could not {}: {}",
+            crate::ui::app::edit_ago(now.saturating_duration_since(failed.at)),
+            failed.what,
+            failed.message
+        );
+        let style = if row == app.error_sel {
+            app.theme.selected()
+        } else {
+            ratatui::style::Style::default()
+        };
+        lines.push(Line::styled(
+            pad_to_width(&truncate_to_width(&text, inner), inner),
+            style,
+        ));
+    }
+    let retry = app
+        .keymap
+        .keys_for(Action::Retry)
+        .first()
+        .map(|k| k.label())
+        .unwrap_or_default();
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(
+            " failed edits · {retry} retry · d dismiss · esc close "
+        ))),
+        rect,
+    );
+}
+
+fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(popup) = &app.popup else { return };
+    let theme = &app.theme;
+    match popup {
+        Popup::Actions { picker, .. } => render_list_picker(frame, area, picker, theme),
+        Popup::Fields { picker, .. } => render_list_picker(frame, area, picker, theme),
+        Popup::Value { picker, .. } => render_list_picker(frame, area, picker, theme),
+        Popup::Options { select, .. } => render_multiselect(frame, area, select, theme),
+        Popup::Line {
+            kind,
+            title,
+            input,
+            error,
+            ..
+        } => {
+            let hint = match kind {
+                LineKind::Text => "enter saves · empty clears · esc cancels",
+                LineKind::Number => "a number · empty clears · esc cancels",
+                LineKind::Date => "2026-10-03, +3d, fri · empty clears · esc cancels",
+            };
+            render_line_popup(frame, area, title, input, hint, error.as_deref(), theme)
+        }
+    }
+}
+
+/// A header flag in its full and its short form.
+struct Flag {
+    long: String,
+    short: String,
+}
+
+impl Flag {
+    fn same(text: String) -> Flag {
+        Flag {
+            long: text.clone(),
+            short: text,
+        }
+    }
+}
+
+/// The write flags in priority order (read-only, paused, saving), each in both forms.
+fn write_flag_forms(app: &App, now: std::time::Instant) -> Vec<Flag> {
+    let mut flags = Vec::new();
+    if app.project().is_some_and(|p| !p.viewer_can_update) {
+        flags.push(Flag::same("read-only".into()));
+    } else if app.project().is_some() && !app.edit_context().has_project_scope() {
+        flags.push(Flag {
+            long: "read-only: token lacks the project scope".into(),
+            short: "read-only (no scope)".into(),
+        });
+    }
+    if let Some(until) = app.status.write_pause {
+        let left = until.saturating_duration_since(now);
+        // Rounded up, so the last second does not read blank.
+        let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+        if secs > 0 {
+            flags.push(Flag {
+                long: format!("writes paused {secs}s"),
+                short: format!("paused {secs}s"),
+            });
+        }
+    }
+    let pending = app.pending_count();
+    if pending > 0 {
+        flags.push(Flag {
+            long: format!("saving {pending}…"),
+            short: format!("⋯{pending}"),
+        });
+    }
+    flags
+}
+
+/// The header flags about writing: edits sending, a rate-limit pause, and why the board is
+/// read-only.
+pub fn write_flags(app: &App, now: std::time::Instant) -> Vec<String> {
+    let mut forms = write_flag_forms(app, now);
+    // Priority order is read-only, paused, saving; the header reads saving first.
+    forms.sort_by_key(|f| !f.long.starts_with("saving"));
+    forms.into_iter().map(|f| f.long).collect()
+}
+
+/// Cells the header always keeps for the title.
+const MIN_TITLE: usize = 12;
+
+/// The header's flags that fit in `room` cells: full forms if they all fit, else short forms,
+/// else the most important ones (read-only, paused, saving, stale or loading, rate limit).
+fn fit_flags(flags: &[Flag], room: usize) -> String {
+    let join = |list: &[String]| list.join(" · ");
+    let longs: Vec<String> = flags.iter().map(|f| f.long.clone()).collect();
+    if display_width(&join(&longs)) <= room {
+        return join(&longs);
+    }
+    let mut shorts: Vec<String> = flags.iter().map(|f| f.short.clone()).collect();
+    while !shorts.is_empty() && display_width(&join(&shorts)) > room {
+        shorts.pop();
+    }
+    join(&shorts)
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -75,20 +239,18 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         .project()
         .map(|p| format!("{} · {}", p.title, p.board))
         .unwrap_or_else(|| "project-boards".into());
-    let mut flags = Vec::new();
+    let mut flags = write_flag_forms(app, std::time::Instant::now());
     if let Some((loaded, total)) = app.status.loading {
-        flags.push(format!("loading {loaded}/{total}"));
+        flags.push(Flag::same(format!("loading {loaded}/{total}")));
     } else if app.status.stale {
-        flags.push("stale".into());
-    }
-    if app.project().is_some_and(|p| !p.viewer_can_update) {
-        flags.push("read-only".into());
+        flags.push(Flag::same("stale".into()));
     }
     if app.status.rate_low {
-        flags.push("rate limit low".into());
+        flags.push(Flag::same("rate limit low".into()));
     }
-    let right = flags.join(" · ");
-    let left_width = (area.width as usize).saturating_sub(display_width(&right) + 1);
+    let width = area.width as usize;
+    let right = fit_flags(&flags, width.saturating_sub(MIN_TITLE + 1));
+    let left_width = width.saturating_sub(display_width(&right) + 1);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(pad_to_width(&title, left_width), app.theme.bold()),
@@ -149,7 +311,7 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_body(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
     let Some(project) = app.project() else {
         frame.render_widget(
             Paragraph::new(Line::styled("Loading the board…", app.theme.dim())),
@@ -167,25 +329,27 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
     match app.layout().0 {
         Layout::Board => {
             if let Some(field) = app.column_field() {
-                render_board(
+                render_board_with(
                     frame,
                     area,
                     &app.board_columns(),
                     &app.board_sel,
                     field,
                     &app.card_fields(),
+                    marks,
                     &app.theme,
                 );
             }
         }
         _ => {
             let view = app.current_view().expect("a project with views");
-            render_table(
+            render_table_with(
                 frame,
                 area,
                 &app.table_rows(),
                 &table_columns(view, project),
                 app.table_selected,
+                marks,
                 &app.theme,
             );
         }
@@ -220,7 +384,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App) {
     render_detail(frame, inner, &doc, state, &app.theme);
 }
 
-fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_status(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
     let line = match app.mode {
         Mode::Search => Line::from(vec![
             Span::styled("/", app.theme.accent()),
@@ -242,14 +406,26 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::raw(app.input.clone()));
             Line::from(spans)
         }
+        Mode::Confirm => Line::styled(
+            truncate_to_width(
+                app.confirm.as_ref().map_or("", |c| c.question.as_str()),
+                area.width as usize,
+            ),
+            app.theme.accent().patch(app.theme.bold()),
+        ),
         _ => {
             if let Some(flash) = &app.status.flash {
                 Line::styled(
                     truncate_to_width(flash, area.width as usize),
                     app.theme.accent(),
                 )
+            } else if app.mode == Mode::ErrorLog {
+                Line::styled(error_log_hints(app, area.width as usize), app.theme.dim())
             } else if let Some(e) = &app.status.error {
-                Line::styled(truncate_to_width(e, area.width as usize), app.theme.error())
+                Line::styled(
+                    truncate_keeping_hint(app, e, area.width as usize),
+                    app.theme.error(),
+                )
             } else {
                 let mut parts: Vec<String> = Vec::new();
                 if let Some(extra) = app.extra_filter() {
@@ -267,11 +443,23 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
                     .and(app.keymap.keys_for(Action::ClearFilter).first().copied())
                     .map(|k| format!(" · {} clear filter", k.label()))
                     .unwrap_or_default();
-                parts.push(format!(
-                    "? help · / search · f filter{clear} · L layout · q quit"
-                ));
+                if !app.errors.is_empty()
+                    && let Some(k) = app.keymap.keys_for(Action::ErrorLog).first()
+                {
+                    parts.push(format!("{} {} failed", k.label(), app.errors.len()));
+                }
+                parts.extend(app.edit_hints());
+                parts.push(format!("/ search · f filter{clear} · L layout · q quit"));
+                // The reminder outranks the hints: they are cut for it, but only when what
+                // is left of them is still worth showing.
+                let reminder = (!marks.unmatched.is_empty()
+                    && area.width as usize
+                        >= display_width(crate::ui::marks::UNMATCHED_TEXT)
+                            + display_width(" · ? help")
+                            + MIN_HINT_ROOM)
+                    .then_some(crate::ui::marks::UNMATCHED_TEXT);
                 Line::styled(
-                    truncate_to_width(&parts.join(" · "), area.width as usize),
+                    status_line_with(&parts.join(" · "), reminder, area.width as usize),
                     app.theme.dim(),
                 )
             }
@@ -280,7 +468,77 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
+/// The error line cut to `width`, keeping its closing `· E error log` pointer.
+fn truncate_keeping_hint(app: &App, error: &str, width: usize) -> String {
+    let hint = app
+        .keymap
+        .keys_for(Action::ErrorLog)
+        .first()
+        .map(|k| format!(" · {} error log", k.label()));
+    match hint {
+        Some(hint) if error.ends_with(&hint) && display_width(error) > width => {
+            let head = error.trim_end_matches(hint.as_str());
+            let room = width.saturating_sub(display_width(&hint));
+            format!("{}{hint}", truncate_to_width(head, room))
+        }
+        _ => truncate_to_width(error, width),
+    }
+}
+
+/// The hint line while the error log is open.
+fn error_log_hints(app: &App, width: usize) -> String {
+    let key = |a: Action| {
+        app.keymap
+            .keys_for(a)
+            .first()
+            .map(|k| k.label())
+            .unwrap_or_default()
+    };
+    let text = format!(
+        "{} {} select · {} retry · d dismiss · esc close",
+        key(Action::Down),
+        key(Action::Up),
+        key(Action::Retry)
+    );
+    truncate_to_width(&text, width)
+}
+
+/// The least room the hints keep when the unmatched reminder is shown.
+const MIN_HINT_ROOM: usize = 12;
+
+/// The bottom hint line: `left` cut with `…` to fit, then `? help`, which always shows
+/// (pre-flight ruling 4).
+pub fn status_line(left: &str, width: usize) -> String {
+    status_line_with(left, None, width)
+}
+
+/// `status_line` with `keep` (never cut) between `left` and `? help`.
+fn status_line_with(left: &str, keep: Option<&str>, width: usize) -> String {
+    const HELP: &str = "? help";
+    let mut tail = String::new();
+    if let Some(keep) = keep {
+        tail.push_str(" · ");
+        tail.push_str(keep);
+    }
+    tail.push_str(" · ");
+    tail.push_str(HELP);
+    let room = width.saturating_sub(display_width(&tail));
+    if left.is_empty() || room == 0 {
+        // Nothing of `left` fits: no leading separator, and never wider than the line.
+        let bare = tail.trim_start_matches(" · ");
+        let bare = if display_width(bare) <= width {
+            bare
+        } else {
+            HELP
+        };
+        return truncate_to_width(bare, width);
+    }
+    format!("{}{tail}", truncate_to_width(left, room))
+}
+
+/// The help overlay: every action with its keys. When the pane is too short for all of them
+/// it scrolls (`j`/`k`/arrows; any other key closes).
+fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
     let lines: Vec<Line> = Action::ALL
         .iter()
         .map(|a| {
@@ -291,7 +549,21 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
             ])
         })
         .collect();
-    let h = (lines.len() as u16 + 2).min(area.height);
+    let total = lines.len();
+    let h = (total as u16 + 2).min(area.height);
+    let visible = (h as usize).saturating_sub(2);
+    app.help_visible = visible;
+    let scrolls = total > visible;
+    app.help_scroll = app.help_scroll.min(total.saturating_sub(visible));
+    let title = if scrolls {
+        format!(
+            " keys {}-{} of {total} · j/k scroll · other key closes ",
+            app.help_scroll + 1,
+            app.help_scroll + visible
+        )
+    } else {
+        " keys · any key closes ".to_string()
+    };
     let w = 64.min(area.width);
     let rect = Rect {
         x: area.x + (area.width - w) / 2,
@@ -299,13 +571,14 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
         width: w,
         height: h,
     };
+    let shown: Vec<Line> = lines
+        .into_iter()
+        .skip(app.help_scroll)
+        .take(visible)
+        .collect();
     frame.render_widget(Clear, rect);
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" keys · any key closes "),
-        ),
+        Paragraph::new(shown).block(Block::default().borders(Borders::ALL).title(title)),
         rect,
     );
 }
@@ -325,6 +598,39 @@ mod tests {
             Keymap::defaults(),
             Theme::plain(),
         )
+    }
+
+    #[test]
+    fn the_header_says_saving_paused_and_read_only() {
+        use crate::model::{FieldId, FieldValue, ItemId, OpKind, OptionId};
+        use crate::ops::Op;
+        let now = std::time::Instant::now();
+        let mut a = app();
+        assert!(write_flags(&a, now).is_empty());
+        a.submit(
+            OpKind::Move,
+            Op::SetField {
+                item: ItemId::new("a"),
+                field: FieldId::new("F_status"),
+                value: FieldValue::SingleSelect {
+                    option_id: OptionId::new("o_done"),
+                    name: "Done".into(),
+                },
+            },
+        );
+        a.status.write_pause = Some(now + std::time::Duration::from_secs(30));
+        assert_eq!(write_flags(&a, now), ["saving 1…", "writes paused 30s"]);
+        a.on_sync(crate::sync::SyncEvent::Access {
+            scopes: Some(vec!["repo".into()]),
+        });
+        assert!(
+            write_flags(&a, now).contains(&"read-only: token lacks the project scope".to_string())
+        );
+        let screen = render_to_string(100, 12, |f| draw(f, &mut a));
+        assert!(
+            screen.lines().next().unwrap().contains("saving 1…"),
+            "{screen}"
+        );
     }
 
     #[test]
@@ -553,7 +859,342 @@ mod tests {
                 .lines()
                 .next()
                 .unwrap()
-                .ends_with("stale · read-only")
+                .ends_with("read-only · stale")
         );
+    }
+
+    fn flagged_app() -> App {
+        use crate::model::{FieldId, FieldValue, ItemId, OpKind, OptionId};
+        use crate::ops::Op;
+        let mut a = app();
+        a.submit(
+            OpKind::Move,
+            Op::SetField {
+                item: ItemId::new("a"),
+                field: FieldId::new("F_status"),
+                value: FieldValue::SingleSelect {
+                    option_id: OptionId::new("o_done"),
+                    name: "Done".into(),
+                },
+            },
+        );
+        a.status.write_pause = Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+        a.on_sync(crate::sync::SyncEvent::Access {
+            scopes: Some(vec!["repo".into()]),
+        });
+        a.status.loading = Some((1, 2));
+        a.status.rate_low = true;
+        a
+    }
+
+    #[test]
+    fn the_title_survives_every_header_flag_at_any_width() {
+        for width in [40u16, 60, 80] {
+            let mut a = flagged_app();
+            let screen = render_to_string(width, 10, |f| draw(f, &mut a));
+            let head = screen.lines().next().unwrap();
+            assert!(head.starts_with("Testbed · tviles/3"), "{width}: {head}");
+            // Flags come whole or not at all: each part between separators is a full flag.
+            let right = head.trim_end().split_once("tviles/3").unwrap().1.trim();
+            for part in right.split(" · ").filter(|p| !p.is_empty()) {
+                let known = [
+                    "read-only (no scope)",
+                    "read-only: token lacks the project scope",
+                    "writes paused",
+                    "paused",
+                    "saving",
+                    "⋯",
+                    "loading 1/2",
+                    "rate limit low",
+                ];
+                assert!(
+                    known.iter().any(|k| part.starts_with(k)),
+                    "{width}: {part:?} in {head}"
+                );
+            }
+            if width == 80 {
+                assert!(head.contains("loading 1/2"), "{head}");
+            }
+            if width == 40 {
+                assert!(head.contains("read-only (no scope)"), "{head}");
+            }
+        }
+    }
+
+    #[test]
+    fn short_flags_drop_the_least_important_first() {
+        let a = flagged_app();
+        let flags = {
+            let mut f = write_flag_forms(&a, std::time::Instant::now());
+            f.push(Flag::same("loading 1/2".into()));
+            f.push(Flag::same("rate limit low".into()));
+            f
+        };
+        assert_eq!(fit_flags(&flags, 200).matches(" · ").count(), 4);
+        let tight = fit_flags(&flags, 40);
+        assert!(
+            tight.starts_with("read-only (no scope) · paused"),
+            "{tight}"
+        );
+        assert!(!tight.contains("rate limit"), "{tight}");
+        assert_eq!(fit_flags(&flags, 5), "");
+    }
+
+    #[test]
+    fn the_pause_countdown_rounds_up() {
+        let now = std::time::Instant::now();
+        let mut a = app();
+        a.status.write_pause = Some(now + std::time::Duration::from_millis(400));
+        assert_eq!(write_flags(&a, now), ["writes paused 1s"]);
+        a.status.write_pause = Some(now + std::time::Duration::from_millis(29_100));
+        assert_eq!(write_flags(&a, now), ["writes paused 30s"]);
+        a.status.write_pause = Some(now);
+        assert!(write_flags(&a, now).is_empty());
+    }
+
+    #[test]
+    fn a_read_only_project_says_plain_read_only_even_without_the_scope() {
+        let now = std::time::Instant::now();
+        let mut s = snapshot();
+        s.project.viewer_can_update = false;
+        let mut a = App::new(
+            Box::new(MemoryStore::new(Some(s))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        a.on_sync(crate::sync::SyncEvent::Access {
+            scopes: Some(vec!["repo".into()]),
+        });
+        assert_eq!(write_flags(&a, now), ["read-only"]);
+    }
+
+    #[test]
+    fn a_narrow_status_line_keeps_help_with_unmatched_items() {
+        let mut a = app();
+        a.status.notes.push("a note".into());
+        let mut marks = ItemMarks::default();
+        marks.unmatched.insert(crate::model::ItemId::new("a"));
+        for width in [40u16, 60, 80, 120] {
+            let screen = render_to_string(width, 10, |f| {
+                draw_status(f, f.area(), &a, &marks);
+            });
+            let line = screen.lines().next().unwrap();
+            let has_reminder = line.contains("⊘ no longer matches filter");
+            // The reminder is only shown when `? help` still fits.
+            assert!(!has_reminder || line.contains("? help"), "{width}: {line}");
+            if width == 120 {
+                assert!(has_reminder, "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_popover_opened_from_the_detail_draws_over_it() {
+        let mut a = app();
+        a.handle_key(code(KeyCode::Enter));
+        a.handle_key(key('e'));
+        assert_eq!(a.mode, Mode::Popup);
+        let screen = render_to_string(100, 40, |f| draw(f, &mut a));
+        let lines: Vec<&str> = screen.lines().collect();
+        assert!(
+            lines[2].starts_with('│'),
+            "the detail's border, not the table header: {screen}"
+        );
+        assert!(screen.contains("Edit field · #1"), "{screen}");
+    }
+
+    #[test]
+    fn the_hint_line_keeps_help_visible_when_narrow() {
+        let mut a = app();
+        let screen = render_to_string(50, 12, |f| draw(f, &mut a));
+        let last = screen.lines().last().unwrap();
+        assert!(last.ends_with(" · ? help"), "{last}");
+        assert!(
+            last.contains('…'),
+            "the edit hints are cut, not ? help: {last}"
+        );
+        assert!(display_width(last) <= 50);
+        assert_eq!(status_line("", 10), "? help");
+        assert_eq!(status_line("e field", 40), "e field · ? help");
+    }
+
+    #[test]
+    fn help_scrolls_when_the_pane_is_short() {
+        let mut a = app();
+        a.handle_key(key('?'));
+        let screen = render_to_string(100, 14, |f| draw(f, &mut a));
+        assert!(screen.contains("1-"), "{screen}");
+        assert!(screen.contains("j/k scroll"), "{screen}");
+        let first_key = a.help_scroll;
+        assert_eq!(first_key, 0);
+        // The last action is not visible until we scroll down.
+        let last = Action::ALL[Action::ALL.len() - 1].description();
+        assert!(!screen.contains(last), "{screen}");
+        for _ in 0..40 {
+            assert!(a.handle_key(key('j')).is_empty());
+            assert_eq!(a.mode, Mode::Help, "j scrolls, it does not close");
+            render_to_string(100, 14, |f| draw(f, &mut a));
+        }
+        let screen = render_to_string(100, 14, |f| draw(f, &mut a));
+        assert!(screen.contains(last), "{screen}");
+        assert!(
+            !screen.contains(Action::ALL[0].description()),
+            "scrolled past the first rows: {screen}"
+        );
+        a.handle_key(key('k'));
+        assert_eq!(a.mode, Mode::Help);
+        a.handle_key(key('x'));
+        assert_eq!(a.mode, Mode::Normal, "any other key closes");
+    }
+
+    #[test]
+    fn help_that_fits_closes_on_any_key() {
+        let mut a = app();
+        a.handle_key(key('?'));
+        render_to_string(100, 40, |f| draw(f, &mut a));
+        a.handle_key(key('j'));
+        assert_eq!(a.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn status_line_never_overflows_and_help_stands_alone_when_there_is_no_room() {
+        for width in 6..=10 {
+            let line = status_line("e field · move", width);
+            assert!(display_width(&line) <= width, "{width}: {line}");
+            assert!(line.ends_with("? help"), "{width}: {line}");
+        }
+        assert_eq!(status_line("e field", 6), "? help");
+        assert_eq!(status_line("e field", 9), "? help");
+        assert_eq!(status_line("e field", 10), "… · ? help");
+    }
+
+    #[test]
+    fn a_wide_char_hint_cut_stays_within_the_width() {
+        for width in 10..30 {
+            let line = status_line("中文中文中文中文中文", width);
+            assert!(display_width(&line) <= width, "{width}: {line}");
+            assert!(line.ends_with(" · ? help"), "{width}: {line}");
+        }
+    }
+
+    #[test]
+    fn the_reminder_needs_twelve_cells_left_for_the_hints() {
+        let a = app();
+        let mut marks = ItemMarks::default();
+        marks.unmatched.insert(crate::model::ItemId::new("a"));
+        let min = display_width(crate::ui::marks::UNMATCHED_TEXT)
+            + display_width(" · ? help")
+            + MIN_HINT_ROOM;
+        for (width, shown) in [(min - 1, false), (min, true)] {
+            let screen = render_to_string(width as u16, 3, |f| {
+                draw_status(f, f.area(), &a, &marks);
+            });
+            let line = screen.lines().next().unwrap();
+            assert_eq!(
+                line.contains("⊘ no longer matches"),
+                shown,
+                "{width}: {line}"
+            );
+            assert!(line.ends_with("? help"), "{width}: {line}");
+        }
+    }
+
+    fn failed_app() -> App {
+        use crate::model::{FieldId, FieldValue, ItemId, OpKind, OptionId};
+        let mut a = app();
+        a.submit(
+            OpKind::Move,
+            crate::ops::Op::SetField {
+                item: ItemId::new("a"),
+                field: FieldId::new("F_status"),
+                value: FieldValue::SingleSelect {
+                    option_id: OptionId::new("o_done"),
+                    name: "Done".into(),
+                },
+            },
+        );
+        a.on_sync(crate::sync::SyncEvent::OpDone {
+            id: 1,
+            result: Err(crate::github::GithubError::Network(
+                "connection reset".into(),
+            )),
+        });
+        a
+    }
+
+    #[test]
+    fn the_error_log_lists_failures_with_their_messages() {
+        let mut a = failed_app();
+        let screen = render_to_string(100, 12, |f| draw(f, &mut a));
+        let last = screen.lines().last().unwrap().to_string();
+        assert!(
+            last.starts_with("Could not set Status to Done on 'Fix crash'"),
+            "{last}"
+        );
+        assert!(
+            last.ends_with("· E error log"),
+            "the error line points to the log: {last}"
+        );
+        a.status.error = None;
+        let screen = render_to_string(100, 12, |f| draw(f, &mut a));
+        let last = screen.lines().last().unwrap().to_string();
+        assert!(
+            last.starts_with("E 1 failed · "),
+            "the hint line counts failures: {last}"
+        );
+        assert!(last.ends_with("· ? help"), "{last}");
+        a.handle_key(key('E'));
+        let screen = render_to_string(100, 12, |f| draw(f, &mut a));
+        assert!(screen.contains("failed edits"), "{screen}");
+        assert!(
+            screen.contains("set Status to Done on 'Fix crash'"),
+            "{screen}"
+        );
+        assert!(screen.contains("connection reset"), "{screen}");
+        assert!(screen.contains("0s ago"), "{screen}");
+        let last = screen.lines().last().unwrap().trim_end().to_string();
+        assert_eq!(last, "j k select · R retry · d dismiss · esc close");
+    }
+
+    #[test]
+    fn the_error_line_keeps_its_pointer_when_the_pane_is_narrow() {
+        let mut a = failed_app();
+        let screen = render_to_string(50, 12, |f| draw(f, &mut a));
+        let last = screen.lines().last().unwrap().trim_end().to_string();
+        assert!(
+            last.ends_with("… · E error log") || last.ends_with("· E error log"),
+            "{last}"
+        );
+        assert!(last.chars().count() <= 50, "{last}");
+    }
+
+    #[test]
+    fn a_refused_retry_shows_its_reason_in_the_log() {
+        let mut a = failed_app();
+        a.on_sync(crate::sync::SyncEvent::Access {
+            scopes: Some(vec!["repo".into()]),
+        });
+        a.handle_key(key('E'));
+        a.handle_key(key('R'));
+        let screen = render_to_string(100, 12, |f| draw(f, &mut a));
+        let last = screen.lines().last().unwrap().to_string();
+        assert!(last.contains("project scope"), "{last}");
+        assert!(
+            screen.contains("connection reset"),
+            "the entry stays: {screen}"
+        );
+    }
+
+    #[test]
+    fn the_error_log_is_drawn_over_the_open_detail() {
+        let mut a = failed_app();
+        a.status.error = None;
+        a.handle_key(code(KeyCode::Enter));
+        a.handle_key(key('E'));
+        let screen = render_to_string(100, 20, |f| draw(f, &mut a));
+        assert!(screen.contains("failed edits"), "{screen}");
+        assert!(screen.contains("connection reset"), "{screen}");
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!(a.mode, Mode::Detail);
     }
 }

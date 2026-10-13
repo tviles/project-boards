@@ -7,6 +7,7 @@ use crate::github::GithubError;
 use crate::herdr::cli::{HerdrCli, focus_plugin_pane};
 use crate::herdr::registry::PaneRegistry;
 use crate::model::*;
+use crate::ops::queue::OpQueue;
 use crate::state::{LayoutOverride, State};
 use crate::store::MemoryStore;
 use crate::store::cache::{cache_path, load_cache, save_cache};
@@ -32,6 +33,9 @@ pub struct PaneOptions {
     pub repo: Option<RepoSlug>,
     pub board: Option<BoardRef>,
     pub picker: bool,
+    /// The local UTC offset, read once before any thread starts (the `time` crate refuses
+    /// to read it afterwards); "today" in date input and iterations is the date at this offset.
+    pub utc_offset: time::UtcOffset,
 }
 
 // One short-lived value per event; boxing would change the public `Input::Sync` shape.
@@ -73,6 +77,12 @@ pub enum SyncJob {
     },
     RepoProjects(RepoSlug),
     Projects(Option<RepoSlug>),
+    /// Send one pending edit.
+    Mutate {
+        id: crate::ops::OpId,
+        project: ProjectId,
+        op: crate::ops::Op,
+    },
 }
 
 impl SyncJob {
@@ -86,6 +96,7 @@ impl SyncJob {
             Self::Detail { .. } => "Detail",
             Self::RepoProjects(_) => "RepoProjects",
             Self::Projects(_) => "Projects",
+            Self::Mutate { .. } => "Mutate",
         }
     }
 }
@@ -147,6 +158,10 @@ pub struct Controller {
     awaiting_repo_projects: bool,
     /// Bumped whenever the shown board changes, so late events of the old board are dropped.
     generation: u64,
+    /// When each pending edit goes out.
+    queue: OpQueue,
+    /// Edit results not yet in the disk cache; saved at most once per tick and on exit.
+    cache_dirty: bool,
 }
 
 impl Controller {
@@ -162,6 +177,7 @@ impl Controller {
             keymap,
             Theme::from_env(|k| std::env::var(k).ok()),
         );
+        app.utc_offset = options.utc_offset;
         app.status.notes = options
             .warnings
             .iter()
@@ -179,6 +195,8 @@ impl Controller {
             full_load_in_flight: false,
             awaiting_repo_projects: false,
             generation: 0,
+            queue: OpQueue::new(),
+            cache_dirty: false,
         }
     }
 
@@ -206,6 +224,12 @@ impl Controller {
         self.app.setup = None;
         if self.app.mode == Mode::Setup {
             self.app.mode = Mode::Normal;
+        }
+        // A retry after the token failed mid-session: the board is open and loaded, so keep
+        // its store, pending edits, queue and generation, and only refresh it with the new
+        // client. Reopening it would drop the pending edits.
+        if self.board.is_some() && self.app.snapshot().is_some() {
+            return self.poll(PollKind::Full, now);
         }
         let state = State::load(&self.options.state_dir);
         let remembered = self
@@ -263,6 +287,9 @@ impl Controller {
         }
         self.release();
         self.generation += 1;
+        // Edits for the previous board are never sent now; its store goes away below.
+        self.queue.clear();
+        self.app.status.write_pause = None;
         self.awaiting_repo_projects = false;
         if let Some(own) = &own
             && let Err(e) = registry.register(&board, own)
@@ -305,6 +332,9 @@ impl Controller {
 
     /// Unregisters this pane from the board it shows. Called on board switch and on exit.
     pub fn release(&mut self) {
+        if self.cache_dirty {
+            self.persist_cache();
+        }
         if let (Some(board), Some(own)) = (self.board.take(), &self.options.own_pane)
             && let Err(e) = PaneRegistry::new(&self.options.state_dir).unregister(&board, own)
         {
@@ -362,11 +392,18 @@ impl Controller {
                 .on_focus(focused, now)
                 .map(|k| self.poll(k, now))
                 .unwrap_or_default(),
-            Input::Tick => self
-                .scheduler
-                .tick(now)
-                .map(|k| self.poll(k, now))
-                .unwrap_or_default(),
+            Input::Tick => {
+                if self.cache_dirty {
+                    self.persist_cache();
+                }
+                let mut effects = self
+                    .scheduler
+                    .tick(now)
+                    .map(|k| self.poll(k, now))
+                    .unwrap_or_default();
+                effects.extend(self.dispatch(now));
+                effects
+            }
             Input::Sync { generation, event } => {
                 if generation != self.generation {
                     return Vec::new();
@@ -377,6 +414,18 @@ impl Controller {
     }
 
     fn on_sync(&mut self, event: SyncEvent, now: Instant) -> Vec<Effect> {
+        if let SyncEvent::OpDone { id, result } = &event {
+            if let Err(GithubError::RateLimited { retry_after_secs }) = result {
+                // Not a failure: the edit goes back to the front and writes pause.
+                self.queue
+                    .retry_after(*id, now + Duration::from_secs(*retry_after_secs));
+                self.app.status.write_pause = self.queue.paused_until(now);
+                return Vec::new();
+            }
+            self.queue.finished(*id);
+        }
+        let op_done = matches!(event, SyncEvent::OpDone { .. });
+        let op_applied = matches!(event, SyncEvent::OpDone { result: Ok(_), .. });
         match &event {
             SyncEvent::Rate(rate) => self.scheduler.set_low_budget(rate.is_low()),
             SyncEvent::Failed {
@@ -468,8 +517,41 @@ impl Controller {
         }
         if persist {
             self.persist_cache();
+        } else if op_applied {
+            // Edits settle in bursts; the next tick saves them all at once.
+            self.cache_dirty = true;
         }
-        self.commands(cmds, now)
+        let mut effects = self.commands(cmds, now);
+        if op_done {
+            effects.extend(self.dispatch(now));
+        }
+        effects
+    }
+
+    /// Spawns every edit the queue lets go now, and mirrors the write pause into the header.
+    fn dispatch(&mut self, now: Instant) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        let project = self.app.project().map(|p| p.id.clone());
+        for id in self.queue.ready(now) {
+            let op = self
+                .app
+                .store
+                .pending()
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.op.clone());
+            match (op, &project) {
+                (Some(op), Some(project)) => effects.push(self.spawn(SyncJob::Mutate {
+                    id,
+                    project: project.clone(),
+                    op,
+                })),
+                // Settled or gone meanwhile: nothing to send.
+                _ => self.queue.finished(id),
+            }
+        }
+        self.app.status.write_pause = self.queue.paused_until(now);
+        effects
     }
 
     /// Gives the app this board's saved layout choices, dropping (and forgetting) any whose
@@ -512,8 +594,9 @@ impl Controller {
         ));
     }
 
-    fn persist_cache(&self) {
-        let Some(snapshot) = self.app.snapshot() else {
+    fn persist_cache(&mut self) {
+        self.cache_dirty = false;
+        let Some(snapshot) = self.app.store.confirmed() else {
             return;
         };
         // A list fetched with a session-only local filter would reopen next time without it.
@@ -536,7 +619,7 @@ impl Controller {
         }
     }
 
-    fn commands(&mut self, cmds: Vec<Command>, now: Instant) -> Vec<Effect> {
+    pub(crate) fn commands(&mut self, cmds: Vec<Command>, now: Instant) -> Vec<Effect> {
         let mut effects = Vec::new();
         for cmd in cmds {
             match cmd {
@@ -550,6 +633,19 @@ impl Controller {
                             hydrate: !self.full_load_in_flight,
                         }));
                     }
+                }
+                Command::Send(id) => {
+                    if let Some(item) = self
+                        .app
+                        .store
+                        .pending()
+                        .iter()
+                        .find(|p| p.id == id)
+                        .map(|p| p.op.item().clone())
+                    {
+                        self.queue.push(id, item);
+                    }
+                    effects.extend(self.dispatch(now));
                 }
                 Command::LoadDetail { item, before } => {
                     effects.push(self.spawn(SyncJob::Detail { item, before }))
@@ -632,6 +728,7 @@ mod tests {
             repo: Some("tviles/app".parse().unwrap()),
             board: board.map(|b| b.parse().unwrap()),
             picker: false,
+            utc_offset: time::UtcOffset::UTC,
         }
     }
 
@@ -951,6 +1048,31 @@ mod tests {
             "revalidated after the load, now hydrating"
         );
         assert!(cache_path(dir.path(), &board()).exists());
+    }
+
+    #[test]
+    fn a_pending_edit_never_reaches_the_disk_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(()), t0);
+        let item = crate::model::ItemId::new("a");
+        let field = crate::model::FieldId::new("F_status");
+        let before = c.app.store.confirmed().unwrap().items[&item]
+            .value(&field)
+            .cloned();
+        c.app.store.begin(crate::ops::Op::ClearField {
+            item: item.clone(),
+            field: field.clone(),
+        });
+        assert_ne!(
+            c.app.store.snapshot().unwrap().items[&item].value(&field),
+            before.as_ref(),
+            "the view shows the pending edit"
+        );
+        c.persist_cache();
+        let saved = crate::store::cache::load_cache(&cache_path(dir.path(), &board())).unwrap();
+        assert_eq!(saved.items[&item].value(&field), before.as_ref());
     }
 
     #[test]
@@ -1520,5 +1642,312 @@ mod tests {
     fn poll_since_subtracts_two_minutes() {
         assert_eq!(poll_since("2026-10-01T12:00:00Z"), "2026-10-01T11:58:00Z");
         assert_eq!(poll_since("not a time"), "not a time");
+    }
+
+    use crate::model::OpKind;
+    use crate::ops::{Confirmed, Op, OpId};
+
+    fn opened(dir: &Path) -> (Controller, Instant) {
+        save_cache(&cache_path(dir, &board()), &snapshot()).unwrap();
+        let (mut c, _, t0) = controller(dir, Some("tviles/3"));
+        c.start(Ok(()), t0);
+        (c, t0)
+    }
+
+    fn set_status(item: &str, option: &str) -> Op {
+        Op::SetField {
+            item: ItemId::new(item),
+            field: FieldId::new("F_status"),
+            value: FieldValue::SingleSelect {
+                option_id: OptionId::new(option),
+                name: option.into(),
+            },
+        }
+    }
+
+    fn submit(c: &mut Controller, op: Op, now: Instant) -> Vec<Effect> {
+        let cmds = c.app.submit(OpKind::Move, op);
+        c.commands(cmds, now)
+    }
+
+    fn mutates(effects: &[Effect]) -> Vec<OpId> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Spawn {
+                    job: SyncJob::Mutate { id, .. },
+                    ..
+                } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn done(
+        c: &mut Controller,
+        id: OpId,
+        result: Result<Confirmed, GithubError>,
+        now: Instant,
+    ) -> Vec<Effect> {
+        let generation = c.generation();
+        c.handle(
+            Input::Sync {
+                generation,
+                event: SyncEvent::OpDone { id, result },
+            },
+            now,
+        )
+    }
+
+    #[test]
+    fn edits_to_different_items_run_four_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        let mut sent = Vec::new();
+        for item in ["a", "b", "c", "d", "e"] {
+            sent.extend(mutates(&submit(&mut c, set_status(item, "o_done"), t0)));
+        }
+        assert_eq!(sent, [1, 2, 3, 4]);
+        assert_eq!(mutates(&done(&mut c, 2, Ok(Confirmed::Applied), t0)), [5]);
+    }
+
+    #[test]
+    fn a_mutate_job_carries_the_generation_it_was_produced_under() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        let effects = submit(&mut c, set_status("a", "o_done"), t0);
+        assert!(matches!(
+            &effects[..],
+            [Effect::Spawn { generation, .. }] if *generation == c.generation()
+        ));
+    }
+
+    #[test]
+    fn a_second_edit_to_the_same_item_waits_for_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        assert_eq!(mutates(&submit(&mut c, set_status("a", "o_prog"), t0)), [1]);
+        assert!(mutates(&submit(&mut c, set_status("a", "o_done"), t0)).is_empty());
+        let error = GithubError::Network("offline".into());
+        assert_eq!(
+            mutates(&done(&mut c, 1, Err(error), t0)),
+            [2],
+            "sent even though 1 failed"
+        );
+    }
+
+    #[test]
+    fn a_rate_limited_edit_is_retried_after_the_pause() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        submit(&mut c, set_status("a", "o_done"), t0);
+        let limited = GithubError::RateLimited {
+            retry_after_secs: 30,
+        };
+        assert!(done(&mut c, 1, Err(limited), t0).is_empty());
+        assert_eq!(c.app.pending_count(), 1, "still pending, not failed");
+        assert!(c.app.errors.is_empty());
+        assert_eq!(c.app.status.write_pause, Some(t0 + Duration::from_secs(30)));
+        assert!(mutates(&c.handle(Input::Tick, t0 + Duration::from_secs(29))).is_empty());
+        assert_eq!(
+            mutates(&c.handle(Input::Tick, t0 + Duration::from_secs(30))),
+            [1]
+        );
+        assert_eq!(c.app.status.write_pause, None);
+    }
+
+    #[test]
+    fn the_cache_holds_confirmed_edits_but_not_pending_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        submit(&mut c, set_status("a", "o_done"), t0);
+        submit(&mut c, set_status("b", "o_done"), t0);
+        done(&mut c, 1, Ok(Confirmed::Applied), t0);
+        c.handle(Input::Tick, t0);
+        let cached = load_cache(&cache_path(dir.path(), &board())).unwrap();
+        let status = |id: &str| {
+            cached.items[&ItemId::new(id)]
+                .value(&FieldId::new("F_status"))
+                .map(|v| v.display())
+        };
+        assert_eq!(status("a").as_deref(), Some("o_done"));
+        assert_eq!(status("b").as_deref(), Some("In Progress"));
+    }
+
+    fn cached_status(dir: &Path, item: &str) -> Option<String> {
+        load_cache(&cache_path(dir, &board()))?.items[&ItemId::new(item)]
+            .value(&FieldId::new("F_status"))
+            .map(|v| v.display())
+    }
+
+    #[test]
+    fn quick_edit_results_save_the_cache_once_on_the_next_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        let before = cached_status(dir.path(), "a");
+        for item in ["a", "b", "c", "d"] {
+            submit(&mut c, set_status(item, "o_done"), t0);
+        }
+        for id in 1..=4 {
+            done(&mut c, id, Ok(Confirmed::Applied), t0);
+        }
+        assert_eq!(
+            cached_status(dir.path(), "a"),
+            before,
+            "not saved per result"
+        );
+        c.handle(Input::Tick, t0);
+        assert_eq!(cached_status(dir.path(), "a").as_deref(), Some("o_done"));
+        assert_eq!(cached_status(dir.path(), "d").as_deref(), Some("o_done"));
+        std::fs::remove_file(cache_path(dir.path(), &board())).unwrap();
+        c.handle(Input::Tick, t0 + Duration::from_millis(1));
+        assert!(
+            !cache_path(dir.path(), &board()).exists(),
+            "one save: the next tick has nothing to write"
+        );
+    }
+
+    #[test]
+    fn exit_saves_edit_results_not_yet_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        submit(&mut c, set_status("a", "o_done"), t0);
+        done(&mut c, 1, Ok(Confirmed::Applied), t0);
+        c.release();
+        assert_eq!(cached_status(dir.path(), "a").as_deref(), Some("o_done"));
+    }
+
+    /// Review Focus 1, end to end.
+    #[test]
+    fn a_stale_poll_after_a_confirmed_move_keeps_the_card_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        submit(&mut c, set_status("a", "o_done"), t0);
+        done(&mut c, 1, Ok(Confirmed::Applied), t0);
+        let stale = crate::ui::fixtures::items().remove(0);
+        let generation = c.generation();
+        c.handle(
+            Input::Sync {
+                generation,
+                event: SyncEvent::ItemsUpdated {
+                    items: vec![stale],
+                    fetched_at: "2026-10-12T00:00:00Z".into(),
+                },
+            },
+            t0,
+        );
+        let a = &c.app.snapshot().unwrap().items[&ItemId::new("a")];
+        assert_eq!(
+            a.value(&FieldId::new("F_status"))
+                .map(|v| v.display())
+                .as_deref(),
+            Some("o_done")
+        );
+    }
+
+    /// A token that stops working mid-session, then `r` on the setup screen: the board stays
+    /// open, so pending edits, their queue slots and the generation are kept.
+    #[test]
+    fn a_token_failure_then_retry_keeps_pending_edits_and_their_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        let mut sent = Vec::new();
+        for item in ["a", "b", "c", "d", "e"] {
+            sent.extend(mutates(&submit(&mut c, set_status(item, "o_done"), t0)));
+        }
+        assert_eq!(sent, [1, 2, 3, 4], "four in flight, the fifth queued");
+        let generation = c.generation();
+        let unauthorized = at(
+            &c,
+            SyncEvent::Failed {
+                task: SyncTask::FullLoad,
+                error: GithubError::Unauthorized,
+            },
+        );
+        c.handle(unauthorized, t0);
+        assert_eq!(c.app.mode, Mode::Setup);
+        let effects = c.handle(Input::Key(key('r')), t0);
+        assert_eq!(effects, vec![Effect::ResolveToken]);
+        let project = c.app.project().unwrap().clone();
+        assert_eq!(c.start(Ok(()), t0), vec![sp(&c, SyncJob::Refresh(project))]);
+        assert_eq!(c.generation(), generation, "late answers still count");
+        assert_eq!(c.app.mode, Mode::Normal);
+        assert_eq!(c.app.pending_count(), 5);
+        assert!(c.app.errors.is_empty(), "nothing was dropped");
+        assert_eq!(
+            mutates(&done(&mut c, 1, Ok(Confirmed::Applied), t0)),
+            [5],
+            "the queued edit takes the freed slot"
+        );
+    }
+
+    #[test]
+    fn q_on_the_setup_screen_asks_while_edits_are_sending() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        submit(&mut c, set_status("a", "o_done"), t0);
+        let no_token = at(
+            &c,
+            SyncEvent::Failed {
+                task: SyncTask::FullLoad,
+                error: GithubError::NoToken,
+            },
+        );
+        c.handle(no_token, t0);
+        assert_eq!(c.app.mode, Mode::Setup);
+        assert!(c.handle(Input::Key(key('q')), t0).is_empty());
+        assert_eq!(c.app.mode, Mode::Confirm);
+        assert_eq!(c.handle(Input::Key(key('y')), t0), vec![Effect::Exit]);
+    }
+
+    #[test]
+    fn edits_pending_when_another_board_opens_are_logged_as_not_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let other: BoardRef = "tviles/9".parse().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        submit(&mut c, set_status("a", "o_done"), t0);
+        c.commands(vec![Command::PickBoard(other)], t0);
+        assert_eq!(c.app.pending_count(), 0);
+        let messages: Vec<_> = c.app.errors.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(messages, ["not sent: the board was reloaded"]);
+    }
+
+    /// Edits still in flight for the old board must not hold the new board's write slots,
+    /// and the old board's queued edit is never sent.
+    #[test]
+    fn opening_another_board_forgets_queued_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let other: BoardRef = "tviles/9".parse().unwrap();
+        let mut other_snap = snapshot();
+        other_snap.project.board = other.clone();
+        save_cache(&cache_path(dir.path(), &other), &other_snap).unwrap();
+        let (mut c, t0) = opened(dir.path());
+        let mut sent = Vec::new();
+        for item in ["a", "b", "c", "d", "e"] {
+            sent.extend(mutates(&submit(&mut c, set_status(item, "o_done"), t0)));
+        }
+        assert_eq!(sent, [1, 2, 3, 4], "four in flight, the fifth queued");
+        let old = c.generation();
+        c.commands(vec![Command::PickBoard(other)], t0);
+        assert!(
+            mutates(&c.handle(Input::Tick, t0)).is_empty(),
+            "the old board's fifth edit is never sent"
+        );
+        let late = Input::Sync {
+            generation: old,
+            event: SyncEvent::OpDone {
+                id: 1,
+                result: Ok(Confirmed::Applied),
+            },
+        };
+        assert!(
+            c.handle(late, t0).is_empty(),
+            "late results of the old board are dropped"
+        );
+        assert_eq!(
+            mutates(&submit(&mut c, set_status("a", "o_done"), t0)),
+            [1],
+            "the new board writes at once"
+        );
     }
 }

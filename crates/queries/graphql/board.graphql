@@ -192,3 +192,69 @@ query ViewerProjects {
 }
 
 query Viewer { viewer { login } }
+
+# --- Mutations: project field values and positions (0.2) -----------------------------------
+# One operation per value type, with scalar variables: GitHub's ProjectV2FieldValue takes
+# exactly one value, so no other key may be sent, not even as null. Each returns the item as
+# GitHub now has it, which goes straight into the confirmed board: the item index lags
+# writes by over a minute (phase 0 finding 0).
+
+mutation SetTextValue($project: ID!, $item: ID!, $field: ID!, $text: String!) {
+  updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field, value: {text: $text}}) {
+    projectV2Item { ...ItemFields }
+  }
+}
+
+mutation SetNumberValue($project: ID!, $item: ID!, $field: ID!, $number: Float!) {
+  updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field, value: {number: $number}}) {
+    projectV2Item { ...ItemFields }
+  }
+}
+
+mutation SetDateValue($project: ID!, $item: ID!, $field: ID!, $date: Date!) {
+  updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field, value: {date: $date}}) {
+    projectV2Item { ...ItemFields }
+  }
+}
+
+mutation SetSingleSelectValue($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+  updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field, value: {singleSelectOptionId: $option}}) {
+    projectV2Item { ...ItemFields }
+  }
+}
+
+mutation SetMultiSelectValue($project: ID!, $item: ID!, $field: ID!, $options: [String!]!) {
+  updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field, value: {multiSelectOptionIds: $options}}) {
+    projectV2Item { ...ItemFields }
+  }
+}
+
+mutation SetIterationValue($project: ID!, $item: ID!, $field: ID!, $iteration: String!) {
+  updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field, value: {iterationId: $iteration}}) {
+    projectV2Item { ...ItemFields }
+  }
+}
+
+mutation ClearFieldValue($project: ID!, $item: ID!, $field: ID!) {
+  clearProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field}) {
+    projectV2Item { ...ItemFields }
+  }
+}
+
+# `after: null` moves the item to the top. The payload lists the project's items in their
+# new order (ids only); the live suite checks the move with it.
+mutation UpdateItemPosition($project: ID!, $item: ID!, $after: ID) {
+  updateProjectV2ItemPosition(input: {projectId: $project, itemId: $item, afterId: $after}) {
+    items(first: 100) { nodes { id } }
+  }
+}
+
+mutation AddDraftIssue($project: ID!, $title: String!, $body: String!) {
+  addProjectV2DraftIssue(input: {projectId: $project, title: $title, body: $body}) {
+    projectItem { ...ItemFields }
+  }
+}
+
+mutation DeleteItem($project: ID!, $item: ID!) {
+  deleteProjectV2Item(input: {projectId: $project, itemId: $item}) { deletedItemId }
+}

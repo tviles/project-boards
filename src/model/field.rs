@@ -162,6 +162,35 @@ impl Bucket {
 }
 
 impl Field {
+    /// The value that puts an item in the bucket `key` (an option or iteration id).
+    pub fn value_for_bucket(&self, key: &str) -> Option<crate::model::FieldValue> {
+        use crate::model::FieldValue;
+        match &self.kind {
+            FieldKind::SingleSelect { options } => {
+                options
+                    .iter()
+                    .find(|o| o.id.0 == key)
+                    .map(|o| FieldValue::SingleSelect {
+                        option_id: o.id.clone(),
+                        name: o.name.clone(),
+                    })
+            }
+            FieldKind::Iteration {
+                iterations,
+                completed,
+            } => iterations
+                .iter()
+                .chain(completed)
+                .find(|i| i.id.0 == key)
+                .map(|i| FieldValue::Iteration {
+                    iteration_id: i.id.clone(),
+                    title: i.title.clone(),
+                    start_date: i.start_date.clone(),
+                }),
+            _ => None,
+        }
+    }
+
     /// Buckets in GitHub order (completed iterations first, oldest first), ending with
     /// "No <field>". `None` for fields that cannot group a board.
     pub fn buckets(&self) -> Option<Vec<Bucket>> {
@@ -307,5 +336,24 @@ mod tests {
         };
         assert!(f.buckets().is_none());
         assert!(!f.kind.can_be_column());
+    }
+
+    #[test]
+    fn a_bucket_key_becomes_the_value_that_lands_there() {
+        let f = Field {
+            id: FieldId::new("F"),
+            name: "Status".into(),
+            kind: FieldKind::SingleSelect {
+                options: vec![opt("a", "Todo"), opt("b", "Done")],
+            },
+        };
+        assert_eq!(
+            f.value_for_bucket("b"),
+            Some(crate::model::FieldValue::SingleSelect {
+                option_id: OptionId::new("b"),
+                name: "Done".into()
+            })
+        );
+        assert_eq!(f.value_for_bucket("zz"), None);
     }
 }

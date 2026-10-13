@@ -1,0 +1,13 @@
+---
+source: src/ui/multiselect.rs
+expression: screen
+---
+
+
+                  ┌ Labels ──────────────────────────────────────────────────────┐
+                  │>                                                             │
+                  │[x] docs                                                      │
+                  │[ ] Good First Issue                                          │
+                  │[ ] 🐛 bug                                                    │
+                  │space toggles · enter applies · esc cancels                   │
+                  └──────────────────────────────────────────────────────────────┘

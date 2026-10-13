@@ -58,6 +58,9 @@ pub struct GraphqlResponse {
     pub rate: RateInfo,
     /// `X-OAuth-Scopes`, present for classic and OAuth tokens only.
     pub scopes: Option<Vec<String>>,
+    /// Errors GitHub sent alongside usable data (NOT_FOUND, FORBIDDEN). A mutation whose
+    /// payload is null is explained by these.
+    pub errors: Vec<GraphqlErrorEntry>,
 }
 
 pub trait Transport: Send + Sync {
@@ -70,6 +73,13 @@ pub trait Transport: Send + Sync {
 /// Turns a GraphQL response body into its data, or the error it describes.
 /// Data with only NOT_FOUND/FORBIDDEN errors is kept; those mark nodes the viewer cannot see.
 pub fn interpret_body(body: serde_json::Value) -> Result<serde_json::Value, GithubError> {
+    interpret_body_keeping_errors(body).map(|(data, _)| data)
+}
+
+/// `interpret_body`, also returning the tolerated errors that came with the data.
+pub fn interpret_body_keeping_errors(
+    body: serde_json::Value,
+) -> Result<(serde_json::Value, Vec<GraphqlErrorEntry>), GithubError> {
     let errors: Vec<GraphqlErrorEntry> = match body.get("errors") {
         Some(e) => {
             serde_json::from_value(e.clone()).map_err(|e| GithubError::Decode(e.to_string()))?
@@ -94,7 +104,7 @@ pub fn interpret_body(body: serde_json::Value) -> Result<serde_json::Value, Gith
             "kept data with tolerable GraphQL errors"
         );
     }
-    Ok(data)
+    Ok((data, errors))
 }
 
 pub struct HttpTransport {
@@ -134,6 +144,21 @@ fn primary_wait(rate: &RateInfo, now: u64) -> u64 {
     rate.reset_epoch
         .map(|reset| reset.saturating_sub(now))
         .unwrap_or(60)
+}
+
+/// How long to wait after a secondary rate limit that came without `retry-after`.
+const SECONDARY_WAIT_SECS: u64 = 60;
+
+/// A 403 or 429 whose body names GitHub's secondary rate limit.
+fn is_secondary_limit(status: reqwest::StatusCode, body: &str) -> bool {
+    (status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::TOO_MANY_REQUESTS)
+        && body.to_ascii_lowercase().contains("secondary rate limit")
+}
+
+/// Whether a decoded body carries usable data (a `data` key that is not `null`).
+fn has_data(body: Option<&serde_json::Value>) -> bool {
+    body.and_then(|b| b.get("data"))
+        .is_some_and(|d| !d.is_null())
 }
 
 impl Transport for HttpTransport {
@@ -187,14 +212,23 @@ impl Transport for HttpTransport {
                     time::OffsetDateTime::now_utc().unix_timestamp().max(0) as u64,
                 ),
             };
-            // An exhausted primary budget, whatever the status: the next request would fail.
-            if rate.remaining == Some(0) {
+            let text = response
+                .text()
+                .await
+                .map_err(|e| GithubError::Decode(e.without_url().to_string()))?;
+            if is_secondary_limit(status, &text) {
+                // No retry-after: GitHub's docs say to wait at least a minute.
+                return Err(GithubError::RateLimited {
+                    retry_after_secs: SECONDARY_WAIT_SECS,
+                });
+            }
+            let body = serde_json::from_str::<serde_json::Value>(&text);
+            // An exhausted budget fails a request only when GitHub sent no data: a 200 with
+            // data at remaining 0 was applied, and re-sending it would apply an edit twice.
+            if rate.remaining == Some(0) && !has_data(body.as_ref().ok()) {
                 return Err(primary_limited());
             }
-            let body: serde_json::Value = response
-                .json()
-                .await
-                .map_err(|e| GithubError::Decode(e.to_string()))?;
+            let body = body.map_err(|e| GithubError::Decode(e.to_string()))?;
             // GraphQL reports an exhausted primary budget as HTTP 200 with a RATE_LIMITED error.
             if body["errors"]
                 .as_array()
@@ -205,10 +239,12 @@ impl Transport for HttpTransport {
             if !status.is_success() && body.get("data").is_none() && body.get("errors").is_none() {
                 return Err(GithubError::Network(format!("HTTP {status}")));
             }
+            let (data, errors) = interpret_body_keeping_errors(body)?;
             Ok(GraphqlResponse {
-                data: interpret_body(body)?,
+                data,
                 rate,
                 scopes,
+                errors,
             })
         })
     }
@@ -256,6 +292,20 @@ mod tests {
             r.scopes,
             Some(vec!["repo".to_string(), "project".to_string()])
         );
+    }
+
+    #[tokio::test]
+    async fn an_empty_scopes_header_means_no_scopes_and_an_absent_one_means_unknown() {
+        let body = json!({"data": {"viewer": {"login": "tviles"}}});
+        let (_s, t) = server_with(
+            ResponseTemplate::new(200)
+                .set_body_json(body.clone())
+                .insert_header("x-oauth-scopes", ""),
+        )
+        .await;
+        assert_eq!(t.execute(request()).await.unwrap().scopes, Some(vec![]));
+        let (_s, t) = server_with(ResponseTemplate::new(200).set_body_json(body)).await;
+        assert_eq!(t.execute(request()).await.unwrap().scopes, None);
     }
 
     #[tokio::test]
@@ -353,17 +403,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_exhausted_budget_is_rate_limited_whatever_the_status() {
+    async fn an_exhausted_budget_without_data_is_rate_limited_whatever_the_status() {
+        let bodies = [
+            json!({"message": "API rate limit exceeded"}),
+            json!({"data": null}),
+        ];
         for status in [200, 403, 502] {
-            let (_s, t) = server_with(
-                ResponseTemplate::new(status)
-                    .set_body_json(json!({"data": {"viewer": {"login": "tviles"}}}))
-                    .insert_header("x-ratelimit-remaining", "0")
-                    .insert_header("x-ratelimit-reset", (now() + 90).to_string().as_str()),
-            )
-            .await;
-            assert_wait_near(t.execute(request()).await, 90);
+            for body in &bodies {
+                let (_s, t) = server_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(body.clone())
+                        .insert_header("x-ratelimit-remaining", "0")
+                        .insert_header("x-ratelimit-reset", (now() + 90).to_string().as_str()),
+                )
+                .await;
+                assert_wait_near(t.execute(request()).await, 90);
+            }
         }
+        let (_s, t) = server_with(
+            ResponseTemplate::new(403)
+                .set_body_string("<html>rate limited</html>")
+                .insert_header("x-ratelimit-remaining", "0")
+                .insert_header("x-ratelimit-reset", (now() + 90).to_string().as_str()),
+        )
+        .await;
+        assert_wait_near(t.execute(request()).await, 90);
+    }
+
+    /// The last request of the budget still succeeds: an applied edit must not be re-sent.
+    #[tokio::test]
+    async fn data_at_an_exhausted_budget_is_a_success_with_the_rate_kept() {
+        let (_s, t) = server_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": {"viewer": {"login": "tviles"}}}))
+                .insert_header("x-ratelimit-remaining", "0")
+                .insert_header("x-ratelimit-limit", "5000")
+                .insert_header("x-ratelimit-reset", (now() + 90).to_string().as_str()),
+        )
+        .await;
+        let r = t.execute(request()).await.unwrap();
+        assert_eq!(r.data["viewer"]["login"], "tviles");
+        assert_eq!(
+            r.rate.remaining,
+            Some(0),
+            "the scheduler still sees the budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn data_with_a_rate_limited_error_is_still_rate_limited() {
+        let body = json!({"data": {"viewer": null},
+                          "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]});
+        let (_s, t) = server_with(
+            ResponseTemplate::new(200)
+                .set_body_json(body)
+                .insert_header("x-ratelimit-remaining", "0")
+                .insert_header("x-ratelimit-reset", (now() + 90).to_string().as_str()),
+        )
+        .await;
+        assert_wait_near(t.execute(request()).await, 90);
+    }
+
+    #[tokio::test]
+    async fn a_secondary_limit_without_retry_after_waits_a_minute() {
+        for status in [403, 429] {
+            let (_s, t) = server_with(ResponseTemplate::new(status).set_body_json(json!({
+                "message": "You have exceeded a secondary rate limit. Please wait a few minutes before you try again."
+            })))
+            .await;
+            assert_eq!(
+                t.execute(request()).await,
+                Err(GithubError::RateLimited {
+                    retry_after_secs: 60
+                }),
+                "HTTP {status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_plain_forbidden_without_retry_after_is_not_rate_limited() {
+        let (_s, t) = server_with(
+            ResponseTemplate::new(403).set_body_json(json!({"message": "Resource not accessible"})),
+        )
+        .await;
+        assert!(!matches!(
+            t.execute(request()).await,
+            Err(GithubError::RateLimited { .. })
+        ));
     }
 
     #[test]
@@ -388,5 +515,27 @@ mod tests {
         assert!(r(400, 5000).is_low());
         assert!(!r(600, 5000).is_low());
         assert!(!RateInfo::default().is_low());
+    }
+
+    #[tokio::test]
+    async fn tolerated_errors_are_kept_with_the_data() {
+        let body = json!({"data": {"addLabelsToLabelable": null},
+                          "errors": [{"type": "FORBIDDEN", "message": "Resource not accessible by integration"}]});
+        let (_s, t) = server_with(ResponseTemplate::new(200).set_body_json(body)).await;
+        let r = t.execute(request()).await.unwrap();
+        assert!(r.data["addLabelsToLabelable"].is_null());
+        assert_eq!(r.errors.len(), 1);
+        assert_eq!(
+            r.errors[0].message,
+            "Resource not accessible by integration"
+        );
+    }
+
+    #[test]
+    fn interpret_body_still_drops_tolerated_errors() {
+        let body = json!({"data": {"x": 1}, "errors": [{"type": "NOT_FOUND", "message": "gone"}]});
+        assert_eq!(interpret_body(body.clone()).unwrap()["x"], 1);
+        let (data, errors) = interpret_body_keeping_errors(body).unwrap();
+        assert_eq!((data["x"].as_i64(), errors.len()), (Some(1), 1));
     }
 }

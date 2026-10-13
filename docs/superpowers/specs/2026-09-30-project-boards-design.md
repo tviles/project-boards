@@ -171,6 +171,9 @@ Outside herdr, `--project` is required because there is no pane context to infer
 
 - **Table:** one row per item, with columns from the view's visible fields. A group-by field splits rows into collapsible sections.
 - **Board:** one column per option of the view's column field (single-select or iteration), in GitHub's option order, plus a "No \<field\>" column. A group-by field adds horizontal swimlanes.
+  - Columns the effective filter (view filter plus session filter) excludes on the column field are hidden, because GitHub's API has no hidden-columns setting; a column that holds items is never hidden. Options that share a name show as one column, at the last one's place, as on GitHub.
+  - Each card is a bordered box: a header with the state dot, the repository's short name and `#number`, and the first assignee (`+N` for more); the title wrapped to at most three lines; the view's visible fields as pills; labels last. The selected card has a heavy accent border. Columns are at least 34 cells wide.
+- **Layout choice:** `L` switches between table and board. The choice is remembered per board and view in the state directory, together with the view's layout on GitHub at the time; when GitHub's layout of that view changes, the choice is dropped with a note.
 - Sort follows the view, unless a local override applies (section 5, Local view overrides).
 
 ### Items that stop matching the view
@@ -184,6 +187,7 @@ An edit can make an item stop matching the view's filter, for example moving a c
 ### Filtering
 
 - **View filter:** GitHub filter syntax, for example `status:Todo assignee:@me -label:bug`, passed to `items(query:)` so results match the web. Changing it refetches the view's ID list.
+- **Session filter (`f`):** a filter typed in herdr is ANDed onto the view's GitHub filter for this session only; it is never saved to GitHub. `x` clears it. A view's ID list fetched with a session filter is left out of the disk cache.
 - **Archived items:** hidden by default, as on the web. "Show archived" in the action menu adds `is:archived` to the view filter, which is where items are unarchived.
 - **Quick search (`/`):** an instant, client-side match on title, number, assignee and label over the items in the current view. It never touches the network.
 
@@ -260,12 +264,13 @@ No default uses a Ctrl chord, so herdr's prefix (`ctrl+b`) and any Ctrl bindings
 | `t` | Labels |
 | `e` | Edit a field |
 | `c` | Comment |
-| `x` | Close or reopen |
+| `X` | Close or reopen |
 | `n` | New: issue, draft, or add an existing item |
 | `C` | Convert a draft to an issue |
 | `A` | Archive |
 | `o` | Open in the browser |
-| `f` | Edit the view filter |
+| `f` | Edit the session filter, ANDed onto the view's GitHub filter |
+| `x` | Clear the session filter |
 | `/` | Quick search |
 | `g` | Group by |
 | `s` | Sort |
@@ -279,6 +284,8 @@ No default uses a Ctrl chord, so herdr's prefix (`ctrl+b`) and any Ctrl bindings
 | `q` | Quit |
 
 A key whose operation the selected item does not allow shows a one-line reason, for example "Drafts have no labels — convert to issue first (`C`)".
+
+Edit keys act on the highlighted item in the table and the board, and on the open item in the item detail, with the same popovers and editors. The bottom line lists the edit keys the selected item allows, for example `a assignees · t labels · e field · X close`. In popovers with text entry (pickers, the assignee and label checklists, inputs, search) every printable key is text; arrows move the list, `Enter` applies, `Esc` cancels, and in a checklist `Space` toggles. The `Space` action menu has no text entry: `j`/`k` and arrows move, `Enter` runs the entry, the key shown beside an entry runs it directly, `Esc` closes. The bottom line always ends with `? help`; the edit keys before it are cut with `…` when the pane is narrow. The help overlay scrolls with `j`/`k` or the arrows when the pane is too short for it.
 
 Mouse: click selects, the wheel scrolls, and dragging a card to another column moves it.
 
@@ -307,6 +314,8 @@ Removing an item from the project, closing an issue or pull request, saving a vi
 - Single-select options use their GitHub colours (GRAY, BLUE, GREEN, YELLOW, ORANGE, RED, PINK, PURPLE) mapped to the terminal's 16 ANSI colours, so the user's terminal theme applies.
 - Colour is never the only signal: option names are always shown.
 - `NO_COLOR` switches to plain text.
+- Labels are pills in their GitHub colour: exact on terminals with `COLORTERM=truecolor`, otherwise the nearest of 256, with black or white text, whichever reads better. Field values on cards are pills on a subtle background.
+- `NO_COLOR` shows label and field names as plain text.
 
 ## 7. Error handling and edge cases
 
@@ -315,6 +324,7 @@ Removing an item from the project, closing an issue or pull request, saving a vi
 - The token is taken from `GH_TOKEN`, then `GITHUB_TOKEN`, then `gh auth token`.
 - With no token, the pane shows a setup screen with the exact fix. `project-boards doctor` runs the same checks.
 - Missing scopes are detected from the `X-OAuth-Scopes` response header or an `INSUFFICIENT_SCOPES` error, and the fix is shown as a command: `gh auth refresh -s project` (plus `repo` for private repositories).
+- Writing needs the classic scopes `project` (every edit) and `repo` or `public_repo` (issue and pull request edits). A missing scope disables the write keys it affects and each shows the fix as its reason, instead of edits failing one by one. `doctor` reports whether the token can edit boards and issues.
 - GitHub does not let fine-grained tokens read boards owned by a user account; those need a classic token or the `gh` login. The not-found error, the doctor and the documentation say so. Fine-grained tokens work for organisation boards that grant them the organisation's Projects permission.
 
 ### Permissions
@@ -380,6 +390,7 @@ idle_after_secs = 300             # idle fallback when focus events are unavaila
 full_refresh_mins = 10
 max_items = 2000
 placement = "tab"                 # tab | overlay | split | zoomed
+gh_user = "my-login"              # gh account whose token to use (gh auth token --user); default: the active account
 
 [keys]
 # overrides, for example:
@@ -388,7 +399,7 @@ placement = "tab"                 # tab | overlay | split | zoomed
 
 `NO_COLOR` is honoured.
 
-`HERDR_PLUGIN_STATE_DIR` holds data the plugin writes itself: board caches, the board remembered per repository, the last view per board, local group-by and sort overrides per view, the pane ID of each open board, and the log file.
+`HERDR_PLUGIN_STATE_DIR` holds data the plugin writes itself: board caches, the board remembered per repository, the last view per board, the layout chosen per view, local group-by and sort overrides per view, the pane ID of each open board, and the log file.
 
 ## 9. Testing
 
