@@ -558,6 +558,7 @@ impl Controller {
                         }));
                     }
                 }
+                Command::Send(id) => tracing::debug!(id, "edit queued"),
                 Command::LoadDetail { item, before } => {
                     effects.push(self.spawn(SyncJob::Detail { item, before }))
                 }

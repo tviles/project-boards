@@ -27,7 +27,23 @@ pub enum Action {
     LoadOlder,
 }
 
+use crate::model::OpKind;
+
 impl Action {
+    /// The operations this action's key runs; empty for actions that edit nothing. Later
+    /// tasks fill this in as they add edit keys.
+    pub fn kinds(self) -> &'static [OpKind] {
+        &[]
+    }
+
+    /// The action whose key runs `kind`, for hints such as "(C)" in messages.
+    pub fn for_kind(kind: OpKind) -> Option<Action> {
+        Action::ALL
+            .iter()
+            .copied()
+            .find(|a| a.kinds().contains(&kind))
+    }
+
     pub const ALL: [Action; 22] = [
         Action::Up,
         Action::Down,

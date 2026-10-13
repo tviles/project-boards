@@ -242,6 +242,13 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::raw(app.input.clone()));
             Line::from(spans)
         }
+        Mode::Confirm => Line::styled(
+            truncate_to_width(
+                app.confirm.as_ref().map_or("", |c| c.question.as_str()),
+                area.width as usize,
+            ),
+            app.theme.accent().patch(app.theme.bold()),
+        ),
         _ => {
             if let Some(flash) = &app.status.flash {
                 Line::styled(

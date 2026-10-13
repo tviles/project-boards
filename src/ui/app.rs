@@ -14,6 +14,11 @@ use crate::ui::theme::Theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::{HashMap, HashSet};
 
+mod edit;
+
+use crate::ops::OpId;
+pub use edit::{Confirm, ConfirmAction, FailedEdit};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
@@ -23,6 +28,8 @@ pub enum Mode {
     Detail,
     Picker,
     Setup,
+    /// A yes/no question on the status line.
+    Confirm,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,6 +59,8 @@ pub enum Command {
     ShowPicker,
     /// Re-run startup after the user fixed authentication.
     Retry,
+    /// Send the pending edit with this id (the controller queues it).
+    Send(OpId),
     Quit,
 }
 
@@ -67,6 +76,8 @@ pub struct Status {
     /// A one-off reply to the last key press, such as "not opened: not a web link". The next
     /// key press clears it.
     pub flash: Option<String>,
+    /// Writes are paused by a secondary rate limit until then.
+    pub write_pause: Option<std::time::Instant>,
 }
 
 pub struct App {
@@ -92,6 +103,15 @@ pub struct App {
     layout_toggle: HashMap<ViewId, Layout>,
     /// Per view, a filter the user added on top of the view's GitHub filter. Session only.
     extra_filter: HashMap<ViewId, String>,
+    /// Classic token scopes GitHub reported, and those it refused an edit for.
+    scopes: Option<Vec<String>>,
+    refused_scopes: Vec<String>,
+    /// The kind each pending op was allowed as, for the error log and retries.
+    pending_kinds: HashMap<OpId, OpKind>,
+    /// Failed edits, oldest first.
+    pub errors: Vec<FailedEdit>,
+    /// The question `Mode::Confirm` asks.
+    pub confirm: Option<Confirm>,
     /// Detail width used to number targets; kept in sync by the renderer.
     pub detail_width: u16,
 }
@@ -146,6 +166,11 @@ impl App {
             search: String::new(),
             layout_toggle: HashMap::new(),
             extra_filter: HashMap::new(),
+            scopes: None,
+            refused_scopes: Vec::new(),
+            pending_kinds: HashMap::new(),
+            errors: Vec::new(),
+            confirm: None,
             detail_width: 80,
         }
     }
@@ -607,8 +632,7 @@ impl App {
             Mode::Help => {
                 self.mode = Mode::Normal;
                 if action == Some(Action::Quit) {
-                    self.quit = true;
-                    return vec![Command::Quit];
+                    return self.request_quit();
                 }
                 Vec::new()
             }
@@ -622,6 +646,7 @@ impl App {
                 _ => Vec::new(),
             },
             Mode::Picker => self.handle_picker_key(key),
+            Mode::Confirm => self.handle_confirm_key(&key),
             Mode::Detail => {
                 let targets = self.detail_targets();
                 let Some(state) = self.detail.as_mut() else {
@@ -635,10 +660,7 @@ impl App {
                         self.mode = Mode::Normal;
                         Vec::new()
                     }
-                    DetailOutcome::Quit => {
-                        self.quit = true;
-                        vec![Command::Quit]
-                    }
+                    DetailOutcome::Quit => self.request_quit(),
                     DetailOutcome::Follow(i) => self.follow(targets[i].clone()),
                     DetailOutcome::LoadOlder(cursor) => vec![Command::LoadDetail {
                         item: state.item.clone(),
@@ -743,11 +765,17 @@ impl App {
                     self.restore_selection();
                     Vec::new()
                 }
-                Some(Action::PickBoard) => vec![Command::ShowPicker],
-                Some(Action::Quit) => {
-                    self.quit = true;
-                    vec![Command::Quit]
+                Some(Action::PickBoard) if self.pending_count() > 0 => {
+                    let n = self.pending_count();
+                    self.status.flash = Some(format!(
+                        "{n} edit{} still sending; switch boards when {} done",
+                        if n == 1 { " is" } else { "s are" },
+                        if n == 1 { "it is" } else { "they are" }
+                    ));
+                    Vec::new()
                 }
+                Some(Action::PickBoard) => vec![Command::ShowPicker],
+                Some(Action::Quit) => self.request_quit(),
                 _ => Vec::new(),
             },
         }
@@ -851,11 +879,9 @@ impl App {
                     self.status.error = Some(format!("{}: {error}", task_words(&task)));
                 }
             }
-            SyncEvent::ViewIds { .. }
-            | SyncEvent::Hydrated(_)
-            | SyncEvent::RepoProjects(_)
-            | SyncEvent::OpDone { .. }
-            | SyncEvent::Access { .. } => {}
+            SyncEvent::OpDone { id, result } => self.settle(id, result),
+            SyncEvent::Access { scopes } => self.scopes = scopes,
+            SyncEvent::ViewIds { .. } | SyncEvent::Hydrated(_) | SyncEvent::RepoProjects(_) => {}
         }
         self.restore_selection();
         cmds
@@ -882,6 +908,18 @@ impl App {
     pub(crate) fn view_list(&self) -> Option<&ViewList> {
         self.snapshot()?.views.get(&self.current_view()?.id)
     }
+}
+
+/// An App over the UI fixture board, for tests in this module's children.
+#[cfg(test)]
+pub(crate) fn test_app() -> App {
+    App::new(
+        Box::new(crate::store::MemoryStore::new(Some(
+            crate::ui::fixtures::snapshot(),
+        ))),
+        Keymap::defaults(),
+        Theme::plain(),
+    )
 }
 
 #[cfg(test)]
