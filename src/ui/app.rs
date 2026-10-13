@@ -342,11 +342,20 @@ impl App {
         let items = self.view_items().unwrap_or_default();
         let columns = build_columns(&items, field, view.group_field(&project.fields));
         let constraint = column_constraint(&self.effective_filter(), field);
+        // A filter that allows no column at all was misread: `constrain_columns` shows every
+        // column then, and none of them is "filtered".
+        let reads = columns
+            .iter()
+            .any(|c| constraint.allows(&c.bucket.title, c.bucket.key.is_none()));
         constrain_columns(columns, &constraint)
             .into_iter()
             .map(|mut c| {
-                // Kept only because it holds items: a card moved there (spec: "Done (filtered)").
-                if !constraint.allows(&c.bucket.title, c.bucket.key.is_none()) {
+                // A column the filter rejects, kept for a card the user just edited into it
+                // (spec: "Done (filtered)"). One kept for GitHub's own cards is not marked.
+                if reads
+                    && !constraint.allows(&c.bucket.title, c.bucket.key.is_none())
+                    && c.items().iter().any(|i| self.is_sticky(&i.id))
+                {
                     c.bucket.title = format!("{} (filtered)", c.bucket.title);
                 }
                 c
@@ -854,8 +863,12 @@ impl App {
             return Vec::new();
         }
         self.sync_selected_id();
+        let filter_before = self.effective_filter();
         if let Some(update) = store_update(&event) {
             self.store.apply(update);
+        }
+        if matches!(event, SyncEvent::Project(_)) && self.effective_filter() != filter_before {
+            self.sticky.clear();
         }
         // The first snapshot has just arrived: anchor the cursor so an edit key pressed
         // before any navigation key still makes the cursor follow its item.

@@ -167,6 +167,10 @@ impl App {
         }
     }
 
+    pub(super) fn is_sticky(&self, id: &ItemId) -> bool {
+        self.sticky.iter().any(|s| &s.id == id)
+    }
+
     /// A sticky item the view no longer matches: GitHub's latest list for the view dropped
     /// it, or its values fail the filter as far as `still_matches` can tell.
     pub fn unmatched(&self, item: &Item) -> bool {
@@ -1458,5 +1462,99 @@ mod tests {
             .map(|i| i.id.0.clone())
             .collect();
         assert_eq!(ids, ["a", "c", "d", "e"]);
+    }
+
+    fn board_app(filter: &str, ids: &[&str]) -> App {
+        let f = filter.to_string();
+        let mut a = app_edited(|s| s.project.views[1].filter = f);
+        let board = crate::model::ViewId::new("V_board");
+        a.select_view(&board);
+        a.on_sync(SyncEvent::ViewIds {
+            view: board,
+            filter: filter.into(),
+            list: list(ids),
+        });
+        a
+    }
+
+    #[test]
+    fn a_column_kept_for_githubs_own_cards_is_not_marked_filtered() {
+        // The list holds `e` (Blocked, an option the filter does not name): a misread filter.
+        let a = board_app("status:Todo", &["a", "b", "e"]);
+        assert!(
+            column_titles(&a).iter().all(|t| !t.contains("(filtered)")),
+            "{:?}",
+            column_titles(&a)
+        );
+    }
+
+    #[test]
+    fn a_filter_that_allows_no_column_marks_nothing() {
+        let mut a = board_app("status:Doen", &["a", "b", "c", "e"]);
+        a.handle_key(key('>'));
+        a.submit(OpKind::SetField, set_status("a", "o_done", "Done"));
+        assert!(
+            column_titles(&a).iter().all(|t| !t.contains("(filtered)")),
+            "{:?}",
+            column_titles(&a)
+        );
+    }
+
+    #[test]
+    fn a_board_card_the_list_omits_is_added_back_into_its_filtered_column() {
+        let mut a = board_app("-status:Done", &["a", "b", "c", "e"]);
+        a.handle_key(code(KeyCode::Home));
+        a.submit(OpKind::SetField, set_status("a", "o_done", "Done"));
+        a.on_sync(SyncEvent::ViewIds {
+            view: crate::model::ViewId::new("V_board"),
+            filter: "-status:Done".into(),
+            list: list(&["b", "c", "e"]),
+        });
+        assert!(column_titles(&a).contains(&"Done (filtered)".to_string()));
+        assert_eq!(selected(&a), "a");
+    }
+
+    #[test]
+    fn a_changed_project_filter_clears_sticky_items() {
+        let mut a = board_app("-status:Done", &["a", "b", "c", "e"]);
+        a.handle_key(code(KeyCode::Home));
+        a.submit(OpKind::SetField, set_status("a", "o_done", "Done"));
+        assert!(a.is_sticky(&ItemId::new("a")));
+        let mut project = a.snapshot().unwrap().project.clone();
+        a.on_sync(SyncEvent::Project(project.clone()));
+        assert!(a.is_sticky(&ItemId::new("a")), "same filter keeps them");
+        project.views[1].filter = "-status:Todo".into();
+        a.on_sync(SyncEvent::Project(project));
+        assert!(!a.is_sticky(&ItemId::new("a")));
+    }
+
+    #[test]
+    fn a_changed_local_filter_and_a_board_switch_clear_sticky_items() {
+        let mut a = board_app("-status:Done", &["a", "b", "c", "e"]);
+        a.handle_key(code(KeyCode::Home));
+        a.submit(OpKind::SetField, set_status("a", "o_done", "Done"));
+        a.set_extra_filter("label:bug");
+        assert!(!a.is_sticky(&ItemId::new("a")));
+        let mut b = board_app("-status:Done", &["a", "b", "c", "e"]);
+        b.handle_key(code(KeyCode::Home));
+        b.submit(OpKind::SetField, set_status("a", "o_done", "Done"));
+        b.reset_for_new_board();
+        assert!(!b.is_sticky(&ItemId::new("a")));
+    }
+
+    #[test]
+    fn an_item_made_sticky_before_its_list_arrived_is_not_marked_dropped() {
+        let mut a = test_app();
+        let bugs = crate::model::ViewId::new("V_bugs");
+        a.select_view(&bugs);
+        a.stick(&ItemId::new("a"));
+        assert!(a.sticky.is_empty(), "not shown, so not sticky");
+        // No filter on the first view: it is shown at once, with no list behind it.
+        let mut b = test_app();
+        b.stick(&ItemId::new("a"));
+        assert_eq!(b.sticky.len(), 1);
+        assert!(!b.sticky[0].listed);
+        let a_item = b.snapshot().unwrap().items[&ItemId::new("a")].clone();
+        assert!(!b.unmatched(&a_item));
     }
 }
