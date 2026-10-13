@@ -2,7 +2,7 @@
 //! settles when GitHub answers. Failed edits go to the error log.
 
 use super::*;
-use crate::model::{ContentId, Denial, EditContext, OpKind, check, check_new};
+use crate::model::{CloseReason, ContentId, Denial, EditContext, OpKind, check, check_new};
 use crate::ops::{Confirmed, NewItem, Op, OpId};
 use crate::store::BoardSnapshot;
 use crate::ui::app::popups::{
@@ -10,6 +10,7 @@ use crate::ui::app::popups::{
 };
 use crate::ui::editor::{Edited, trim_blank_lines};
 use crate::ui::marks::ItemMarks;
+use crate::ui::popup::{Choice, ListPicker};
 use crate::ui::table::Row;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -46,6 +47,7 @@ pub struct Confirm {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfirmAction {
     Quit,
+    Submit { kind: OpKind, op: Op },
 }
 
 /// The error log's message for an edit dropped unsent because its board was loaded again.
@@ -136,6 +138,7 @@ pub(crate) const EDIT_ACTIONS: &[Action] = &[
     Action::Labels,
     Action::EditField,
     Action::Comment,
+    Action::CloseReopen,
 ];
 
 /// The menu's words for an action.
@@ -170,6 +173,7 @@ const HINTED: &[Action] = &[
     Action::Assignees,
     Action::Labels,
     Action::EditField,
+    Action::CloseReopen,
     Action::Comment,
 ];
 
@@ -601,6 +605,7 @@ impl App {
             Action::Labels => self.open_candidates(OpKind::Labels, false),
             Action::EditField => self.open_field_menu(),
             Action::Comment => self.comment(),
+            Action::CloseReopen => self.close_or_reopen(),
             Action::ActionMenu => self.open_action_menu(),
             Action::ErrorLog => self.open_error_log(),
             _ => return None,
@@ -1280,6 +1285,81 @@ impl App {
             ConfirmAction::Quit => {
                 self.quit = true;
                 vec![Command::Quit]
+            }
+            ConfirmAction::Submit { kind, op } => self.submit(kind, op),
+        }
+    }
+
+    /// `X`: reopen a closed item at once; close an open one after asking (a reason for an
+    /// issue, yes or no for a pull request).
+    pub(crate) fn close_or_reopen(&mut self) -> Vec<Command> {
+        let Some(item) = self.action_item().cloned() else {
+            self.status.flash = Some("Select an item first".into());
+            return Vec::new();
+        };
+        let ctx = self.edit_context();
+        let kind = match (
+            check(OpKind::Close, &item, &ctx),
+            check(OpKind::Reopen, &item, &ctx),
+        ) {
+            (Ok(()), _) => OpKind::Close,
+            (_, Ok(())) => OpKind::Reopen,
+            (Err(close), Err(reopen)) => {
+                // The reason that explains the item's state: reopen's for closed items.
+                let shown = if matches!(close, Denial::AlreadyClosed) {
+                    reopen
+                } else {
+                    close
+                };
+                self.status.flash = Some(self.denial_text(shown));
+                return Vec::new();
+            }
+        };
+        let Some(content) = item.content_id() else {
+            self.status.flash = Some(self.denial_text(Denial::NeedsRefresh));
+            return Vec::new();
+        };
+        let title = crate::ui::text::truncate_to_width(item.title(), 40);
+        let reference = match item.number() {
+            Some(n) => format!("#{n} '{title}'"),
+            None => format!("'{title}'"),
+        };
+        match (kind, &content) {
+            (OpKind::Reopen, _) => self.submit(
+                kind,
+                Op::Reopen {
+                    item: item.id,
+                    content,
+                },
+            ),
+            (_, ContentId::Issue(_)) => {
+                let picker = ListPicker::new(
+                    format!("Close {reference}?"),
+                    vec![
+                        Choice::new("Close as completed", CloseReason::Completed),
+                        Choice::new("Close as not planned", CloseReason::NotPlanned),
+                    ],
+                );
+                self.open_popup(Popup::CloseReason {
+                    item: item.id,
+                    picker,
+                });
+                Vec::new()
+            }
+            _ => {
+                self.confirm = Some(Confirm {
+                    question: format!("Close pull request {reference}? (y/n)"),
+                    action: ConfirmAction::Submit {
+                        kind,
+                        op: Op::Close {
+                            item: item.id,
+                            content,
+                            reason: None,
+                        },
+                    },
+                });
+                self.mode = Mode::Confirm;
+                Vec::new()
             }
         }
     }
@@ -3578,5 +3658,86 @@ mod tests {
             Op::Comment { body, .. } => assert_eq!(body, "    let x = 1;\n  - item"),
             other => panic!("expected a comment, got {other:?}"),
         }
+    }
+
+    fn with_pull_request(a: &mut App, state: crate::model::ContentState) {
+        let mut snap = a.snapshot().unwrap().clone();
+        let b = snap.items.get_mut(&ItemId::new("b")).unwrap();
+        b.content = crate::model::ItemContent::PullRequest {
+            reference: crate::model::ContentRef {
+                repo: "tviles/t".into(),
+                number: 2,
+                url: "u".into(),
+            },
+            title: "Add iteration columns".into(),
+            state,
+            is_draft: false,
+        };
+        a.store.apply(StoreUpdate::Replace(snap));
+    }
+
+    #[test]
+    fn closing_an_issue_asks_for_a_reason() {
+        let mut a = test_app();
+        assert!(a.handle_key(key('X')).is_empty());
+        let Some(crate::ui::app::Popup::CloseReason { picker, .. }) = &a.popup else {
+            panic!("reason picker")
+        };
+        assert_eq!(picker.title, "Close #1 'Fix crash'?");
+        let labels: Vec<&str> = picker.choices.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["Close as completed", "Close as not planned"]);
+        a.handle_key(code(KeyCode::Down));
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert!(matches!(
+            &a.store.pending()[0].op,
+            Op::Close {
+                reason: Some(crate::model::CloseReason::NotPlanned),
+                ..
+            }
+        ));
+        a.handle_key(key('j'));
+        a.handle_key(key('X'));
+        assert!(
+            matches!(a.popup, Some(crate::ui::app::Popup::CloseReason { .. })),
+            "b is open: it asks again"
+        );
+        assert!(a.handle_key(code(KeyCode::Esc)).is_empty(), "esc cancels");
+        assert_eq!(a.pending_count(), 1);
+    }
+
+    #[test]
+    fn closing_a_pull_request_asks_yes_or_no_and_reopening_asks_nothing() {
+        let mut a = test_app();
+        with_pull_request(&mut a, crate::model::ContentState::Open);
+        a.handle_key(key('j'));
+        a.handle_key(key('X'));
+        assert_eq!(a.mode, Mode::Confirm);
+        assert_eq!(
+            a.confirm.as_ref().unwrap().question,
+            "Close pull request #2 'Add iteration columns'? (y/n)"
+        );
+        assert_eq!(a.handle_key(key('y')), vec![Command::Send(1)]);
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Ok(Confirmed::Applied),
+        });
+        assert_eq!(
+            a.handle_key(key('X')),
+            vec![Command::Send(2)],
+            "now closed: X reopens at once"
+        );
+        assert!(matches!(&a.store.pending()[0].op, Op::Reopen { .. }));
+    }
+
+    #[test]
+    fn a_merged_pull_request_says_why() {
+        let mut a = test_app();
+        with_pull_request(&mut a, crate::model::ContentState::Merged);
+        a.handle_key(key('j'));
+        assert!(a.handle_key(key('X')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Merged pull requests can't be reopened")
+        );
     }
 }

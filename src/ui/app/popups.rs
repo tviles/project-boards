@@ -89,6 +89,11 @@ pub enum Popup {
         from_menu: bool,
         picker: ListPicker<Option<MilestoneRef>>,
     },
+    /// `X` on an open issue: why it closes. Choosing a reason is the confirmation.
+    CloseReason {
+        item: ItemId,
+        picker: ListPicker<crate::model::CloseReason>,
+    },
     /// A text, number or date field.
     Line {
         item: ItemId,
@@ -884,6 +889,24 @@ impl App {
                     if *from_menu {
                         return self.back_to_menu(&FieldTarget::Milestone);
                     }
+                    self.close_popup();
+                    return Vec::new();
+                }
+                ListOutcome::None | ListOutcome::Key(_) => {}
+            },
+            Popup::CloseReason { item, picker } => match picker.handle(&key) {
+                ListOutcome::Chosen(reason) => {
+                    let item = item.clone();
+                    self.close_popup();
+                    // Choosing a reason is the confirmation (Decision 18).
+                    let target = item.clone();
+                    return self.submit_people(OpKind::Close, target, |content| Op::Close {
+                        item,
+                        content,
+                        reason: Some(reason),
+                    });
+                }
+                ListOutcome::Cancel => {
                     self.close_popup();
                     return Vec::new();
                 }

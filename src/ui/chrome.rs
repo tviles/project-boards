@@ -145,6 +145,7 @@ fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
         Popup::Assignees { select, .. } => render_multiselect(frame, area, select, theme),
         Popup::Labels { select, .. } => render_multiselect(frame, area, select, theme),
         Popup::Milestone { picker, .. } => render_list_picker(frame, area, picker, theme),
+        Popup::CloseReason { picker, .. } => render_list_picker(frame, area, picker, theme),
         Popup::Options { select, .. } => render_multiselect(frame, area, select, theme),
         Popup::Line {
             kind,

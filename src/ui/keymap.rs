@@ -33,6 +33,7 @@ pub enum Action {
     Labels,
     EditField,
     Comment,
+    CloseReopen,
     ActionMenu,
     ErrorLog,
     Retry,
@@ -51,6 +52,7 @@ impl Action {
             Action::Labels => &[OpKind::Labels],
             Action::EditField => &[OpKind::SetField],
             Action::Comment => &[OpKind::Comment],
+            Action::CloseReopen => &[OpKind::Close, OpKind::Reopen],
             _ => &[],
         }
     }
@@ -63,7 +65,7 @@ impl Action {
             .find(|a| a.kinds().contains(&kind))
     }
 
-    pub const ALL: [Action; 33] = [
+    pub const ALL: [Action; 34] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -94,6 +96,7 @@ impl Action {
         Action::Labels,
         Action::EditField,
         Action::Comment,
+        Action::CloseReopen,
         Action::ActionMenu,
         Action::ErrorLog,
         Action::Retry,
@@ -132,6 +135,7 @@ impl Action {
             Action::Labels => "labels",
             Action::EditField => "edit_field",
             Action::Comment => "comment",
+            Action::CloseReopen => "close_reopen",
             Action::ActionMenu => "action_menu",
             Action::ErrorLog => "error_log",
             Action::Retry => "retry",
@@ -170,6 +174,7 @@ impl Action {
             Action::Labels => "set the item's labels",
             Action::EditField => "edit a field of the item",
             Action::Comment => "comment on the item",
+            Action::CloseReopen => "close or reopen the issue or pull request",
             Action::ActionMenu => "actions: every operation the item allows",
             Action::ErrorLog => "error log: failed edits",
             Action::Retry => "error log: retry the selected edit",
@@ -308,6 +313,7 @@ const DEFAULTS: &[(&str, Action)] = &[
     ("t", Action::Labels),
     ("e", Action::EditField),
     ("c", Action::Comment),
+    ("X", Action::CloseReopen),
     ("space", Action::ActionMenu),
     ("E", Action::ErrorLog),
     ("R", Action::Retry),
@@ -420,7 +426,7 @@ mod tests {
     fn overrides_replace_defaults_and_report_problems() {
         let mut o = BTreeMap::new();
         o.insert("next_view".to_string(), "]".to_string());
-        o.insert("clear_filter".to_string(), "X".to_string());
+        o.insert("clear_filter".to_string(), "Z".to_string());
         o.insert("teleport".to_string(), "t".to_string());
         o.insert("quit".to_string(), "ctrl+".to_string());
         let (km, warnings) = Keymap::with_overrides(&o);
@@ -430,7 +436,7 @@ mod tests {
         );
         assert_eq!(km.action(&ev(KeyCode::Tab, KeyModifiers::NONE)), None);
         assert_eq!(
-            km.action(&ev(KeyCode::Char('X'), KeyModifiers::NONE)),
+            km.action(&ev(KeyCode::Char('Z'), KeyModifiers::NONE)),
             Some(Action::ClearFilter)
         );
         assert_eq!(km.action(&ev(KeyCode::Char('x'), KeyModifiers::NONE)), None);
@@ -518,7 +524,7 @@ mod tests {
             km.action(&ev(KeyCode::Char('e'), KeyModifiers::NONE)),
             Some(Action::EditField)
         );
-        assert_eq!(Action::ALL.len(), 33);
+        assert_eq!(Action::ALL.len(), 34);
         assert_eq!(
             km.action(&ev(KeyCode::Char('a'), KeyModifiers::NONE)),
             Some(Action::Assignees)
