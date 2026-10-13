@@ -1000,7 +1000,7 @@ mod tests {
             lines[2].starts_with('│'),
             "the detail's border, not the table header: {screen}"
         );
-        assert!(screen.contains("Edit · Fix crash"), "{screen}");
+        assert!(screen.contains("Edit field · #1"), "{screen}");
     }
 
     #[test]

@@ -8,7 +8,6 @@ use crate::model::{
 use crate::ops::Op;
 use crate::ui::multiselect::{MultiOption, MultiOutcome, MultiSelect};
 use crate::ui::popup::{Choice, LineOutcome, ListOutcome, ListPicker, edit_line};
-use crate::ui::text::truncate_to_width;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
@@ -177,6 +176,16 @@ fn line_value(
     }
 }
 
+/// How a popover's title names the item: its number, or "draft". The item's own title is
+/// already on screen (the highlighted card or the open detail), and repeating it read like a
+/// message ("Edit · Crash when …").
+fn item_ref(item: &crate::model::Item) -> String {
+    match item.number() {
+        Some(n) => format!("#{n}"),
+        None => "draft".into(),
+    }
+}
+
 impl App {
     /// The user's local date.
     pub(crate) fn today(&self) -> time::Date {
@@ -231,10 +240,7 @@ impl App {
                 Some(reason.unwrap_or_else(|| "Nothing to do with this item".into()));
             return Vec::new();
         }
-        let mut picker = ListPicker::new(
-            format!("Actions · {}", truncate_to_width(item.title(), 40)),
-            choices,
-        );
+        let mut picker = ListPicker::new(format!("Actions · {}", item_ref(&item)), choices);
         picker.typing = false;
         self.open_popup(Popup::Actions {
             item: item.id,
@@ -269,7 +275,7 @@ impl App {
             self.status.flash = Some("This project has no fields to edit here".into());
             return Vec::new();
         }
-        let title = format!("Edit · {}", truncate_to_width(item.title(), 40));
+        let title = format!("Edit field · {}", item_ref(&item));
         self.open_popup(Popup::Fields {
             item: item.id,
             picker: ListPicker::new(title, choices),
@@ -288,7 +294,7 @@ impl App {
             return Vec::new();
         };
         let current = it.value(&f.id).cloned();
-        let title = format!("{} · {}", f.name, truncate_to_width(it.title(), 40));
+        let title = format!("{} · {}", f.name, item_ref(&it));
         let (item, field) = (item.clone(), f.id.clone());
         let line = |kind: LineKind, input: String| Popup::Line {
             item: item.clone(),
