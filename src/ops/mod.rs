@@ -5,7 +5,10 @@
 pub mod queue;
 pub mod send;
 
-use crate::model::{FieldId, FieldValue, Item, ItemId};
+use crate::model::{
+    CloseReason, ContentId, ContentState, FieldId, FieldKind, FieldValue, Item, ItemContent,
+    ItemId, Label, LabelRef, MilestoneRef, StateReason, UserRef,
+};
 use crate::store::BoardSnapshot;
 use std::collections::HashMap;
 
@@ -28,6 +31,51 @@ pub enum Op {
     Reorder {
         item: ItemId,
         after: Option<ItemId>,
+    },
+    /// Adds and removes assignees; `all` is the whole new list, which a draft sends.
+    Assignees {
+        item: ItemId,
+        content: ContentId,
+        add: Vec<UserRef>,
+        remove: Vec<UserRef>,
+        all: Vec<UserRef>,
+    },
+    Labels {
+        item: ItemId,
+        content: ContentId,
+        add: Vec<LabelRef>,
+        remove: Vec<LabelRef>,
+    },
+    /// Sets the milestone, or clears it with `None`.
+    Milestone {
+        item: ItemId,
+        content: ContentId,
+        milestone: Option<MilestoneRef>,
+    },
+    Title {
+        item: ItemId,
+        content: ContentId,
+        title: String,
+    },
+    Body {
+        item: ItemId,
+        content: ContentId,
+        body: String,
+    },
+    Comment {
+        item: ItemId,
+        content: ContentId,
+        body: String,
+    },
+    /// Closes an issue (with a reason) or a pull request (`reason: None`).
+    Close {
+        item: ItemId,
+        content: ContentId,
+        reason: Option<CloseReason>,
+    },
+    Reopen {
+        item: ItemId,
+        content: ContentId,
     },
 }
 
@@ -88,6 +136,37 @@ fn place_by_rank(list: &mut Vec<ItemId>, item: &ItemId, rank: &HashMap<ItemId, u
     list.insert(at, id);
 }
 
+/// Where `item` keeps the value of a built-in field: the key it already uses for such a
+/// value, else the project's field of `kind`.
+fn value_key(
+    snap: &BoardSnapshot,
+    item: &ItemId,
+    kind: FieldKind,
+    is_value: impl Fn(&FieldValue) -> bool,
+) -> Option<FieldId> {
+    snap.items
+        .get(item)
+        .and_then(|i| {
+            i.values
+                .iter()
+                .find(|(_, v)| is_value(v))
+                .map(|(k, _)| k.clone())
+        })
+        .or_else(|| {
+            snap.project
+                .fields
+                .iter()
+                .find(|f| f.kind == kind)
+                .map(|f| f.id.clone())
+        })
+}
+
+fn set_state(content: &mut ItemContent, to: ContentState) {
+    if let ItemContent::Issue { state, .. } | ItemContent::PullRequest { state, .. } = content {
+        *state = to;
+    }
+}
+
 fn reorder(snap: &mut BoardSnapshot, item: &ItemId, after: Option<&ItemId>) {
     if !snap.items.contains_key(item) || !move_after(&mut snap.order, item, after) {
         return;
@@ -106,9 +185,17 @@ fn reorder(snap: &mut BoardSnapshot, item: &ItemId, after: Option<&ItemId>) {
 impl Op {
     pub fn item(&self) -> &ItemId {
         match self {
-            Op::SetField { item, .. } | Op::ClearField { item, .. } | Op::Reorder { item, .. } => {
-                item
-            }
+            Op::SetField { item, .. }
+            | Op::ClearField { item, .. }
+            | Op::Reorder { item, .. }
+            | Op::Assignees { item, .. }
+            | Op::Labels { item, .. }
+            | Op::Milestone { item, .. }
+            | Op::Title { item, .. }
+            | Op::Body { item, .. }
+            | Op::Comment { item, .. }
+            | Op::Close { item, .. }
+            | Op::Reopen { item, .. } => item,
         }
     }
 
@@ -116,6 +203,14 @@ impl Op {
     pub fn name(&self) -> &'static str {
         match self {
             Op::SetField { .. } => "SetField",
+            Op::Assignees { .. } => "Assignees",
+            Op::Labels { .. } => "Labels",
+            Op::Milestone { .. } => "Milestone",
+            Op::Title { .. } => "Title",
+            Op::Body { .. } => "Body",
+            Op::Comment { .. } => "Comment",
+            Op::Close { .. } => "Close",
+            Op::Reopen { .. } => "Reopen",
             Op::ClearField { .. } => "ClearField",
             Op::Reorder { .. } => "Reorder",
         }
@@ -140,6 +235,107 @@ impl Op {
                 }
             }
             Op::Reorder { item, after } => reorder(snap, item, after.as_ref()),
+            Op::Assignees {
+                item, add, remove, ..
+            } => {
+                let key = value_key(snap, item, FieldKind::Assignees, |v| {
+                    matches!(v, FieldValue::Users(_))
+                });
+                if let Some(i) = snap.items.get_mut(item) {
+                    let mut logins: Vec<String> =
+                        i.assignees().iter().map(|s| s.to_string()).collect();
+                    logins.retain(|l| !remove.iter().any(|u| &u.login == l));
+                    for u in add {
+                        if !logins.contains(&u.login) {
+                            logins.push(u.login.clone());
+                        }
+                    }
+                    for u in remove {
+                        i.content_fields.assignee_ids.remove(&u.login);
+                    }
+                    for u in add {
+                        i.content_fields
+                            .assignee_ids
+                            .insert(u.login.clone(), u.id.clone());
+                    }
+                    if let Some(key) = key {
+                        i.values.insert(key, FieldValue::Users(logins));
+                    }
+                }
+            }
+            Op::Labels {
+                item, add, remove, ..
+            } => {
+                let key = value_key(snap, item, FieldKind::Labels, |v| {
+                    matches!(v, FieldValue::Labels(_))
+                });
+                if let Some(i) = snap.items.get_mut(item) {
+                    let mut labels: Vec<Label> = i.labels().into_iter().cloned().collect();
+                    labels.retain(|l| !remove.iter().any(|r| r.name == l.name));
+                    for l in add {
+                        if !labels.iter().any(|x| x.name == l.name) {
+                            labels.push(Label {
+                                name: l.name.clone(),
+                                color: l.color.clone(),
+                            });
+                        }
+                    }
+                    for l in remove {
+                        i.content_fields.label_ids.remove(&l.name);
+                    }
+                    for l in add {
+                        i.content_fields
+                            .label_ids
+                            .insert(l.name.clone(), l.id.clone());
+                    }
+                    if let Some(key) = key {
+                        i.values.insert(key, FieldValue::Labels(labels));
+                    }
+                }
+            }
+            Op::Milestone {
+                item, milestone, ..
+            } => {
+                let key = value_key(snap, item, FieldKind::Milestone, |v| {
+                    matches!(v, FieldValue::Milestone(_))
+                });
+                if let Some(i) = snap.items.get_mut(item) {
+                    i.content_fields.milestone = milestone.clone();
+                    if let Some(key) = key {
+                        match milestone {
+                            Some(m) => i.values.insert(key, FieldValue::Milestone(m.title.clone())),
+                            None => i.values.remove(&key),
+                        };
+                    }
+                }
+            }
+            Op::Title { item, title, .. } => {
+                if let Some(i) = snap.items.get_mut(item) {
+                    match &mut i.content {
+                        ItemContent::Issue { title: t, .. }
+                        | ItemContent::PullRequest { title: t, .. }
+                        | ItemContent::Draft { title: t } => *t = title.clone(),
+                        ItemContent::Redacted | ItemContent::Unknown { .. } => {}
+                    }
+                }
+            }
+            // Bodies and comments live in the detail, not on the board.
+            Op::Body { .. } | Op::Comment { .. } => {}
+            Op::Close { item, reason, .. } => {
+                if let Some(i) = snap.items.get_mut(item) {
+                    set_state(&mut i.content, ContentState::Closed);
+                    i.content_fields.state_reason = reason.map(|r| match r {
+                        CloseReason::Completed => StateReason::Completed,
+                        CloseReason::NotPlanned => StateReason::NotPlanned,
+                    });
+                }
+            }
+            Op::Reopen { item, .. } => {
+                if let Some(i) = snap.items.get_mut(item) {
+                    set_state(&mut i.content, ContentState::Open);
+                    i.content_fields.state_reason = None;
+                }
+            }
         }
     }
 
@@ -164,6 +360,19 @@ impl Op {
             }
             Op::ClearField { field, .. } => format!("clear {} on '{title}'", field_name(field)),
             Op::Reorder { .. } => format!("reorder '{title}'"),
+            Op::Assignees { .. } => format!("change assignees on '{title}'"),
+            Op::Labels { .. } => format!("change labels on '{title}'"),
+            Op::Milestone {
+                milestone: Some(m), ..
+            } => format!("set milestone {} on '{title}'", m.title),
+            Op::Milestone {
+                milestone: None, ..
+            } => format!("clear the milestone on '{title}'"),
+            Op::Title { .. } => format!("retitle '{title}'"),
+            Op::Body { .. } => format!("edit the body of '{title}'"),
+            Op::Comment { .. } => format!("comment on '{title}'"),
+            Op::Close { .. } => format!("close '{title}'"),
+            Op::Reopen { .. } => format!("reopen '{title}'"),
         }
     }
 }
@@ -411,5 +620,189 @@ mod tests {
             "reorder 'an item'"
         );
         assert_eq!(set.name(), "SetField");
+    }
+
+    use crate::model::{CloseReason, ContentState, ItemContent, LabelRef, MilestoneRef, UserRef};
+
+    fn user(login: &str) -> UserRef {
+        UserRef {
+            id: format!("U_{login}"),
+            login: login.into(),
+        }
+    }
+
+    fn label(name: &str) -> LabelRef {
+        LabelRef {
+            id: format!("L_{name}"),
+            name: name.into(),
+            color: "d73a4a".into(),
+        }
+    }
+
+    fn content() -> ContentId {
+        ContentId::Issue("I_a".into())
+    }
+
+    fn item_a(s: &BoardSnapshot) -> &Item {
+        &s.items[&ItemId::new("a")]
+    }
+
+    #[test]
+    fn assignee_and_label_changes_apply_to_values_and_ids() {
+        let mut s = snapshot();
+        let op = Op::Assignees {
+            item: ItemId::new("a"),
+            content: content(),
+            add: vec![user("octo")],
+            remove: vec![user("tviles")],
+            all: vec![user("octo")],
+        };
+        op.apply(&mut s);
+        op.apply(&mut s);
+        assert_eq!(item_a(&s).assignees(), ["octo"]);
+        assert_eq!(
+            item_a(&s)
+                .content_fields
+                .assignee_ids
+                .get("octo")
+                .map(String::as_str),
+            Some("U_octo")
+        );
+        assert!(
+            !item_a(&s)
+                .content_fields
+                .assignee_ids
+                .contains_key("tviles")
+        );
+        Op::Labels {
+            item: ItemId::new("a"),
+            content: content(),
+            add: vec![label("docs")],
+            remove: vec![label("bug")],
+        }
+        .apply(&mut s);
+        assert_eq!(item_a(&s).label_names(), ["docs"]);
+        assert_eq!(
+            item_a(&s)
+                .content_fields
+                .label_ids
+                .get("docs")
+                .map(String::as_str),
+            Some("L_docs")
+        );
+    }
+
+    #[test]
+    fn milestone_title_close_and_reopen_apply() {
+        let mut s = snapshot();
+        let a = || ItemId::new("a");
+        Op::Milestone {
+            item: a(),
+            content: content(),
+            milestone: Some(MilestoneRef {
+                id: "MI_1".into(),
+                title: "v1".into(),
+            }),
+        }
+        .apply(&mut s);
+        assert_eq!(
+            item_a(&s)
+                .content_fields
+                .milestone
+                .as_ref()
+                .map(|m| m.title.as_str()),
+            Some("v1")
+        );
+        Op::Title {
+            item: a(),
+            content: content(),
+            title: "Fix the crash".into(),
+        }
+        .apply(&mut s);
+        assert_eq!(item_a(&s).title(), "Fix the crash");
+        Op::Close {
+            item: a(),
+            content: content(),
+            reason: Some(CloseReason::NotPlanned),
+        }
+        .apply(&mut s);
+        assert!(matches!(
+            item_a(&s).content,
+            ItemContent::Issue {
+                state: ContentState::Closed,
+                ..
+            }
+        ));
+        assert_eq!(
+            item_a(&s).content_fields.state_reason,
+            Some(crate::model::StateReason::NotPlanned)
+        );
+        Op::Reopen {
+            item: a(),
+            content: content(),
+        }
+        .apply(&mut s);
+        assert!(matches!(
+            item_a(&s).content,
+            ItemContent::Issue {
+                state: ContentState::Open,
+                ..
+            }
+        ));
+        Op::Milestone {
+            item: a(),
+            content: content(),
+            milestone: None,
+        }
+        .apply(&mut s);
+        assert_eq!(item_a(&s).content_fields.milestone, None);
+        let before = s.clone();
+        Op::Body {
+            item: a(),
+            content: content(),
+            body: "x".into(),
+        }
+        .apply(&mut s);
+        Op::Comment {
+            item: a(),
+            content: content(),
+            body: "x".into(),
+        }
+        .apply(&mut s);
+        assert_eq!(
+            s, before,
+            "bodies and comments live in the detail, not the board"
+        );
+    }
+
+    #[test]
+    fn issue_ops_describe_themselves() {
+        let s = snapshot();
+        let a = || ItemId::new("a");
+        let label_op = Op::Labels {
+            item: a(),
+            content: content(),
+            add: vec![label("docs")],
+            remove: vec![],
+        };
+        assert_eq!(label_op.describe(Some(&s)), "change labels on 'Fix crash'");
+        assert_eq!(
+            Op::Close {
+                item: a(),
+                content: content(),
+                reason: None
+            }
+            .describe(Some(&s)),
+            "close 'Fix crash'"
+        );
+        assert_eq!(
+            Op::Comment {
+                item: a(),
+                content: content(),
+                body: "x".into()
+            }
+            .describe(Some(&s)),
+            "comment on 'Fix crash'"
+        );
     }
 }

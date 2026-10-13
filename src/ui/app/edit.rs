@@ -550,9 +550,16 @@ impl App {
                     return;
                 }
                 if let GithubError::InsufficientScopes { missing } = &error {
-                    for scope in missing {
-                        if !self.refused_scopes.contains(scope) {
-                            self.refused_scopes.push(scope.clone());
+                    // GitHub names one of `repo` / `public_repo`, but either satisfies
+                    // the write, and `caps::check` blocks only when all of them are
+                    // refused, so a refused repo scope refuses both.
+                    let mut refused: Vec<&str> = missing.iter().map(String::as_str).collect();
+                    if refused.iter().any(|s| matches!(*s, "repo" | "public_repo")) {
+                        refused.extend(["repo", "public_repo"]);
+                    }
+                    for scope in refused {
+                        if !self.refused_scopes.iter().any(|r| r == scope) {
+                            self.refused_scopes.push(scope.to_string());
                         }
                     }
                 }
@@ -947,6 +954,21 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn a_refused_repo_scope_refuses_both_repo_and_public_repo() {
+        for named in ["repo", "public_repo"] {
+            let mut a = test_app();
+            a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+            a.on_sync(SyncEvent::OpDone {
+                id: 1,
+                result: Err(refused(named)),
+            });
+            let mut got = a.refused_scopes.clone();
+            got.sort();
+            assert_eq!(got, ["public_repo", "repo"], "named {named}");
+        }
     }
 
     #[test]
