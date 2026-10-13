@@ -1,0 +1,87 @@
+{
+  "data": {
+    "updateProjectV2ItemFieldValue": {
+      "projectV2Item": {
+        "content": {
+          "__typename": "DraftIssue",
+          "title": "pb live: edits_fields 1791909735030752000"
+        },
+        "fieldValues": {
+          "nodes": [
+            {
+              "__typename": "ProjectV2ItemFieldTextValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+              },
+              "text": "pb live: edits_fields 1791909735030752000"
+            },
+            {
+              "__typename": "ProjectV2ItemFieldTextValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr68"
+              },
+              "text": "live note"
+            },
+            {
+              "__typename": "ProjectV2ItemFieldSingleSelectValue",
+              "field": {
+                "__typename": "ProjectV2SingleSelectField",
+                "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+              },
+              "name": "Todo",
+              "optionId": "f75ad846"
+            },
+            {
+              "__typename": "ProjectV2ItemFieldNumberValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr58"
+              },
+              "number": 5.0
+            },
+            {
+              "__typename": "ProjectV2ItemFieldDateValue",
+              "date": "2026-12-24",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr6A"
+              }
+            },
+            {
+              "__typename": "ProjectV2ItemFieldSingleSelectValue",
+              "field": {
+                "__typename": "ProjectV2SingleSelectField",
+                "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k"
+              },
+              "name": "P0",
+              "optionId": "86d2debf"
+            },
+            {
+              "__typename": "ProjectV2ItemFieldMultiSelectValue",
+              "field": {
+                "__typename": "ProjectV2MultiSelectField",
+                "id": "PVTMSF_lAHOADq2Kc4Bl819zhknr7E"
+              },
+              "options": [
+                {
+                  "id": "4dba8577",
+                  "name": "api"
+                },
+                {
+                  "id": "6eaf9169",
+                  "name": "ui"
+                }
+              ]
+            }
+          ]
+        },
+        "id": "PVTI_lAHOADq2Kc4Bl819zhAfVpM",
+        "isArchived": false,
+        "type": "DRAFT_ISSUE",
+        "updatedAt": "2026-10-13T16:42:21Z"
+      }
+    }
+  }
+}
