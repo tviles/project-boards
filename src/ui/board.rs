@@ -1704,18 +1704,28 @@ mod tests {
                 assert_eq!(dim, !selected, "width {width} selected {selected}");
             }
         }
-        // Pending alone dims nothing and adds no line.
+        // Pending alone dims nothing and adds no line; unmatched does both.
         let mut only = ItemMarks::default();
         only.pending.insert(item.id.clone());
         let plain =
             bordered_card_marked(item, status, &[], 34, false, &ItemMarks::default(), &theme);
         let pending = bordered_card_marked(item, status, &[], 34, false, &only, &theme);
         assert_eq!(plain.len(), pending.len());
+        // The plain theme dims the border itself, so compare the title row's inside.
+        let inner = |l: &Line<'static>| l.spans[1..l.spans.len() - 1].to_vec();
         assert!(
-            pending[1]
-                .spans
+            !inner(&pending[2])
                 .iter()
-                .all(|s| !s.style.add_modifier.contains(Modifier::DIM) || s.style == theme.dim())
+                .any(|s| s.style.add_modifier.contains(Modifier::DIM))
+        );
+        let mut un = ItemMarks::default();
+        un.unmatched.insert(item.id.clone());
+        let unmatched = bordered_card_marked(item, status, &[], 34, false, &un, &theme);
+        assert_eq!(unmatched.len(), plain.len() + 1);
+        assert!(
+            inner(&unmatched[2])
+                .iter()
+                .all(|s| s.style.add_modifier.contains(Modifier::DIM))
         );
         // A highlighted card has a double border.
         let hi = ItemMarks {
@@ -1744,5 +1754,55 @@ mod tests {
         );
         assert!(lines[0].spans[0].content.starts_with("⋯ #1"), "{lines:?}");
         assert_eq!(spans_width(&lines[0].spans), 9);
+    }
+
+    #[test]
+    fn the_unknown_option_marker_and_both_marks_fit_a_tight_card() {
+        use crate::ui::marks::ItemMarks;
+        let (p, all) = (project(), items());
+        let status = field(&p, "Status");
+        let old = all.iter().find(|i| has_unknown_option(i, status)).unwrap();
+        let mut marks = ItemMarks::default();
+        marks.pending.insert(old.id.clone());
+        marks.unmatched.insert(old.id.clone());
+        for width in 10..=16 {
+            let lines =
+                bordered_card_marked(old, status, &[], width, false, &marks, &Theme::plain());
+            for l in &lines {
+                assert_eq!(spans_width(&l.spans), width, "width {width}: {l:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_selected_unmatched_card_stays_whole_on_screen() {
+        use crate::ui::marks::ItemMarks;
+        let (p, all) = (project(), items());
+        let refs: Vec<&Item> = all.iter().collect();
+        let status = field(&p, "Status");
+        let cols = build_columns(&refs, status, None);
+        let mut marks = ItemMarks::default();
+        marks.unmatched.insert(ItemId::new("c"));
+        let sel = BoardSelection {
+            column: 0,
+            index: 1,
+        };
+        // Nine card rows: the unmatched card (eight lines, one more than usual) ends on the last.
+        let screen = render_to_string(140, 10, |f| {
+            render_board_with(
+                f,
+                f.area(),
+                &cols,
+                &sel,
+                status,
+                &[],
+                &marks,
+                &Theme::plain(),
+            )
+        });
+        let lines: Vec<&str> = screen.lines().collect();
+        assert!(lines[2].starts_with('┏'), "{screen}");
+        assert!(lines[3].contains("⊘ ● t #3"), "{screen}");
+        assert!(lines[9].starts_with('┗'), "{screen}");
     }
 }

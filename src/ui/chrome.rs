@@ -6,6 +6,7 @@ use crate::ui::app::{App, Mode};
 use crate::ui::board::render_board_with;
 use crate::ui::detail::{build_doc, render_detail};
 use crate::ui::keymap::Action;
+use crate::ui::marks::ItemMarks;
 use crate::ui::picker::render_picker;
 use crate::ui::table::{render_table_with, table_columns};
 use crate::ui::text::{display_width, pad_to_width, truncate_to_width};
@@ -34,6 +35,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(1),
     ])
     .areas(area);
+    let marks = app.marks();
     draw_header(frame, header, app);
     draw_tabs(frame, tabs, app);
     if app.mode == Mode::Setup {
@@ -51,15 +53,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             let [left, right] =
                 Split::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .areas(body);
-            draw_body(frame, left, app);
+            draw_body(frame, left, app, &marks);
             draw_detail(frame, right, app);
         } else {
             draw_detail(frame, body, app);
         }
     } else {
-        draw_body(frame, body, app);
+        draw_body(frame, body, app, &marks);
     }
-    draw_status(frame, status, app);
+    draw_status(frame, status, app, &marks);
     if app.mode == Mode::Help {
         draw_help(frame, body, app);
     }
@@ -70,26 +72,78 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
+/// A header flag in its full and its short form.
+struct Flag {
+    long: String,
+    short: String,
+}
+
+impl Flag {
+    fn same(text: String) -> Flag {
+        Flag {
+            long: text.clone(),
+            short: text,
+        }
+    }
+}
+
+/// The write flags in priority order (read-only, paused, saving), each in both forms.
+fn write_flag_forms(app: &App, now: std::time::Instant) -> Vec<Flag> {
+    let mut flags = Vec::new();
+    if app.project().is_some_and(|p| !p.viewer_can_update) {
+        flags.push(Flag::same("read-only".into()));
+    } else if app.project().is_some() && !app.edit_context().has_project_scope() {
+        flags.push(Flag {
+            long: "read-only: token lacks the project scope".into(),
+            short: "read-only (no scope)".into(),
+        });
+    }
+    if let Some(until) = app.status.write_pause {
+        let left = until.saturating_duration_since(now);
+        // Rounded up, so the last second does not read blank.
+        let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+        if secs > 0 {
+            flags.push(Flag {
+                long: format!("writes paused {secs}s"),
+                short: format!("paused {secs}s"),
+            });
+        }
+    }
+    let pending = app.pending_count();
+    if pending > 0 {
+        flags.push(Flag {
+            long: format!("saving {pending}…"),
+            short: format!("⋯{pending}"),
+        });
+    }
+    flags
+}
+
 /// The header flags about writing: edits sending, a rate-limit pause, and why the board is
 /// read-only.
 pub fn write_flags(app: &App, now: std::time::Instant) -> Vec<String> {
-    let mut flags = Vec::new();
-    let pending = app.pending_count();
-    if pending > 0 {
-        flags.push(format!("saving {pending}…"));
+    let mut forms = write_flag_forms(app, now);
+    // Priority order is read-only, paused, saving; the header reads saving first.
+    forms.sort_by_key(|f| !f.long.starts_with("saving"));
+    forms.into_iter().map(|f| f.long).collect()
+}
+
+/// Cells the header always keeps for the title.
+const MIN_TITLE: usize = 12;
+
+/// The header's flags that fit in `room` cells: full forms if they all fit, else short forms,
+/// else the most important ones (read-only, paused, saving, stale or loading, rate limit).
+fn fit_flags(flags: &[Flag], room: usize) -> String {
+    let join = |list: &[String]| list.join(" · ");
+    let longs: Vec<String> = flags.iter().map(|f| f.long.clone()).collect();
+    if display_width(&join(&longs)) <= room {
+        return join(&longs);
     }
-    if let Some(until) = app.status.write_pause {
-        let left = until.saturating_duration_since(now).as_secs();
-        if left > 0 {
-            flags.push(format!("writes paused {left}s"));
-        }
+    let mut shorts: Vec<String> = flags.iter().map(|f| f.short.clone()).collect();
+    while !shorts.is_empty() && display_width(&join(&shorts)) > room {
+        shorts.pop();
     }
-    if app.project().is_some_and(|p| !p.viewer_can_update) {
-        flags.push("read-only".into());
-    } else if app.project().is_some() && !app.edit_context().has_project_scope() {
-        flags.push("read-only: token lacks the project scope".into());
-    }
-    flags
+    join(&shorts)
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -97,18 +151,18 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         .project()
         .map(|p| format!("{} · {}", p.title, p.board))
         .unwrap_or_else(|| "project-boards".into());
-    let mut flags = Vec::new();
+    let mut flags = write_flag_forms(app, std::time::Instant::now());
     if let Some((loaded, total)) = app.status.loading {
-        flags.push(format!("loading {loaded}/{total}"));
+        flags.push(Flag::same(format!("loading {loaded}/{total}")));
     } else if app.status.stale {
-        flags.push("stale".into());
+        flags.push(Flag::same("stale".into()));
     }
-    flags.extend(write_flags(app, std::time::Instant::now()));
     if app.status.rate_low {
-        flags.push("rate limit low".into());
+        flags.push(Flag::same("rate limit low".into()));
     }
-    let right = flags.join(" · ");
-    let left_width = (area.width as usize).saturating_sub(display_width(&right) + 1);
+    let width = area.width as usize;
+    let right = fit_flags(&flags, width.saturating_sub(MIN_TITLE + 1));
+    let left_width = width.saturating_sub(display_width(&right) + 1);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(pad_to_width(&title, left_width), app.theme.bold()),
@@ -169,7 +223,7 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_body(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
     let Some(project) = app.project() else {
         frame.render_widget(
             Paragraph::new(Line::styled("Loading the board…", app.theme.dim())),
@@ -184,7 +238,6 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
         );
         return;
     }
-    let marks = app.marks();
     match app.layout().0 {
         Layout::Board => {
             if let Some(field) = app.column_field() {
@@ -195,7 +248,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
                     &app.board_sel,
                     field,
                     &app.card_fields(),
-                    &marks,
+                    marks,
                     &app.theme,
                 );
             }
@@ -208,7 +261,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
                 &app.table_rows(),
                 &table_columns(view, project),
                 app.table_selected,
-                &marks,
+                marks,
                 &app.theme,
             );
         }
@@ -243,7 +296,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App) {
     render_detail(frame, inner, &doc, state, &app.theme);
 }
 
-fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_status(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
     let line = match app.mode {
         Mode::Search => Line::from(vec![
             Span::styled("/", app.theme.accent()),
@@ -301,7 +354,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
                     "? help · / search · f filter{clear} · L layout · q quit"
                 ));
                 // The reminder is only worth the room when `? help` still fits after it.
-                if !app.marks().unmatched.is_empty() {
+                if !marks.unmatched.is_empty() {
                     let mut with = parts.clone();
                     with.insert(
                         parts.len() - 1,
@@ -627,7 +680,132 @@ mod tests {
                 .lines()
                 .next()
                 .unwrap()
-                .ends_with("stale · read-only")
+                .ends_with("read-only · stale")
         );
+    }
+
+    fn flagged_app() -> App {
+        use crate::model::{FieldId, FieldValue, ItemId, OpKind, OptionId};
+        use crate::ops::Op;
+        let mut a = app();
+        a.submit(
+            OpKind::Move,
+            Op::SetField {
+                item: ItemId::new("a"),
+                field: FieldId::new("F_status"),
+                value: FieldValue::SingleSelect {
+                    option_id: OptionId::new("o_done"),
+                    name: "Done".into(),
+                },
+            },
+        );
+        a.status.write_pause = Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+        a.on_sync(crate::sync::SyncEvent::Access {
+            scopes: Some(vec!["repo".into()]),
+        });
+        a.status.loading = Some((1, 2));
+        a.status.rate_low = true;
+        a
+    }
+
+    #[test]
+    fn the_title_survives_every_header_flag_at_any_width() {
+        for width in [40u16, 60, 80] {
+            let mut a = flagged_app();
+            let screen = render_to_string(width, 10, |f| draw(f, &mut a));
+            let head = screen.lines().next().unwrap();
+            assert!(head.starts_with("Testbed · tviles/3"), "{width}: {head}");
+            // Flags come whole or not at all: each part between separators is a full flag.
+            let right = head.trim_end().split_once("tviles/3").unwrap().1.trim();
+            for part in right.split(" · ").filter(|p| !p.is_empty()) {
+                let known = [
+                    "read-only (no scope)",
+                    "read-only: token lacks the project scope",
+                    "writes paused",
+                    "paused",
+                    "saving",
+                    "⋯",
+                    "loading 1/2",
+                    "rate limit low",
+                ];
+                assert!(
+                    known.iter().any(|k| part.starts_with(k)),
+                    "{width}: {part:?} in {head}"
+                );
+            }
+            if width == 80 {
+                assert!(head.contains("loading 1/2"), "{head}");
+            }
+            if width == 40 {
+                assert!(head.contains("read-only (no scope)"), "{head}");
+            }
+        }
+    }
+
+    #[test]
+    fn short_flags_drop_the_least_important_first() {
+        let a = flagged_app();
+        let flags = {
+            let mut f = write_flag_forms(&a, std::time::Instant::now());
+            f.push(Flag::same("loading 1/2".into()));
+            f.push(Flag::same("rate limit low".into()));
+            f
+        };
+        assert_eq!(fit_flags(&flags, 200).matches(" · ").count(), 4);
+        let tight = fit_flags(&flags, 40);
+        assert!(
+            tight.starts_with("read-only (no scope) · paused"),
+            "{tight}"
+        );
+        assert!(!tight.contains("rate limit"), "{tight}");
+        assert_eq!(fit_flags(&flags, 5), "");
+    }
+
+    #[test]
+    fn the_pause_countdown_rounds_up() {
+        let now = std::time::Instant::now();
+        let mut a = app();
+        a.status.write_pause = Some(now + std::time::Duration::from_millis(400));
+        assert_eq!(write_flags(&a, now), ["writes paused 1s"]);
+        a.status.write_pause = Some(now + std::time::Duration::from_millis(29_100));
+        assert_eq!(write_flags(&a, now), ["writes paused 30s"]);
+        a.status.write_pause = Some(now);
+        assert!(write_flags(&a, now).is_empty());
+    }
+
+    #[test]
+    fn a_read_only_project_says_plain_read_only_even_without_the_scope() {
+        let now = std::time::Instant::now();
+        let mut s = snapshot();
+        s.project.viewer_can_update = false;
+        let mut a = App::new(
+            Box::new(MemoryStore::new(Some(s))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        a.on_sync(crate::sync::SyncEvent::Access {
+            scopes: Some(vec!["repo".into()]),
+        });
+        assert_eq!(write_flags(&a, now), ["read-only"]);
+    }
+
+    #[test]
+    fn a_narrow_status_line_keeps_help_with_unmatched_items() {
+        let mut a = app();
+        a.status.notes.push("a note".into());
+        let mut marks = ItemMarks::default();
+        marks.unmatched.insert(crate::model::ItemId::new("a"));
+        for width in [40u16, 60, 80, 120] {
+            let screen = render_to_string(width, 10, |f| {
+                draw_status(f, f.area(), &a, &marks);
+            });
+            let line = screen.lines().next().unwrap();
+            let has_reminder = line.contains("⊘ no longer matches filter");
+            // The reminder is only shown when `? help` still fits.
+            assert!(!has_reminder || line.contains("? help"), "{width}: {line}");
+            if width == 120 {
+                assert!(has_reminder, "{line}");
+            }
+        }
     }
 }
