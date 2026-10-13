@@ -370,8 +370,9 @@ impl App {
     }
 
     /// The edit keys the item allows, for the status line: single-key edits first (`e field`),
-    /// then `< > move · J K reorder · space actions`. `None` with no item or nothing allowed.
-    pub fn edit_hints(&self) -> Option<String> {
+    /// then `< > move · J K reorder`. `space actions` is separate (`actions_hint`): it never
+    /// drops. `None` with no item or nothing allowed.
+    pub fn edit_hints(&self) -> Option<Vec<String>> {
         let item = self.action_item()?;
         let ctx = self.edit_context();
         if crate::model::capabilities(item, &ctx).is_empty() {
@@ -394,10 +395,17 @@ impl App {
         {
             parts.push(format!("{d} {u} reorder"));
         }
-        if let Some(k) = key(Action::ActionMenu) {
-            parts.push(format!("{k} actions"));
+        Some(parts)
+    }
+
+    /// `space actions`, when the item allows any action (Decision E17: always kept).
+    pub fn actions_hint(&self) -> Option<String> {
+        let item = self.action_item()?;
+        if crate::model::capabilities(item, &self.edit_context()).is_empty() {
+            return None;
         }
-        Some(parts.join(" · "))
+        let k = self.keymap.keys_for(Action::ActionMenu).first()?.label();
+        Some(format!("{k} actions"))
     }
 
     pub fn edit_context(&self) -> EditContext {
@@ -3738,6 +3746,103 @@ mod tests {
         assert_eq!(
             a.status.flash.as_deref(),
             Some("Merged pull requests can't be reopened")
+        );
+    }
+
+    #[test]
+    fn close_refusals_say_why_and_send_nothing() {
+        // A draft.
+        let mut a = test_app();
+        for _ in 0..3 {
+            a.handle_key(key('j'));
+        }
+        assert!(a.handle_key(key('X')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Drafts can't be closed — archive or remove it instead")
+        );
+        assert!(a.popup.is_none());
+        assert_eq!(a.pending_count(), 0);
+
+        // A read-only board.
+        let mut snap = snapshot();
+        snap.project.viewer_can_update = false;
+        let mut a = App::new(
+            Box::new(crate::store::MemoryStore::new(Some(snap))),
+            crate::ui::keymap::Keymap::defaults(),
+            crate::ui::theme::Theme::plain(),
+        );
+        assert!(a.handle_key(key('X')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("This board is read-only for you")
+        );
+        assert!(a.popup.is_none() && a.confirm.is_none());
+        assert_eq!(a.pending_count(), 0);
+
+        // An archived item (open in the detail, then archived).
+        let mut a = test_app();
+        a.handle_key(code(KeyCode::Enter));
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.items.get_mut(&ItemId::new("a")).unwrap().archived = true;
+        a.store.apply(StoreUpdate::Replace(snap));
+        assert!(a.handle_key(key('X')).is_empty());
+        assert!(
+            a.status
+                .flash
+                .as_deref()
+                .is_some_and(|f| f.contains("archived")),
+            "{:?}",
+            a.status.flash
+        );
+        assert!(a.popup.is_none() && a.confirm.is_none());
+        assert_eq!(a.pending_count(), 0);
+    }
+
+    #[test]
+    fn declining_the_pull_request_question_sends_nothing() {
+        for decline in [key('n'), code(KeyCode::Esc)] {
+            let mut a = test_app();
+            with_pull_request(&mut a, crate::model::ContentState::Open);
+            a.handle_key(key('j'));
+            a.handle_key(key('X'));
+            assert_eq!(a.mode, Mode::Confirm);
+            assert!(a.handle_key(decline).is_empty());
+            assert_eq!(a.mode, Mode::Normal);
+            assert!(a.confirm.is_none());
+            assert_eq!(a.pending_count(), 0);
+        }
+    }
+
+    #[test]
+    fn reopening_a_closed_issue_asks_nothing() {
+        let mut a = test_app();
+        let mut snap = a.snapshot().unwrap().clone();
+        let item = snap.items.get_mut(&ItemId::new("a")).unwrap();
+        if let crate::model::ItemContent::Issue { state, .. } = &mut item.content {
+            *state = crate::model::ContentState::Closed;
+        }
+        a.store.apply(StoreUpdate::Replace(snap));
+        assert_eq!(a.handle_key(key('X')), vec![Command::Send(1)]);
+        assert!(a.popup.is_none() && a.confirm.is_none());
+        assert!(matches!(&a.store.pending()[0].op, Op::Reopen { .. }));
+    }
+
+    #[test]
+    fn x_in_the_detail_returns_to_the_detail() {
+        let mut a = test_app();
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(a.mode, Mode::Detail);
+        a.handle_key(key('X'));
+        assert_eq!(a.mode, Mode::Popup);
+        assert!(a.handle_key(code(KeyCode::Esc)).is_empty());
+        assert_eq!(a.mode, Mode::Detail, "esc returns to the detail");
+        a.handle_key(key('X'));
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(
+            a.mode,
+            Mode::Detail,
+            "choosing a reason returns to the detail"
         );
     }
 }

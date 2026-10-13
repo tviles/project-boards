@@ -445,25 +445,37 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
                 let clear = app
                     .extra_filter()
                     .and(app.keymap.keys_for(Action::ClearFilter).first().copied())
-                    .map(|k| format!(" · {} clear filter", k.label()))
-                    .unwrap_or_default();
+                    .map(|k| k.label());
                 if !app.errors.is_empty()
                     && let Some(k) = app.keymap.keys_for(Action::ErrorLog).first()
                 {
                     parts.push(format!("{} {} failed", k.label(), app.errors.len()));
                 }
-                parts.extend(app.edit_hints());
-                parts.push(format!("/ search · f filter{clear} · L layout · q quit"));
+                let edit = app.edit_hints().unwrap_or_default();
+                let mut general = vec!["/ search".to_string(), "f filter".to_string()];
+                if let Some(k) = clear {
+                    general.push(format!("{k} clear filter"));
+                }
+                general.extend(["L layout".to_string(), "q quit".to_string()]);
                 // The reminder outranks the hints: they are cut for it, but only when what
                 // is left of them is still worth showing.
+                let actions = app.actions_hint();
+                let kept = actions.as_ref().map_or(0, |a| display_width(a) + 3);
                 let reminder = (!marks.unmatched.is_empty()
                     && area.width as usize
                         >= display_width(crate::ui::marks::UNMATCHED_TEXT)
                             + display_width(" · ? help")
+                            + kept
                             + MIN_HINT_ROOM)
                     .then_some(crate::ui::marks::UNMATCHED_TEXT);
+                let hints = Hints {
+                    lead: &parts,
+                    edit: &edit,
+                    general: &general,
+                    actions,
+                };
                 Line::styled(
-                    status_line_with(&parts.join(" · "), reminder, area.width as usize),
+                    status_hints(&hints, reminder, area.width as usize),
                     app.theme.dim(),
                 )
             }
@@ -509,6 +521,60 @@ fn error_log_hints(app: &App, width: usize) -> String {
 
 /// The least room the hints keep when the unmatched reminder is shown.
 const MIN_HINT_ROOM: usize = 12;
+
+/// The pieces of the bottom hint line, in display order before `space actions · ? help`.
+struct Hints<'a> {
+    lead: &'a [String],
+    edit: &'a [String],
+    general: &'a [String],
+    actions: Option<String>,
+}
+
+/// The hint line with `space actions` and `? help` always kept (Decision E17): when short of
+/// room, the edit hints are dropped from the end first, then the general ones.
+fn status_hints(h: &Hints, keep: Option<&str>, width: usize) -> String {
+    let keep_all = match (&h.actions, keep) {
+        (Some(a), Some(k)) => Some(format!("{a} · {k}")),
+        (Some(a), None) => Some(a.clone()),
+        (None, k) => k.map(str::to_string),
+    };
+    let tail = keep_all.as_deref();
+    let tail_width = display_width(&tail.map(|t| format!(" · {t}")).unwrap_or_default())
+        + display_width(" · ? help");
+    let room = width.saturating_sub(tail_width);
+    let join = |e: usize, g: usize| {
+        h.lead
+            .iter()
+            .chain(&h.edit[..e])
+            .chain(&h.general[..g])
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    let fits = |text: &str| !text.is_empty() && display_width(text) <= room;
+    let mut left = None;
+    for e in (0..=h.edit.len()).rev() {
+        let t = join(e, h.general.len());
+        if fits(&t) {
+            left = Some(t);
+            break;
+        }
+    }
+    if left.is_none() {
+        for g in (0..h.general.len()).rev() {
+            let t = join(0, g);
+            if fits(&t) {
+                left = Some(t);
+                break;
+            }
+        }
+    }
+    status_line_with(
+        &left.unwrap_or_else(|| join(0, h.general.len())),
+        tail,
+        width,
+    )
+}
 
 /// The bottom hint line: `left` cut with `…` to fit, then `? help`, which always shows
 /// (pre-flight ruling 4).
@@ -1030,7 +1096,7 @@ mod tests {
         let last = screen.lines().last().unwrap();
         assert!(last.ends_with(" · ? help"), "{last}");
         assert!(
-            !last.contains('…') && last.starts_with("a assignees"),
+            !last.contains('…') && last.ends_with("space actions · ? help"),
             "whole hints are dropped, none is cut through: {last}"
         );
         assert!(display_width(last) <= 50);
@@ -1083,6 +1149,43 @@ mod tests {
     }
 
     #[test]
+    fn space_actions_and_help_outlast_every_other_hint() {
+        let lead: Vec<String> = vec![];
+        let edit: Vec<String> = ["a assignees", "c comment", "< > move", "J K reorder"]
+            .map(String::from)
+            .to_vec();
+        let general = vec!["/ search · q quit".to_string()];
+        let line = |w| {
+            status_hints(
+                &Hints {
+                    lead: &lead,
+                    edit: &edit,
+                    general: &general,
+                    actions: Some("space actions".into()),
+                },
+                None,
+                w,
+            )
+        };
+        assert_eq!(
+            line(200),
+            "a assignees · c comment · < > move · J K reorder · / search · q quit · space actions · ? help"
+        );
+        // Edit hints go from the end first.
+        assert_eq!(
+            line(88),
+            "a assignees · c comment · < > move · / search · q quit · space actions · ? help"
+        );
+        // General hints go only after every edit hint.
+        assert_eq!(line(45), "/ search · q quit · space actions · ? help");
+        for w in [30, 22] {
+            let l = line(w);
+            assert!(l.ends_with("space actions · ? help"), "{w}: {l}");
+            assert!(display_width(&l) <= w, "{w}: {l}");
+        }
+    }
+
+    #[test]
     fn status_line_never_overflows_and_help_stands_alone_when_there_is_no_room() {
         for width in 6..=10 {
             let line = status_line("e field · move", width);
@@ -1110,6 +1213,7 @@ mod tests {
         marks.unmatched.insert(crate::model::ItemId::new("a"));
         let min = display_width(crate::ui::marks::UNMATCHED_TEXT)
             + display_width(" · ? help")
+            + a.actions_hint().map_or(0, |h| display_width(&h) + 3)
             + MIN_HINT_ROOM;
         for (width, shown) in [(min - 1, false), (min, true)] {
             let screen = render_to_string(width as u16, 3, |f| {

@@ -524,7 +524,7 @@ impl App {
     }
 
     /// Submits an op that needs the item's content node id; refuses (needs a refresh) without.
-    fn submit_people(
+    fn submit_content_op(
         &mut self,
         kind: OpKind,
         item: ItemId,
@@ -570,7 +570,7 @@ impl App {
                 }
                 self.selected_id = Some(item.clone());
                 let target = item.clone();
-                Some(self.submit_people(kind, target, |content| {
+                Some(self.submit_content_op(kind, target, |content| {
                     op(item, content, added, removed, chosen)
                 }))
             }
@@ -877,7 +877,7 @@ impl App {
                     }
                     self.selected_id = Some(item.clone());
                     let target = item.clone();
-                    return self.submit_people(OpKind::Milestone, target, |content| {
+                    return self.submit_content_op(OpKind::Milestone, target, |content| {
                         Op::Milestone {
                             item,
                             content,
@@ -900,7 +900,7 @@ impl App {
                     self.close_popup();
                     // Choosing a reason is the confirmation (Decision 18).
                     let target = item.clone();
-                    return self.submit_people(OpKind::Close, target, |content| Op::Close {
+                    return self.submit_content_op(OpKind::Close, target, |content| Op::Close {
                         item,
                         content,
                         reason: Some(reason),
@@ -1503,6 +1503,7 @@ mod tests {
             [("Open in the browser".to_string(), "o".to_string())]
         );
         assert_eq!(a.edit_hints(), None);
+        assert_eq!(a.actions_hint(), None);
     }
 
     #[test]
@@ -1528,11 +1529,9 @@ mod tests {
         o.insert("edit_field".to_string(), "E".to_string());
         o.insert("action_menu".to_string(), "m".to_string());
         a.keymap = crate::ui::keymap::Keymap::with_overrides(&o).0;
-        let hints = a.edit_hints().unwrap();
-        assert!(
-            hints.contains("E field") && hints.ends_with("m actions"),
-            "{hints}"
-        );
+        let hints = a.edit_hints().unwrap().join(" · ");
+        assert!(hints.contains("E field"), "{hints}");
+        assert_eq!(a.actions_hint().as_deref(), Some("m actions"));
         a.handle_key(key('m'));
         assert!(menu(&a).contains(&("Edit a field".to_string(), "E".to_string())));
         a.handle_key(key('E'));
@@ -1542,21 +1541,19 @@ mod tests {
     #[test]
     fn hints_list_the_keys_the_item_allows() {
         let a = test_app();
-        let hints = a.edit_hints().unwrap();
+        let hints = a.edit_hints().unwrap().join(" · ");
         // Asserted piece by piece: later tasks insert `a assignees`, `c comment`, `X close`, ...
         assert!(hints.contains("< > move · J K reorder"), "{hints}");
         assert!(hints.contains("e field"), "{hints}");
-        assert!(hints.ends_with("space actions"), "{hints}");
+        assert_eq!(a.actions_hint().as_deref(), Some("space actions"));
         let mut a = a;
         let mut snap = a.snapshot().unwrap().clone();
         snap.items.get_mut(&ItemId::new("a")).unwrap().content =
             crate::model::ItemContent::Redacted;
         a.store.apply(crate::store::StoreUpdate::Replace(snap));
-        let hints = a.edit_hints().unwrap();
-        assert!(
-            hints.contains("< > move") && hints.ends_with("space actions"),
-            "{hints}"
-        );
+        let hints = a.edit_hints().unwrap().join(" · ");
+        assert!(hints.contains("< > move"), "{hints}");
+        assert_eq!(a.actions_hint().as_deref(), Some("space actions"));
         assert!(
             !hints.contains("reorder") && !hints.contains("field"),
             "{hints}"
@@ -1573,7 +1570,7 @@ mod tests {
             direction: crate::model::SortDirection::Desc,
         }];
         a.store.apply(crate::store::StoreUpdate::Replace(snap));
-        let hints = a.edit_hints().unwrap();
+        let hints = a.edit_hints().unwrap().join(" · ");
         assert!(
             !hints.contains("reorder") && hints.contains("< > move"),
             "{hints}"
