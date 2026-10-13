@@ -977,7 +977,7 @@ impl App {
                 }
             }
             SyncEvent::OpDone { id, result } => {
-                self.settle(id, result);
+                cmds.extend(self.settle(id, result));
                 cmds.extend(self.refresh_quit_question());
             }
             SyncEvent::Access { scopes } => self.set_scopes(scopes),

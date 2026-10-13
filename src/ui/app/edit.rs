@@ -2,8 +2,8 @@
 //! settles when GitHub answers. Failed edits go to the error log.
 
 use super::*;
-use crate::model::{Denial, EditContext, OpKind, check};
-use crate::ops::{Confirmed, Op, OpId};
+use crate::model::{Denial, EditContext, OpKind, check, check_new};
+use crate::ops::{Confirmed, NewItem, Op, OpId};
 use crate::store::BoardSnapshot;
 use crate::ui::marks::ItemMarks;
 use crate::ui::table::Row;
@@ -43,6 +43,10 @@ pub enum ConfirmAction {
 
 /// The error log's message for an edit dropped unsent because its board was loaded again.
 pub const NOT_SENT_RELOADED: &str = "not sent: the board was reloaded";
+
+/// The same for a new item: it may have been sending, and so may exist on GitHub already.
+pub const MAYBE_SENT_RELOADED: &str =
+    "the board was reloaded while it was sending; check the board before retrying";
 
 /// Failed edits kept in the log; the oldest drop first.
 const MAX_ERRORS: usize = 50;
@@ -269,6 +273,40 @@ impl App {
         self.pending_kinds.insert(id, kind);
         self.restore_selection();
         vec![Command::Send(id)]
+    }
+
+    /// Adds a new item (`Op::Create`): the placeholder shows at once, selected and
+    /// highlighted, and stays in this view until it is created. `needs_repo`: a new issue,
+    /// which needs the repo scope as well as the board.
+    pub(crate) fn submit_new(&mut self, op: Op, needs_repo: bool) -> Vec<Command> {
+        if let Err(denial) = check_new(needs_repo, &self.edit_context()) {
+            self.status.flash = Some(self.denial_text(denial));
+            return Vec::new();
+        }
+        let temp = op.item().clone();
+        let id = self.store.begin(op);
+        // The kind is not consulted: a failed new item is retried through `submit_new`.
+        self.pending_kinds.insert(id, OpKind::SetField);
+        self.stick(&temp);
+        self.selected_id = Some(temp.clone());
+        self.highlight = Some(temp);
+        self.restore_selection();
+        vec![Command::Send(id)]
+    }
+
+    /// A placeholder became a real item: follow it.
+    pub(crate) fn renamed(&mut self, temp: &ItemId, real: &ItemId) {
+        for s in &mut self.sticky {
+            if &s.id == temp {
+                s.id = real.clone();
+            }
+        }
+        if self.selected_id.as_ref() == Some(temp) {
+            self.selected_id = Some(real.clone());
+        }
+        if self.highlight.as_ref() == Some(temp) {
+            self.highlight = Some(real.clone());
+        }
     }
 
     /// Keeps `id` in the current view for this visit, if it is shown there (or new).
@@ -538,30 +576,76 @@ impl App {
     }
 
     /// GitHub answered edit `id`. A failure leaves the pending list (the view rebuilds
-    /// without it), shows GitHub's message and goes to the error log.
-    pub(crate) fn settle(&mut self, id: OpId, result: Result<Confirmed, GithubError>) {
+    /// without it), shows GitHub's message and goes to the error log. A new item replaces
+    /// its placeholder, and a preset GitHub refused is reported.
+    pub(crate) fn settle(
+        &mut self,
+        id: OpId,
+        result: Result<Confirmed, GithubError>,
+    ) -> Vec<Command> {
         let kind = self.pending_kinds.remove(&id);
         match result {
+            Ok(Confirmed::NotAdded { issue, error }) => {
+                // Controller ruling E15: the issue exists. The log keeps its id, and a retry
+                // only adds it.
+                let add = self
+                    .store
+                    .pending()
+                    .iter()
+                    .find(|p| p.id == id)
+                    .and_then(|p| p.op.add_created(&issue));
+                debug_assert!(
+                    add.is_some() || self.store.pending().iter().all(|p| p.id != id),
+                    "only a new issue is created but not added"
+                );
+                let message = format!(
+                    "the issue was created but not added to the project: {}",
+                    error_message(&error)
+                );
+                if self.fail_pending_as(id, kind, message, add) {
+                    self.record_refused_scopes(&error);
+                }
+            }
             Ok(confirmed) => {
-                self.store.settle_ok(id, confirmed);
+                if let Confirmed::Created {
+                    item,
+                    warning: Some(e),
+                    ..
+                } = &confirmed
+                {
+                    self.status.error = Some(format!(
+                        "Added '{}', but a field was not set: {}",
+                        item.title(),
+                        error_message(e)
+                    ));
+                }
+                if let Some((temp, real)) = self.store.settle_ok(id, confirmed) {
+                    self.renamed(&temp, &real);
+                }
             }
             Err(error) => {
-                if !self.fail_pending(id, kind, error_message(&error)) {
-                    return;
+                if self.fail_pending(id, kind, error_message(&error)) {
+                    self.record_refused_scopes(&error);
                 }
-                if let GithubError::InsufficientScopes { missing } = &error {
-                    // GitHub names one of `repo` / `public_repo`, but either satisfies
-                    // the write, and `caps::check` blocks only when all of them are
-                    // refused, so a refused repo scope refuses both.
-                    let mut refused: Vec<&str> = missing.iter().map(String::as_str).collect();
-                    if refused.iter().any(|s| matches!(*s, "repo" | "public_repo")) {
-                        refused.extend(["repo", "public_repo"]);
-                    }
-                    for scope in refused {
-                        if !self.refused_scopes.iter().any(|r| r == scope) {
-                            self.refused_scopes.push(scope.to_string());
-                        }
-                    }
+            }
+        }
+        Vec::new()
+    }
+
+    /// GitHub refused an edit for a missing scope: later edits that need it are blocked with
+    /// the fix instead of failing one by one.
+    fn record_refused_scopes(&mut self, error: &GithubError) {
+        if let GithubError::InsufficientScopes { missing } = error {
+            // GitHub names one of `repo` / `public_repo`, but either satisfies the write,
+            // and `caps::check` blocks only when all of them are refused, so a refused repo
+            // scope refuses both.
+            let mut refused: Vec<&str> = missing.iter().map(String::as_str).collect();
+            if refused.iter().any(|s| matches!(*s, "repo" | "public_repo")) {
+                refused.extend(["repo", "public_repo"]);
+            }
+            for scope in refused {
+                if !self.refused_scopes.iter().any(|r| r == scope) {
+                    self.refused_scopes.push(scope.to_string());
                 }
             }
         }
@@ -570,16 +654,31 @@ impl App {
     /// Takes pending op `id` off the pending list as failed: the status line says so and it
     /// goes to the error log with `message`. `false` when no such op is pending.
     pub(super) fn fail_pending(&mut self, id: OpId, kind: Option<OpKind>, message: String) -> bool {
-        let what = self
-            .store
-            .pending()
-            .iter()
-            .find(|p| p.id == id)
-            .map(|p| p.op.describe(self.snapshot()))
-            .unwrap_or_else(|| "edit".into());
+        self.fail_pending_as(id, kind, message, None)
+    }
+
+    /// `fail_pending`, logging `instead` (what a retry should send) in place of the op.
+    fn fail_pending_as(
+        &mut self,
+        id: OpId,
+        kind: Option<OpKind>,
+        message: String,
+        instead: Option<Op>,
+    ) -> bool {
+        let what = match &instead {
+            Some(op) => op.describe(self.snapshot()),
+            None => self
+                .store
+                .pending()
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.op.describe(self.snapshot()))
+                .unwrap_or_else(|| "edit".into()),
+        };
         let Some(op) = self.store.settle_failed(id) else {
             return false;
         };
+        let op = instead.unwrap_or(op);
         let hint = self
             .keymap
             .keys_for(Action::ErrorLog)
@@ -609,11 +708,23 @@ impl App {
     }
 
     /// Every edit still pending goes to the error log as not sent (its board is being
-    /// replaced, so it never will be).
+    /// replaced, so it never will be). A new item says to check first instead: it may have
+    /// been sending, and its result is dropped with the old board.
     pub(super) fn fail_all_pending(&mut self, message: &str) {
-        let ids: Vec<OpId> = self.store.pending().iter().map(|p| p.id).collect();
-        for id in ids {
+        let ids: Vec<(OpId, bool)> = self
+            .store
+            .pending()
+            .iter()
+            .map(|p| (p.id, matches!(p.op, Op::Create { .. })))
+            .collect();
+        for (id, new_item) in ids {
             let kind = self.pending_kinds.remove(&id);
+            // A retried new item that had in fact been sent would be created twice.
+            let message = if new_item {
+                MAYBE_SENT_RELOADED
+            } else {
+                message
+            };
             self.fail_pending(id, kind, message.to_string());
         }
     }
@@ -671,7 +782,12 @@ impl App {
             return Vec::new();
         };
         let failed = self.errors.remove(index);
-        let cmds = self.submit(failed.kind, failed.op.clone());
+        let cmds = match &failed.op {
+            Op::Create { new, .. } => {
+                self.submit_new(failed.op.clone(), matches!(new, NewItem::Issue { .. }))
+            }
+            _ => self.submit(failed.kind, failed.op.clone()),
+        };
         if cmds.is_empty() {
             self.errors.insert(index, failed);
         }
@@ -2136,5 +2252,249 @@ mod tests {
         use std::time::Duration;
         assert_eq!(ago(Duration::from_secs(47 * 3600)), "47h ago");
         assert_eq!(ago(Duration::from_secs(3 * 86400)), "3d ago");
+    }
+
+    use crate::model::{ContentHit, RepoRef};
+    use crate::ops::NewItem;
+
+    fn new_draft(temp: &str) -> Op {
+        Op::Create {
+            temp: ItemId::new(temp),
+            new: NewItem::Draft {
+                title: "Idea".into(),
+                body: String::new(),
+            },
+            presets: vec![(
+                FieldId::new("F_status"),
+                FieldValue::SingleSelect {
+                    option_id: OptionId::new("o_done"),
+                    name: "Done".into(),
+                },
+            )],
+        }
+    }
+
+    fn new_issue(temp: &str) -> Op {
+        Op::Create {
+            temp: ItemId::new(temp),
+            new: NewItem::Issue {
+                repo: RepoRef {
+                    id: "R_1".into(),
+                    slug: "tviles/t".parse().unwrap(),
+                },
+                title: "New bug".into(),
+                body: "Steps".into(),
+            },
+            presets: vec![],
+        }
+    }
+
+    fn created(a: &App, temp: &str, real: &str) -> crate::model::Item {
+        let mut item = a.snapshot().unwrap().items[&ItemId::new(temp)].clone();
+        item.id = ItemId::new(real);
+        item
+    }
+
+    #[test]
+    fn a_new_item_shows_selected_and_highlighted_then_follows_its_real_id() {
+        let mut a = test_app();
+        assert_eq!(
+            a.submit_new(new_draft("local:1"), false),
+            vec![Command::Send(1)]
+        );
+        let temp = ItemId::new("local:1");
+        assert_eq!(a.selected_item().unwrap().id, temp);
+        assert_eq!(a.highlight, Some(temp.clone()));
+        assert_eq!(status(a.snapshot(), "local:1"), "Done");
+        assert!(a.marks().pending.contains(&temp));
+        let item = created(&a, "local:1", "PVTI_new");
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Ok(Confirmed::Created {
+                temp: temp.clone(),
+                item,
+                warning: None,
+            }),
+        });
+        let real = ItemId::new("PVTI_new");
+        assert_eq!(a.selected_item().unwrap().id, real, "the cursor follows");
+        assert_eq!(a.highlight, Some(real.clone()));
+        assert!(a.is_sticky(&real) && !a.is_sticky(&temp));
+        assert_eq!(a.pending_count(), 0);
+        assert!(a.status.error.is_none() && a.errors.is_empty());
+    }
+
+    #[test]
+    fn a_refused_preset_is_reported_after_the_item_is_created() {
+        let mut a = test_app();
+        a.submit_new(new_draft("local:1"), false);
+        let item = created(&a, "local:1", "PVTI_new");
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Ok(Confirmed::Created {
+                temp: ItemId::new("local:1"),
+                item,
+                warning: Some(GithubError::Network("reset".into())),
+            }),
+        });
+        assert_eq!(
+            a.status.error.as_deref(),
+            Some("Added 'Idea', but a field was not set: network error: reset")
+        );
+        assert!(
+            a.store
+                .confirmed()
+                .unwrap()
+                .items
+                .contains_key(&ItemId::new("PVTI_new"))
+        );
+    }
+
+    #[test]
+    fn a_new_issue_needs_the_repo_scope_and_a_draft_only_the_board() {
+        let mut a = test_app();
+        a.on_sync(SyncEvent::Access {
+            scopes: Some(vec!["project".into()]),
+        });
+        assert!(a.submit_new(new_issue("local:1"), true).is_empty());
+        assert!(a.status.flash.as_deref().unwrap().contains("repo"));
+        assert_eq!(a.pending_count(), 0);
+        assert!(
+            !a.snapshot()
+                .unwrap()
+                .items
+                .contains_key(&ItemId::new("local:1"))
+        );
+        assert_eq!(
+            a.submit_new(new_draft("local:2"), false),
+            vec![Command::Send(1)]
+        );
+    }
+
+    /// Controller ruling E15: the issue exists, so the log says so and `R` only adds it.
+    #[test]
+    fn an_issue_created_but_not_added_is_logged_and_r_only_adds_it() {
+        let mut a = test_app();
+        a.submit_new(new_issue("local:1"), true);
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Ok(Confirmed::NotAdded {
+                issue: "I_new".into(),
+                error: GithubError::Network("reset".into()),
+            }),
+        });
+        assert_eq!(a.pending_count(), 0);
+        assert!(
+            !a.snapshot()
+                .unwrap()
+                .items
+                .contains_key(&ItemId::new("local:1"))
+        );
+        assert_eq!(a.errors.len(), 1);
+        let entry = &a.errors[0];
+        assert_eq!(
+            entry.what,
+            "add the new issue 'New bug' (tviles/t) to the project"
+        );
+        assert_eq!(
+            entry.message,
+            "the issue was created but not added to the project: network error: reset"
+        );
+        assert!(matches!(
+            &entry.op,
+            Op::Create { new: NewItem::Existing { hit: ContentHit { id, .. } }, .. } if id == "I_new"
+        ));
+        assert!(
+            a.status
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("was created but not added")
+        );
+        // Even without the repo scope a new issue would need: adding needs only the board.
+        a.on_sync(SyncEvent::Access {
+            scopes: Some(vec!["project".into()]),
+        });
+        a.handle_key(key('E'));
+        assert_eq!(a.handle_key(key('R')), vec![Command::Send(2)]);
+        assert!(a.errors.is_empty());
+        assert!(matches!(
+            &a.store.pending()[0].op,
+            Op::Create { new: NewItem::Existing { hit }, .. } if hit.id == "I_new"
+        ));
+        assert_eq!(
+            a.snapshot().unwrap().items[&ItemId::new("local:1")].title(),
+            "New bug",
+            "the placeholder is back"
+        );
+    }
+
+    #[test]
+    fn a_failed_new_item_is_retried_as_a_new_item() {
+        let mut a = test_app();
+        a.submit_new(new_draft("local:1"), false);
+        fail(&mut a, 1, "boom");
+        assert_eq!(a.errors[0].what, "add the draft 'Idea'");
+        assert!(
+            !a.snapshot()
+                .unwrap()
+                .items
+                .contains_key(&ItemId::new("local:1"))
+        );
+        a.handle_key(key('E'));
+        assert_eq!(a.handle_key(key('R')), vec![Command::Send(2)]);
+        assert!(
+            a.snapshot()
+                .unwrap()
+                .items
+                .contains_key(&ItemId::new("local:1"))
+        );
+        assert_eq!(a.highlight, Some(ItemId::new("local:1")));
+    }
+
+    /// A new item may already exist on GitHub when the board reloads mid-send; its log entry
+    /// must not invite a blind retry.
+    #[test]
+    fn a_new_item_pending_when_the_board_reloads_says_to_check_first() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
+        a.submit_new(new_draft("local:1"), false);
+        a.reset_for_new_board();
+        let messages: Vec<&str> = a.errors.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(messages, [NOT_SENT_RELOADED, MAYBE_SENT_RELOADED]);
+    }
+
+    #[test]
+    fn item_ops_settle_into_the_confirmed_board() {
+        let mut a = test_app();
+        a.submit(
+            OpKind::Archive,
+            Op::Archive {
+                item: ItemId::new("a"),
+            },
+        );
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Ok(Confirmed::Applied),
+        });
+        assert!(a.store.confirmed().unwrap().items[&ItemId::new("a")].archived);
+        a.submit(
+            OpKind::Remove,
+            Op::Remove {
+                item: ItemId::new("b"),
+            },
+        );
+        assert!(!a.snapshot().unwrap().items.contains_key(&ItemId::new("b")));
+        a.on_sync(SyncEvent::OpDone {
+            id: 2,
+            result: Ok(Confirmed::Applied),
+        });
+        assert!(
+            !a.store
+                .confirmed()
+                .unwrap()
+                .items
+                .contains_key(&ItemId::new("b"))
+        );
     }
 }

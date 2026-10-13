@@ -255,8 +255,9 @@ impl Item {
         }
     }
 
+    /// The issue or pull request number; `None` for a new item GitHub has not numbered yet.
     pub fn number(&self) -> Option<u32> {
-        self.reference().map(|r| r.number)
+        self.reference().map(|r| r.number).filter(|n| *n > 0)
     }
 
     pub fn url(&self) -> Option<&str> {
@@ -465,5 +466,13 @@ pub(crate) mod tests {
         );
         assert_eq!(item.assignees(), ["tviles"]);
         assert_eq!(item.label_names(), ["bug"]);
+    }
+
+    #[test]
+    fn number_zero_is_no_number() {
+        let mut item = issue("I", 0, "x");
+        assert_eq!(item.number(), None);
+        item = issue("I", 5, "x");
+        assert_eq!(item.number(), Some(5));
     }
 }

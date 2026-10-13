@@ -1,11 +1,52 @@
 //! Carries an op to GitHub: which mutation, with which ids, and what came back.
 
 use crate::github::{Github, GithubError};
-use crate::model::{ContentId, ProjectId};
-use crate::ops::{Confirmed, Op};
+use crate::model::{ContentId, FieldId, FieldValue, ItemId, ProjectId};
+use crate::ops::{Confirmed, NewItem, Op};
 
 fn ids<T>(list: &[T], id: impl Fn(&T) -> &str) -> Vec<String> {
     list.iter().map(|x| id(x).to_string()).collect()
+}
+
+/// Creates the item, then sets each preset on it. A preset GitHub refuses is reported as a
+/// warning: the item exists, and the user sees what is missing.
+///
+/// A new issue takes two calls. Once `createIssue` has succeeded, no failure may come back
+/// as an error: the queue sends a rate-limited op again, which would create a second issue.
+/// A failed add is `Confirmed::NotAdded` with the issue's id, so a retry only adds it.
+async fn create(
+    gh: &Github,
+    project: &ProjectId,
+    temp: &ItemId,
+    new: &NewItem,
+    presets: &[(FieldId, FieldValue)],
+) -> Result<Confirmed, GithubError> {
+    let mut item = match new {
+        NewItem::Draft { title, body } => gh.add_draft_issue(project, title, body).await?,
+        NewItem::Issue { repo, title, body } => {
+            let issue = gh.create_issue(&repo.id, title, body).await?;
+            match gh.add_item_by_id(project, &issue).await {
+                Ok(item) => item,
+                Err(error) => return Ok(Confirmed::NotAdded { issue, error }),
+            }
+        }
+        NewItem::Existing { hit } => gh.add_item_by_id(project, &hit.id).await?,
+    };
+    let mut warning = None;
+    for (field, value) in presets {
+        match gh.set_field_value(project, &item.id, field, value).await {
+            Ok(updated) => item = updated,
+            Err(e) => {
+                warning = Some(e);
+                break;
+            }
+        }
+    }
+    Ok(Confirmed::Created {
+        temp: temp.clone(),
+        item,
+        warning,
+    })
 }
 
 /// Sends `op` and reports what GitHub confirmed. Ops on the same item must not overlap; the
@@ -84,6 +125,20 @@ pub async fn send(gh: &Github, project: &ProjectId, op: &Op) -> Result<Confirmed
             .await
             .map(|()| Confirmed::Applied),
         Op::Reopen { content, .. } => gh.reopen(content).await.map(|()| Confirmed::Applied),
+        Op::Convert { item, repo } => gh.convert_draft(item, &repo.id).await.map(Confirmed::Item),
+        Op::Archive { item } => gh
+            .archive_item(project, item)
+            .await
+            .map(|()| Confirmed::Applied),
+        Op::Unarchive { item } => gh
+            .unarchive_item(project, item)
+            .await
+            .map(|()| Confirmed::Applied),
+        Op::Remove { item } => gh
+            .delete_item(project, item)
+            .await
+            .map(|()| Confirmed::Applied),
+        Op::Create { temp, new, presets } => create(gh, project, temp, new, presets).await,
     }
 }
 
@@ -352,5 +407,237 @@ mod tests {
                 "ClosePullRequest"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn create_makes_the_item_then_sets_presets_and_reports_a_failed_one() {
+        use crate::model::RepoRef;
+        let t = Arc::new(FixtureTransport::new());
+        t.push(
+            "CreateIssue",
+            json!({"createIssue": {"issue": {"id": "I_new"}}}),
+        );
+        t.push(
+            "AddItemById",
+            json!({"addProjectV2ItemById": {"item": item_json()}}),
+        );
+        t.push(
+            "SetSingleSelectValue",
+            json!({"updateProjectV2ItemFieldValue": {"projectV2Item": item_json()}}),
+        );
+        t.push_error("SetTextValue", GithubError::Network("reset".into()));
+        let gh = Github::new(t.clone());
+        let op = Op::Create {
+            temp: ItemId::new("local:1"),
+            new: crate::ops::NewItem::Issue {
+                repo: RepoRef {
+                    id: "R_1".into(),
+                    slug: "acme/app".parse().unwrap(),
+                },
+                title: "T".into(),
+                body: "B".into(),
+            },
+            presets: vec![
+                (
+                    FieldId::new("F_status"),
+                    FieldValue::SingleSelect {
+                        option_id: crate::model::OptionId::new("o"),
+                        name: "Todo".into(),
+                    },
+                ),
+                (FieldId::new("F_notes"), FieldValue::Text("x".into())),
+            ],
+        };
+        match send(&gh, &ProjectId::new("P"), &op).await {
+            Ok(Confirmed::Created {
+                temp,
+                item,
+                warning,
+            }) => {
+                assert_eq!((temp.as_str(), item.id.as_str()), ("local:1", "PVTI_1"));
+                assert!(matches!(warning, Some(GithubError::Network(_))));
+            }
+            other => panic!("expected Created, got {other:?}"),
+        }
+        let names: Vec<String> = t
+            .requests()
+            .iter()
+            .map(|r| r.operation_name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "CreateIssue",
+                "AddItemById",
+                "SetSingleSelectValue",
+                "SetTextValue"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn drafts_existing_items_conversion_archive_and_removal_send_theirs() {
+        use crate::model::{ContentHit, RepoRef};
+        let t = Arc::new(FixtureTransport::new());
+        t.push(
+            "AddDraftIssue",
+            json!({"addProjectV2DraftIssue": {"projectItem": item_json()}}),
+        );
+        t.push(
+            "AddItemById",
+            json!({"addProjectV2ItemById": {"item": item_json()}}),
+        );
+        t.push(
+            "ConvertDraft",
+            json!({"convertProjectV2DraftIssueItemToIssue": {"item": item_json()}}),
+        );
+        t.push(
+            "ArchiveItem",
+            json!({"archiveProjectV2Item": {"item": {"id": "PVTI_1"}}}),
+        );
+        t.push(
+            "DeleteItem",
+            json!({"deleteProjectV2Item": {"deletedItemId": "PVTI_1"}}),
+        );
+        let gh = Github::new(t.clone());
+        let p = ProjectId::new("P");
+        let item = ItemId::new("PVTI_1");
+        let hit = ContentHit {
+            id: "I_9".into(),
+            pull: false,
+            repo: "acme/app".into(),
+            number: 9,
+            title: "x".into(),
+            open: true,
+        };
+        let draft = Op::Create {
+            temp: ItemId::new("local:1"),
+            new: crate::ops::NewItem::Draft {
+                title: "Idea".into(),
+                body: String::new(),
+            },
+            presets: vec![],
+        };
+        assert!(matches!(
+            send(&gh, &p, &draft).await,
+            Ok(Confirmed::Created { warning: None, .. })
+        ));
+        let existing = Op::Create {
+            temp: ItemId::new("local:2"),
+            new: crate::ops::NewItem::Existing { hit },
+            presets: vec![],
+        };
+        assert!(matches!(
+            send(&gh, &p, &existing).await,
+            Ok(Confirmed::Created { .. })
+        ));
+        let convert = Op::Convert {
+            item: item.clone(),
+            repo: RepoRef {
+                id: "R_1".into(),
+                slug: "acme/app".parse().unwrap(),
+            },
+        };
+        assert!(matches!(
+            send(&gh, &p, &convert).await,
+            Ok(Confirmed::Item(_))
+        ));
+        assert_eq!(
+            send(&gh, &p, &Op::Archive { item: item.clone() }).await,
+            Ok(Confirmed::Applied)
+        );
+        assert_eq!(
+            send(&gh, &p, &Op::Remove { item }).await,
+            Ok(Confirmed::Applied)
+        );
+    }
+
+    #[tokio::test]
+    async fn unarchive_sends_its_mutation() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push(
+            "UnarchiveItem",
+            json!({"unarchiveProjectV2Item": {"item": {"id": "PVTI_1"}}}),
+        );
+        let gh = Github::new(t.clone());
+        let op = Op::Unarchive {
+            item: ItemId::new("PVTI_1"),
+        };
+        assert_eq!(
+            send(&gh, &ProjectId::new("P"), &op).await,
+            Ok(Confirmed::Applied)
+        );
+    }
+
+    fn new_issue_op() -> Op {
+        Op::Create {
+            temp: ItemId::new("local:1"),
+            new: crate::ops::NewItem::Issue {
+                repo: crate::model::RepoRef {
+                    id: "R_1".into(),
+                    slug: "acme/app".parse().unwrap(),
+                },
+                title: "T".into(),
+                body: String::new(),
+            },
+            presets: vec![(FieldId::new("F_notes"), FieldValue::Text("x".into()))],
+        }
+    }
+
+    /// Controller ruling E15: once the issue exists, no failure after it may look like one
+    /// the queue retries (a rate limit is retried), or the issue would be created twice.
+    #[tokio::test]
+    async fn an_issue_created_but_not_added_is_reported_with_its_id_whatever_the_error() {
+        for error in [
+            GithubError::Network("reset".into()),
+            GithubError::RateLimited {
+                retry_after_secs: 30,
+            },
+        ] {
+            let t = Arc::new(FixtureTransport::new());
+            t.push(
+                "CreateIssue",
+                json!({"createIssue": {"issue": {"id": "I_new"}}}),
+            );
+            t.push_error("AddItemById", error.clone());
+            let gh = Github::new(t.clone());
+            assert_eq!(
+                send(&gh, &ProjectId::new("P"), &new_issue_op()).await,
+                Ok(Confirmed::NotAdded {
+                    issue: "I_new".into(),
+                    error
+                })
+            );
+            let names: Vec<String> = t
+                .requests()
+                .iter()
+                .map(|r| r.operation_name.clone())
+                .collect();
+            assert_eq!(names, ["CreateIssue", "AddItemById"], "no presets sent");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_create_or_add_is_an_error_with_nothing_created() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push_error("CreateIssue", GithubError::Network("reset".into()));
+        let gh = Github::new(t.clone());
+        assert_eq!(
+            send(&gh, &ProjectId::new("P"), &new_issue_op()).await,
+            Err(GithubError::Network("reset".into()))
+        );
+        let t = Arc::new(FixtureTransport::new());
+        t.push_error("AddDraftIssue", GithubError::Network("reset".into()));
+        let gh = Github::new(t.clone());
+        let draft = Op::Create {
+            temp: ItemId::new("local:1"),
+            new: crate::ops::NewItem::Draft {
+                title: "Idea".into(),
+                body: String::new(),
+            },
+            presets: vec![(FieldId::new("F_notes"), FieldValue::Text("x".into()))],
+        };
+        assert!(send(&gh, &ProjectId::new("P"), &draft).await.is_err());
+        assert_eq!(t.requests().len(), 1, "no presets for an item never made");
     }
 }

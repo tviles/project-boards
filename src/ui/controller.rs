@@ -1950,4 +1950,77 @@ mod tests {
             "the new board writes at once"
         );
     }
+
+    fn mutate_op(effects: &[Effect]) -> Option<&Op> {
+        effects.iter().find_map(|e| match e {
+            Effect::Spawn {
+                job: SyncJob::Mutate { op, .. },
+                ..
+            } => Some(op),
+            _ => None,
+        })
+    }
+
+    /// A new item is queued under its placeholder. Controller ruling E15: an issue GitHub
+    /// created but did not add is never sent again by the queue, even when the add was rate
+    /// limited; `R` sends only the add. Once created, edits to the real item go out at once.
+    #[test]
+    fn a_new_issue_is_created_once_and_its_real_item_takes_edits() {
+        use crate::ops::NewItem;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        let temp = ItemId::new("local:1");
+        let create = Op::Create {
+            temp: temp.clone(),
+            new: NewItem::Issue {
+                repo: crate::model::RepoRef {
+                    id: "R_1".into(),
+                    slug: "tviles/t".parse().unwrap(),
+                },
+                title: "New bug".into(),
+                body: String::new(),
+            },
+            presets: vec![],
+        };
+        let cmds = c.app.submit_new(create, true);
+        let effects = c.commands(cmds, t0);
+        assert_eq!(mutates(&effects), [1]);
+        let not_added = Confirmed::NotAdded {
+            issue: "I_new".into(),
+            error: GithubError::RateLimited {
+                retry_after_secs: 30,
+            },
+        };
+        assert!(mutates(&done(&mut c, 1, Ok(not_added), t0)).is_empty());
+        assert_eq!(c.app.status.write_pause, None, "not a rate-limit pause");
+        assert!(
+            mutates(&c.handle(Input::Tick, t0 + Duration::from_secs(60))).is_empty(),
+            "never sent again by itself"
+        );
+        assert_eq!(c.app.errors.len(), 1);
+        c.handle(Input::Key(key('E')), t0);
+        let effects = c.handle(Input::Key(key('R')), t0);
+        assert_eq!(mutates(&effects), [2]);
+        assert!(matches!(
+            mutate_op(&effects),
+            Some(Op::Create { new: NewItem::Existing { hit }, .. }) if hit.id == "I_new"
+        ));
+        let mut item = c.app.snapshot().unwrap().items[&temp].clone();
+        item.id = ItemId::new("PVTI_new");
+        done(
+            &mut c,
+            2,
+            Ok(Confirmed::Created {
+                temp,
+                item,
+                warning: None,
+            }),
+            t0,
+        );
+        assert_eq!(c.app.selected_item().unwrap().id.as_str(), "PVTI_new");
+        assert_eq!(
+            mutates(&submit(&mut c, set_status("PVTI_new", "o_done"), t0)),
+            [3]
+        );
+    }
 }

@@ -6,13 +6,32 @@ pub mod queue;
 pub mod send;
 
 use crate::model::{
-    CloseReason, ContentId, ContentState, FieldId, FieldKind, FieldValue, Item, ItemContent,
-    ItemId, Label, LabelRef, MilestoneRef, StateReason, UserRef,
+    CloseReason, ContentFields, ContentHit, ContentId, ContentRef, ContentState, FieldId,
+    FieldKind, FieldValue, Item, ItemContent, ItemId, Label, LabelRef, MilestoneRef, RepoRef,
+    StateReason, UserRef,
 };
 use crate::store::BoardSnapshot;
 use std::collections::HashMap;
 
 pub type OpId = u64;
+
+/// What a new item is made from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NewItem {
+    Draft {
+        title: String,
+        body: String,
+    },
+    Issue {
+        repo: RepoRef,
+        title: String,
+        body: String,
+    },
+    /// An existing issue or pull request, found by search or URL.
+    Existing {
+        hit: ContentHit,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
@@ -77,6 +96,27 @@ pub enum Op {
         item: ItemId,
         content: ContentId,
     },
+    Convert {
+        item: ItemId,
+        repo: RepoRef,
+    },
+    Archive {
+        item: ItemId,
+    },
+    Unarchive {
+        item: ItemId,
+    },
+    /// Removes the item from the project (a draft is deleted with it).
+    Remove {
+        item: ItemId,
+    },
+    /// A new item, shown at once as the placeholder `temp`; `presets` are the column and
+    /// swimlane values it was created in.
+    Create {
+        temp: ItemId,
+        new: NewItem,
+        presets: Vec<(FieldId, FieldValue)>,
+    },
 }
 
 /// What GitHub answered when an op succeeded.
@@ -88,6 +128,20 @@ pub enum Confirmed {
     Applied,
     /// Applied; this is the item as GitHub now has it.
     Item(Item),
+    /// A new item: the placeholder `temp` became `item`. `warning`: a preset value GitHub
+    /// refused (the item exists without it).
+    Created {
+        temp: ItemId,
+        item: Item,
+        warning: Option<crate::github::GithubError>,
+    },
+    /// Not a success: GitHub created the new issue `issue` (its node id) but did not add it
+    /// to the project. The App logs it as a failure whose retry adds that issue
+    /// (`Op::add_created`) and never creates another.
+    NotAdded {
+        issue: String,
+        error: crate::github::GithubError,
+    },
 }
 
 /// At most 40 characters of a title, for messages.
@@ -167,6 +221,58 @@ fn set_state(content: &mut ItemContent, to: ContentState) {
     }
 }
 
+/// What a new item looks like until GitHub has created it.
+fn placeholder(temp: &ItemId, new: &NewItem, presets: &[(FieldId, FieldValue)]) -> Item {
+    let content = match new {
+        NewItem::Draft { title, .. } => ItemContent::Draft {
+            title: title.clone(),
+        },
+        NewItem::Issue { repo, title, .. } => ItemContent::Issue {
+            reference: ContentRef {
+                repo: repo.slug.to_string(),
+                number: 0,
+                url: String::new(),
+            },
+            title: title.clone(),
+            state: ContentState::Open,
+        },
+        NewItem::Existing { hit } => {
+            let reference = ContentRef {
+                repo: hit.repo.clone(),
+                number: hit.number,
+                url: String::new(),
+            };
+            let state = if hit.open {
+                ContentState::Open
+            } else {
+                ContentState::Closed
+            };
+            if hit.pull {
+                ItemContent::PullRequest {
+                    reference,
+                    title: hit.title.clone(),
+                    state,
+                    is_draft: false,
+                }
+            } else {
+                ItemContent::Issue {
+                    reference,
+                    title: hit.title.clone(),
+                    state,
+                }
+            }
+        }
+    };
+    Item {
+        id: temp.clone(),
+        content,
+        archived: false,
+        updated_at: String::new(),
+        values: presets.iter().cloned().collect(),
+        content_fields: ContentFields::default(),
+    }
+}
+
 fn reorder(snap: &mut BoardSnapshot, item: &ItemId, after: Option<&ItemId>) {
     if !snap.items.contains_key(item) || !move_after(&mut snap.order, item, after) {
         return;
@@ -195,8 +301,42 @@ impl Op {
             | Op::Body { item, .. }
             | Op::Comment { item, .. }
             | Op::Close { item, .. }
-            | Op::Reopen { item, .. } => item,
+            | Op::Reopen { item, .. }
+            | Op::Convert { item, .. }
+            | Op::Archive { item }
+            | Op::Unarchive { item }
+            | Op::Remove { item } => item,
+            Op::Create { temp, .. } => temp,
         }
+    }
+
+    /// For a new-issue `Create` whose issue GitHub already made (`issue`, its node id): the
+    /// op that only adds that issue to the project, with the same placeholder and presets,
+    /// so a retry never creates a second issue. `None` for any other op.
+    pub fn add_created(&self, issue: &str) -> Option<Op> {
+        let Op::Create {
+            temp,
+            new: NewItem::Issue { repo, title, .. },
+            presets,
+        } = self
+        else {
+            return None;
+        };
+        Some(Op::Create {
+            temp: temp.clone(),
+            new: NewItem::Existing {
+                hit: ContentHit {
+                    id: issue.to_string(),
+                    pull: false,
+                    repo: repo.slug.to_string(),
+                    // Not known: `createIssue` returns only the id. Shown as no number.
+                    number: 0,
+                    title: title.clone(),
+                    open: true,
+                },
+            },
+            presets: presets.clone(),
+        })
     }
 
     /// The op's name for logs, which never carry titles or values.
@@ -213,6 +353,11 @@ impl Op {
             Op::Reopen { .. } => "Reopen",
             Op::ClearField { .. } => "ClearField",
             Op::Reorder { .. } => "Reorder",
+            Op::Convert { .. } => "Convert",
+            Op::Archive { .. } => "Archive",
+            Op::Unarchive { .. } => "Unarchive",
+            Op::Remove { .. } => "Remove",
+            Op::Create { .. } => "Create",
         }
     }
 
@@ -344,6 +489,25 @@ impl Op {
                     };
                 }
             }
+            // The issue is GitHub's answer; until then the draft stays a draft.
+            Op::Convert { .. } => {}
+            Op::Archive { item } | Op::Unarchive { item } => {
+                if let Some(i) = snap.items.get_mut(item) {
+                    i.archived = matches!(self, Op::Archive { .. });
+                }
+            }
+            Op::Remove { item } => {
+                snap.items.remove(item);
+                snap.order.retain(|i| i != item);
+                for list in snap.views.values_mut() {
+                    list.ids.retain(|i| i != item);
+                }
+            }
+            Op::Create { temp, new, presets } => {
+                if !snap.items.contains_key(temp) {
+                    snap.upsert_items(vec![placeholder(temp, new, presets)]);
+                }
+            }
         }
     }
 
@@ -381,6 +545,25 @@ impl Op {
             Op::Comment { .. } => format!("comment on '{title}'"),
             Op::Close { .. } => format!("close '{title}'"),
             Op::Reopen { .. } => format!("reopen '{title}'"),
+            Op::Convert { repo, .. } => {
+                format!("convert '{title}' to an issue in {}", repo.slug)
+            }
+            Op::Archive { .. } => format!("archive '{title}'"),
+            Op::Unarchive { .. } => format!("unarchive '{title}'"),
+            Op::Remove { .. } => format!("remove '{title}' from the project"),
+            Op::Create { new, .. } => match new {
+                NewItem::Draft { title, .. } => format!("add the draft '{}'", short(title)),
+                NewItem::Issue { repo, title, .. } => {
+                    format!("create '{}' in {}", short(title), repo.slug)
+                }
+                // An issue this app created whose add failed (`add_created`).
+                NewItem::Existing { hit } if hit.number == 0 => format!(
+                    "add the new issue '{}' ({}) to the project",
+                    short(&hit.title),
+                    hit.repo
+                ),
+                NewItem::Existing { hit } => format!("add {}#{}", hit.repo, hit.number),
+            },
         }
     }
 }
@@ -986,6 +1169,189 @@ mod tests {
                 .values
                 .values()
                 .any(|v| matches!(v, FieldValue::Milestone(_)))
+        );
+    }
+
+    use crate::model::{ContentHit, RepoRef};
+
+    fn new_issue() -> NewItem {
+        NewItem::Issue {
+            repo: RepoRef {
+                id: "R_1".into(),
+                slug: "tviles/t".parse().unwrap(),
+            },
+            title: "New bug".into(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn create_adds_a_placeholder_with_its_presets_at_the_end() {
+        let mut s = snapshot();
+        let op = Op::Create {
+            temp: ItemId::new("local:1"),
+            new: new_issue(),
+            presets: vec![(FieldId::new("F_status"), done())],
+        };
+        op.apply(&mut s);
+        op.apply(&mut s);
+        assert_eq!(s.order.last().map(|i| i.as_str()), Some("local:1"));
+        assert_eq!(s.order.len(), 6);
+        let p = &s.items[&ItemId::new("local:1")];
+        assert_eq!((p.title(), p.number()), ("New bug", None));
+        assert_eq!(status(&s, "local:1").as_deref(), Some("Done"));
+        let hit = ContentHit {
+            id: "I_9".into(),
+            pull: true,
+            repo: "acme/app".into(),
+            number: 9,
+            title: "Fix".into(),
+            open: true,
+        };
+        Op::Create {
+            temp: ItemId::new("local:2"),
+            new: NewItem::Existing { hit },
+            presets: vec![],
+        }
+        .apply(&mut s);
+        assert_eq!(s.items[&ItemId::new("local:2")].number(), Some(9));
+    }
+
+    #[test]
+    fn archive_unarchive_and_remove_apply() {
+        let mut s = snapshot();
+        s.set_view_ids(
+            ViewId::new("V"),
+            ViewList {
+                ids: vec![ItemId::new("a"), ItemId::new("b")],
+                total: 2,
+                truncated: false,
+            },
+        );
+        Op::Archive {
+            item: ItemId::new("a"),
+        }
+        .apply(&mut s);
+        assert!(s.items[&ItemId::new("a")].archived);
+        Op::Unarchive {
+            item: ItemId::new("a"),
+        }
+        .apply(&mut s);
+        assert!(!s.items[&ItemId::new("a")].archived);
+        Op::Remove {
+            item: ItemId::new("a"),
+        }
+        .apply(&mut s);
+        assert!(!s.items.contains_key(&ItemId::new("a")));
+        assert!(!s.order.contains(&ItemId::new("a")));
+        assert_eq!(ids(&s.views[&ViewId::new("V")].ids), ["b"]);
+    }
+
+    #[test]
+    fn item_ops_name_and_describe_themselves() {
+        let s = snapshot();
+        let a = || ItemId::new("a");
+        let repo = RepoRef {
+            id: "R_1".into(),
+            slug: "acme/app".parse().unwrap(),
+        };
+        let hit = ContentHit {
+            id: "I_9".into(),
+            pull: false,
+            repo: "acme/app".into(),
+            number: 9,
+            title: "Fix".into(),
+            open: true,
+        };
+        let create = |temp: &str, new: NewItem| Op::Create {
+            temp: ItemId::new(temp),
+            new,
+            presets: vec![],
+        };
+        let cases = [
+            (
+                Op::Convert { item: a(), repo },
+                "Convert",
+                "convert 'Fix crash' to an issue in acme/app",
+            ),
+            (Op::Archive { item: a() }, "Archive", "archive 'Fix crash'"),
+            (
+                Op::Unarchive { item: a() },
+                "Unarchive",
+                "unarchive 'Fix crash'",
+            ),
+            (
+                Op::Remove { item: a() },
+                "Remove",
+                "remove 'Fix crash' from the project",
+            ),
+            (
+                create(
+                    "local:1",
+                    NewItem::Draft {
+                        title: "Idea".into(),
+                        body: String::new(),
+                    },
+                ),
+                "Create",
+                "add the draft 'Idea'",
+            ),
+            (
+                create("local:2", new_issue()),
+                "Create",
+                "create 'New bug' in tviles/t",
+            ),
+            (
+                create("local:3", NewItem::Existing { hit }),
+                "Create",
+                "add acme/app#9",
+            ),
+        ];
+        for (op, name, text) in cases {
+            assert_eq!((op.name(), op.describe(Some(&s)).as_str()), (name, text));
+        }
+        assert_eq!(create("local:4", new_issue()).item().as_str(), "local:4");
+    }
+
+    /// Controller ruling E15: a retry after "created but not added" only adds.
+    #[test]
+    fn a_created_issue_is_added_again_without_creating_another() {
+        let presets = vec![(FieldId::new("F_status"), done())];
+        let op = Op::Create {
+            temp: ItemId::new("local:1"),
+            new: new_issue(),
+            presets: presets.clone(),
+        };
+        let add = op.add_created("I_new").expect("a new issue");
+        let Op::Create {
+            temp,
+            new: NewItem::Existing { hit },
+            presets: kept,
+        } = &add
+        else {
+            panic!("expected an add of the existing issue, got {add:?}")
+        };
+        assert_eq!(temp.as_str(), "local:1");
+        assert_eq!(kept, &presets);
+        assert_eq!(
+            (hit.id.as_str(), hit.repo.as_str(), hit.title.as_str()),
+            ("I_new", "tviles/t", "New bug")
+        );
+        assert!(!hit.pull && hit.open);
+        assert_eq!(
+            add.describe(None),
+            "add the new issue 'New bug' (tviles/t) to the project"
+        );
+        let mut s = snapshot();
+        add.apply(&mut s);
+        assert_eq!(s.items[&ItemId::new("local:1")].number(), None, "no #0");
+        assert_eq!(add.add_created("I_x"), None, "an add is not a new issue");
+        assert_eq!(
+            Op::Archive {
+                item: ItemId::new("a")
+            }
+            .add_created("I_x"),
+            None
         );
     }
 }
