@@ -537,7 +537,7 @@ mod tests {
             Confirmed::Created {
                 temp: temp.clone(),
                 item: created.clone(),
-                warning: None,
+                refused: vec![],
             },
         );
         assert_eq!(renamed, Some((temp.clone(), ItemId::new("PVTI_new"))));
@@ -588,7 +588,7 @@ mod tests {
             Confirmed::Created {
                 temp,
                 item: created.clone(),
-                warning: None,
+                refused: vec![],
             },
         );
         let archive = s.begin(Op::Archive {

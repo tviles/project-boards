@@ -128,12 +128,12 @@ pub enum Confirmed {
     Applied,
     /// Applied; this is the item as GitHub now has it.
     Item(Item),
-    /// A new item: the placeholder `temp` became `item`. `warning`: a preset value GitHub
-    /// refused (the item exists without it).
+    /// A new item: the placeholder `temp` became `item`. `refused`: the presets GitHub
+    /// would not set, each with its error (the item exists without them).
     Created {
         temp: ItemId,
         item: Item,
-        warning: Option<crate::github::GithubError>,
+        refused: Vec<(FieldId, crate::github::GithubError)>,
     },
     /// Not a success: GitHub created the new issue `issue` (its node id) but did not add it
     /// to the project. The App logs it as a failure whose retry adds that issue

@@ -27,6 +27,9 @@ pub struct FailedEdit {
     /// GitHub's own message.
     pub message: String,
     pub at: Instant,
+    /// A new item that may exist on GitHub after all (the answer was lost): `R` refuses,
+    /// because a retry could create it twice.
+    pub may_exist: bool,
 }
 
 /// A yes/no question on the status line (`Mode::Confirm`).
@@ -44,9 +47,27 @@ pub enum ConfirmAction {
 /// The error log's message for an edit dropped unsent because its board was loaded again.
 pub const NOT_SENT_RELOADED: &str = "not sent: the board was reloaded";
 
-/// The same for a new item: it may have been sending, and so may exist on GitHub already.
+/// The same for a new draft or issue: it may have been sending, and so may exist on GitHub
+/// already.
 pub const MAYBE_SENT_RELOADED: &str =
     "the board was reloaded while it was sending; check the board before retrying";
+
+/// A new draft or issue whose answer was lost (a network or decode error): it may exist.
+/// `R` refuses such an entry with this text; the user checks GitHub and adds it again
+/// deliberately if it is not there.
+pub const MAYBE_CREATED: &str = "may have been created; check GitHub before retrying";
+
+/// A `Create` whose retry could make a second item: a draft or a new issue. Adding an
+/// existing issue twice returns the same item, so that one is safe to retry.
+fn creates_content(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::Create {
+            new: NewItem::Draft { .. } | NewItem::Issue { .. },
+            ..
+        }
+    )
+}
 
 /// Failed edits kept in the log; the oldest drop first.
 const MAX_ERRORS: usize = 50;
@@ -285,8 +306,7 @@ impl App {
         }
         let temp = op.item().clone();
         let id = self.store.begin(op);
-        // The kind is not consulted: a failed new item is retried through `submit_new`.
-        self.pending_kinds.insert(id, OpKind::SetField);
+        self.pending_kinds.insert(id, OpKind::Create);
         self.stick(&temp);
         self.selected_id = Some(temp.clone());
         self.highlight = Some(temp);
@@ -294,8 +314,12 @@ impl App {
         vec![Command::Send(id)]
     }
 
-    /// A placeholder became a real item: follow it.
+    /// A placeholder became a real item: follow it, in the detail too (the caller loads the
+    /// real item's detail).
     pub(crate) fn renamed(&mut self, temp: &ItemId, real: &ItemId) {
+        if let Some(d) = self.detail.as_mut().filter(|d| &d.item == temp) {
+            d.item = real.clone();
+        }
         for s in &mut self.sticky {
             if &s.id == temp {
                 s.id = real.clone();
@@ -577,59 +601,98 @@ impl App {
 
     /// GitHub answered edit `id`. A failure leaves the pending list (the view rebuilds
     /// without it), shows GitHub's message and goes to the error log. A new item replaces
-    /// its placeholder, and a preset GitHub refused is reported.
+    /// its placeholder (an open detail of it loads the real item), and presets GitHub
+    /// refused are named.
     pub(crate) fn settle(
         &mut self,
         id: OpId,
         result: Result<Confirmed, GithubError>,
     ) -> Vec<Command> {
         let kind = self.pending_kinds.remove(&id);
+        let pending = self
+            .store
+            .pending()
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.op.clone());
         match result {
             Ok(Confirmed::NotAdded { issue, error }) => {
                 // Controller ruling E15: the issue exists. The log keeps its id, and a retry
                 // only adds it.
-                let add = self
-                    .store
-                    .pending()
-                    .iter()
-                    .find(|p| p.id == id)
-                    .and_then(|p| p.op.add_created(&issue));
+                let add = pending.as_ref().and_then(|op| op.add_created(&issue));
                 debug_assert!(
-                    add.is_some() || self.store.pending().iter().all(|p| p.id != id),
+                    add.is_some() || pending.is_none(),
                     "only a new issue is created but not added"
                 );
                 let message = format!(
                     "the issue was created but not added to the project: {}",
                     error_message(&error)
                 );
-                if self.fail_pending_as(id, kind, message, add) {
+                if self.fail_pending(id, kind, message, add, false) {
                     self.record_refused_scopes(&error);
                 }
+                Vec::new()
             }
             Ok(confirmed) => {
-                if let Confirmed::Created {
-                    item,
-                    warning: Some(e),
-                    ..
-                } = &confirmed
+                if let Confirmed::Created { item, refused, .. } = &confirmed
+                    && !refused.is_empty()
                 {
-                    self.status.error = Some(format!(
-                        "Added '{}', but a field was not set: {}",
-                        item.title(),
-                        error_message(e)
-                    ));
+                    self.status.error = Some(self.refused_presets(item, refused));
+                    for (_, e) in refused {
+                        self.record_refused_scopes(e);
+                    }
                 }
-                if let Some((temp, real)) = self.store.settle_ok(id, confirmed) {
-                    self.renamed(&temp, &real);
+                let Some((temp, real)) = self.store.settle_ok(id, confirmed) else {
+                    return Vec::new();
+                };
+                self.renamed(&temp, &real);
+                if self.detail.as_ref().is_some_and(|d| d.item == real) {
+                    vec![Command::LoadDetail {
+                        item: real,
+                        before: None,
+                    }]
+                } else {
+                    Vec::new()
                 }
             }
             Err(error) => {
-                if self.fail_pending(id, kind, error_message(&error)) {
+                // The answer was lost, not refused: the draft or issue may exist.
+                let may_exist = pending.as_ref().is_some_and(creates_content)
+                    && matches!(error, GithubError::Network(_) | GithubError::Decode(_));
+                let message = if may_exist {
+                    format!("{MAYBE_CREATED} ({})", error_message(&error))
+                } else {
+                    error_message(&error)
+                };
+                if self.fail_pending(id, kind, message, None, may_exist) {
                     self.record_refused_scopes(&error);
                 }
+                Vec::new()
             }
         }
-        Vec::new()
+    }
+
+    /// "Added 'T', but a field was not set: Status (reason)", naming every refused preset.
+    fn refused_presets(&self, item: &Item, refused: &[(FieldId, GithubError)]) -> String {
+        let named: Vec<String> = refused
+            .iter()
+            .map(|(field, e)| {
+                let name = self
+                    .project()
+                    .and_then(|p| p.field(field))
+                    .map_or_else(|| field.to_string(), |f| f.name.clone());
+                format!("{name} ({})", error_message(e))
+            })
+            .collect();
+        let what = match refused.len() {
+            1 => "a field was".to_string(),
+            n => format!("{n} fields were"),
+        };
+        format!(
+            "Added '{}', but {what} not set: {}",
+            item.title(),
+            named.join("; ")
+        )
     }
 
     /// GitHub refused an edit for a missing scope: later edits that need it are blocked with
@@ -652,18 +715,16 @@ impl App {
     }
 
     /// Takes pending op `id` off the pending list as failed: the status line says so and it
-    /// goes to the error log with `message`. `false` when no such op is pending.
-    pub(super) fn fail_pending(&mut self, id: OpId, kind: Option<OpKind>, message: String) -> bool {
-        self.fail_pending_as(id, kind, message, None)
-    }
-
-    /// `fail_pending`, logging `instead` (what a retry should send) in place of the op.
-    fn fail_pending_as(
+    /// goes to the error log with `message`, logging `instead` (what a retry should send) in
+    /// place of the op when given, and whether a new item may exist after all
+    /// (`FailedEdit::may_exist`). `false` when no such op is pending.
+    fn fail_pending(
         &mut self,
         id: OpId,
         kind: Option<OpKind>,
         message: String,
         instead: Option<Op>,
+        may_exist: bool,
     ) -> bool {
         let what = match &instead {
             Some(op) => op.describe(self.snapshot()),
@@ -700,6 +761,7 @@ impl App {
             what,
             message,
             at: Instant::now(),
+            may_exist,
         });
         let extra = self.errors.len().saturating_sub(MAX_ERRORS);
         self.errors.drain(..extra);
@@ -708,24 +770,23 @@ impl App {
     }
 
     /// Every edit still pending goes to the error log as not sent (its board is being
-    /// replaced, so it never will be). A new item says to check first instead: it may have
-    /// been sending, and its result is dropped with the old board.
+    /// replaced, so it never will be). A new draft or issue says to check first instead, and
+    /// `R` refuses it: it may have been sending, and its result is dropped with the old board.
     pub(super) fn fail_all_pending(&mut self, message: &str) {
         let ids: Vec<(OpId, bool)> = self
             .store
             .pending()
             .iter()
-            .map(|p| (p.id, matches!(p.op, Op::Create { .. })))
+            .map(|p| (p.id, creates_content(&p.op)))
             .collect();
-        for (id, new_item) in ids {
+        for (id, may_exist) in ids {
             let kind = self.pending_kinds.remove(&id);
-            // A retried new item that had in fact been sent would be created twice.
-            let message = if new_item {
+            let message = if may_exist {
                 MAYBE_SENT_RELOADED
             } else {
                 message
             };
-            self.fail_pending(id, kind, message.to_string());
+            self.fail_pending(id, kind, message.to_string(), None, may_exist);
         }
     }
 
@@ -776,11 +837,17 @@ impl App {
 
     /// Sends the selected failed edit again as a fresh op, after the capability matrix has
     /// had its say (the item may have become read-only, archived or gone). The log stays
-    /// open. When the matrix refuses, the entry stays and the reason shows.
+    /// open. When the matrix refuses, the entry stays and the reason shows. A new item that
+    /// may exist after all (`FailedEdit::may_exist`) is never sent again: the entry stays and
+    /// `MAYBE_CREATED` shows.
     fn retry_selected(&mut self) -> Vec<Command> {
         let Some(index) = self.errors.len().checked_sub(1 + self.error_sel) else {
             return Vec::new();
         };
+        if self.errors[index].may_exist {
+            self.status.flash = Some(MAYBE_CREATED.into());
+            return Vec::new();
+        }
         let failed = self.errors.remove(index);
         let cmds = match &failed.op {
             Op::Create { new, .. } => {
@@ -2111,6 +2178,7 @@ mod tests {
             what: "set Status to Done on 'x'".into(),
             message: "boom".into(),
             at: Instant::now(),
+            may_exist: false,
         });
         assert!(a.handle_key(key('R')).is_empty());
         assert_eq!(a.errors.len(), 1);
@@ -2220,6 +2288,7 @@ mod tests {
                 what: "x".into(),
                 message: format!("boom {n}"),
                 at: Instant::now(),
+                may_exist: false,
             });
         }
         a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
@@ -2313,7 +2382,7 @@ mod tests {
             result: Ok(Confirmed::Created {
                 temp: temp.clone(),
                 item,
-                warning: None,
+                refused: vec![],
             }),
         });
         let real = ItemId::new("PVTI_new");
@@ -2334,12 +2403,15 @@ mod tests {
             result: Ok(Confirmed::Created {
                 temp: ItemId::new("local:1"),
                 item,
-                warning: Some(GithubError::Network("reset".into())),
+                refused: vec![(
+                    FieldId::new("F_status"),
+                    GithubError::Network("reset".into()),
+                )],
             }),
         });
         assert_eq!(
             a.status.error.as_deref(),
-            Some("Added 'Idea', but a field was not set: network error: reset")
+            Some("Added 'Idea', but a field was not set: Status (network error: reset)")
         );
         assert!(
             a.store
@@ -2496,5 +2568,195 @@ mod tests {
                 .items
                 .contains_key(&ItemId::new("b"))
         );
+    }
+
+    #[test]
+    fn every_refused_preset_is_named_and_a_refused_scope_is_recorded() {
+        let mut a = test_app();
+        a.submit_new(new_draft("local:1"), false);
+        let item = created(&a, "local:1", "PVTI_new");
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Ok(Confirmed::Created {
+                temp: ItemId::new("local:1"),
+                item,
+                refused: vec![
+                    (FieldId::new("F_status"), refused("project")),
+                    (
+                        FieldId::new("F_notes"),
+                        GithubError::Network("reset".into()),
+                    ),
+                ],
+            }),
+        });
+        let error = a.status.error.clone().unwrap();
+        assert!(
+            error.starts_with("Added 'Idea', but 2 fields were not set: Status ("),
+            "{error}"
+        );
+        assert!(error.ends_with("; Notes (network error: reset)"), "{error}");
+        assert_eq!(a.refused_scopes, vec!["project".to_string()]);
+        assert_eq!(a.selected_item().unwrap().id.as_str(), "PVTI_new");
+    }
+
+    /// A lost answer (network, decode) may hide a draft or issue GitHub made: the log says
+    /// so, and `R` refuses rather than risk a second one.
+    #[test]
+    fn a_new_item_whose_answer_was_lost_may_exist_and_r_refuses() {
+        for (op, needs_repo) in [(new_issue("local:1"), true), (new_draft("local:1"), false)] {
+            for error in [
+                GithubError::Network("reset".into()),
+                GithubError::Decode("createIssue returned no issue id".into()),
+            ] {
+                let mut a = test_app();
+                a.submit_new(op.clone(), needs_repo);
+                let shown = error_message(&error);
+                a.on_sync(SyncEvent::OpDone {
+                    id: 1,
+                    result: Err(error),
+                });
+                assert_eq!(a.errors.len(), 1);
+                assert_eq!(a.errors[0].message, format!("{MAYBE_CREATED} ({shown})"));
+                assert!(a.errors[0].may_exist);
+                a.handle_key(key('E'));
+                assert!(a.handle_key(key('R')).is_empty(), "never sent again");
+                assert_eq!(a.status.flash.as_deref(), Some(MAYBE_CREATED));
+                assert_eq!(a.errors.len(), 1, "the entry stays");
+                assert_eq!(a.pending_count(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn a_refused_new_item_or_a_lost_add_of_an_existing_one_can_be_retried() {
+        let mut a = test_app();
+        a.submit_new(new_issue("local:1"), true);
+        fail(&mut a, 1, "Repository is archived");
+        assert!(!a.errors[0].may_exist);
+        a.handle_key(key('E'));
+        assert_eq!(a.handle_key(key('R')), vec![Command::Send(2)]);
+        let hit = ContentHit {
+            id: "I_9".into(),
+            pull: false,
+            repo: "acme/app".into(),
+            number: 9,
+            title: "Fix".into(),
+            open: true,
+        };
+        let mut b = test_app();
+        b.submit_new(
+            Op::Create {
+                temp: ItemId::new("local:1"),
+                new: NewItem::Existing { hit },
+                presets: vec![],
+            },
+            false,
+        );
+        b.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Err(GithubError::Network("reset".into())),
+        });
+        assert!(
+            !b.errors[0].may_exist,
+            "adding it twice returns the same item"
+        );
+        b.handle_key(key('E'));
+        assert_eq!(b.handle_key(key('R')), vec![Command::Send(2)]);
+    }
+
+    #[test]
+    fn a_new_item_pending_when_the_board_reloads_is_not_retried() {
+        let mut a = test_app();
+        a.submit_new(new_issue("local:1"), true);
+        a.reset_for_new_board();
+        assert!(a.errors[0].may_exist);
+        a.handle_key(key('E'));
+        assert!(a.handle_key(key('R')).is_empty());
+        assert_eq!(a.status.flash.as_deref(), Some(MAYBE_CREATED));
+    }
+
+    /// The kind a retry is checked as is the op's own, never a stand-in.
+    #[test]
+    fn new_and_item_ops_record_their_own_kind_through_a_retry() {
+        let mut a = test_app();
+        a.submit_new(new_issue("local:1"), true);
+        assert_eq!(a.pending_kinds.get(&1), Some(&OpKind::Create));
+        fail(&mut a, 1, "Repository is archived");
+        assert_eq!(a.errors[0].kind, OpKind::Create);
+        a.handle_key(key('E'));
+        assert_eq!(a.handle_key(key('R')), vec![Command::Send(2)]);
+        assert_eq!(a.pending_kinds.get(&2), Some(&OpKind::Create));
+        a.handle_key(code(KeyCode::Esc));
+        for (n, (kind, op)) in [
+            (
+                OpKind::Archive,
+                Op::Archive {
+                    item: ItemId::new("a"),
+                },
+            ),
+            (
+                OpKind::Remove,
+                Op::Remove {
+                    item: ItemId::new("b"),
+                },
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = 3 + 2 * n as u64;
+            assert_eq!(a.submit(kind, op), vec![Command::Send(id)]);
+            fail(&mut a, id, "boom");
+            assert_eq!(a.errors.last().unwrap().kind, kind);
+            a.handle_key(key('E'));
+            assert_eq!(a.handle_key(key('R')), vec![Command::Send(id + 1)]);
+            assert_eq!(a.pending_kinds.get(&(id + 1)), Some(&kind));
+            a.handle_key(code(KeyCode::Esc));
+        }
+    }
+
+    #[test]
+    fn a_placeholders_detail_waits_then_loads_the_real_item() {
+        let mut a = test_app();
+        a.submit_new(new_draft("local:1"), false);
+        assert!(
+            a.handle_key(code(KeyCode::Enter)).is_empty(),
+            "nothing to load from GitHub yet"
+        );
+        assert_eq!(a.mode, Mode::Detail);
+        assert_eq!(a.detail.as_ref().unwrap().item.as_str(), "local:1");
+        let item = created(&a, "local:1", "PVTI_new");
+        let cmds = a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Ok(Confirmed::Created {
+                temp: ItemId::new("local:1"),
+                item,
+                refused: vec![],
+            }),
+        });
+        assert_eq!(
+            cmds,
+            vec![Command::LoadDetail {
+                item: ItemId::new("PVTI_new"),
+                before: None
+            }]
+        );
+        assert_eq!(a.detail.as_ref().unwrap().item.as_str(), "PVTI_new");
+        assert_eq!(a.detail_item().unwrap().id.as_str(), "PVTI_new");
+        // Created while the detail shows another item: nothing to load.
+        let mut b = test_app();
+        b.submit_new(new_draft("local:1"), false);
+        b.open_detail(ItemId::new("a"));
+        let item = created(&b, "local:1", "PVTI_new");
+        let cmds = b.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Ok(Confirmed::Created {
+                temp: ItemId::new("local:1"),
+                item,
+                refused: vec![],
+            }),
+        });
+        assert!(cmds.is_empty());
+        assert_eq!(b.detail.as_ref().unwrap().item.as_str(), "a");
     }
 }

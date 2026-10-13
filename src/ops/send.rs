@@ -8,8 +8,8 @@ fn ids<T>(list: &[T], id: impl Fn(&T) -> &str) -> Vec<String> {
     list.iter().map(|x| id(x).to_string()).collect()
 }
 
-/// Creates the item, then sets each preset on it. A preset GitHub refuses is reported as a
-/// warning: the item exists, and the user sees what is missing.
+/// Creates the item, then sets each preset on it. Every preset is tried; those GitHub refuses
+/// are reported with the item: it exists, and the user sees what is missing.
 ///
 /// A new issue takes two calls. Once `createIssue` has succeeded, no failure may come back
 /// as an error: the queue sends a rate-limited op again, which would create a second issue.
@@ -32,20 +32,17 @@ async fn create(
         }
         NewItem::Existing { hit } => gh.add_item_by_id(project, &hit.id).await?,
     };
-    let mut warning = None;
+    let mut refused = Vec::new();
     for (field, value) in presets {
         match gh.set_field_value(project, &item.id, field, value).await {
             Ok(updated) => item = updated,
-            Err(e) => {
-                warning = Some(e);
-                break;
-            }
+            Err(e) => refused.push((field.clone(), e)),
         }
     }
     Ok(Confirmed::Created {
         temp: temp.clone(),
         item,
-        warning,
+        refused,
     })
 }
 
@@ -452,10 +449,13 @@ mod tests {
             Ok(Confirmed::Created {
                 temp,
                 item,
-                warning,
+                refused,
             }) => {
                 assert_eq!((temp.as_str(), item.id.as_str()), ("local:1", "PVTI_1"));
-                assert!(matches!(warning, Some(GithubError::Network(_))));
+                assert!(matches!(
+                    &refused[..],
+                    [(field, GithubError::Network(_))] if field.as_str() == "F_notes"
+                ));
             }
             other => panic!("expected Created, got {other:?}"),
         }
@@ -520,7 +520,7 @@ mod tests {
         };
         assert!(matches!(
             send(&gh, &p, &draft).await,
-            Ok(Confirmed::Created { warning: None, .. })
+            Ok(Confirmed::Created { refused, .. }) if refused.is_empty()
         ));
         let existing = Op::Create {
             temp: ItemId::new("local:2"),
@@ -639,5 +639,55 @@ mod tests {
         };
         assert!(send(&gh, &ProjectId::new("P"), &draft).await.is_err());
         assert_eq!(t.requests().len(), 1, "no presets for an item never made");
+    }
+
+    #[tokio::test]
+    async fn every_preset_is_tried_after_one_is_refused() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push(
+            "AddDraftIssue",
+            json!({"addProjectV2DraftIssue": {"projectItem": item_json()}}),
+        );
+        t.push_error(
+            "SetSingleSelectValue",
+            GithubError::InsufficientScopes {
+                missing: vec!["project".into()],
+            },
+        );
+        t.push(
+            "SetTextValue",
+            json!({"updateProjectV2ItemFieldValue": {"projectV2Item": item_json()}}),
+        );
+        t.push_error("SetNumberValue", GithubError::Network("reset".into()));
+        let gh = Github::new(t.clone());
+        let op = Op::Create {
+            temp: ItemId::new("local:1"),
+            new: crate::ops::NewItem::Draft {
+                title: "Idea".into(),
+                body: String::new(),
+            },
+            presets: vec![
+                (
+                    FieldId::new("F_status"),
+                    FieldValue::SingleSelect {
+                        option_id: crate::model::OptionId::new("o"),
+                        name: "Todo".into(),
+                    },
+                ),
+                (FieldId::new("F_notes"), FieldValue::Text("x".into())),
+                (FieldId::new("F_size"), FieldValue::Number(3.0)),
+            ],
+        };
+        let Ok(Confirmed::Created { refused, .. }) = send(&gh, &ProjectId::new("P"), &op).await
+        else {
+            panic!("expected Created")
+        };
+        let fields: Vec<&str> = refused.iter().map(|(f, _)| f.as_str()).collect();
+        assert_eq!(fields, ["F_status", "F_size"]);
+        assert!(matches!(
+            refused[0].1,
+            GithubError::InsufficientScopes { .. }
+        ));
+        assert_eq!(t.requests().len(), 4, "the draft and all three presets");
     }
 }

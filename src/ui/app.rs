@@ -591,6 +591,10 @@ impl App {
     fn open_detail(&mut self, item: ItemId) -> Vec<Command> {
         self.detail = Some(DetailState::new(item.clone()));
         self.mode = Mode::Detail;
+        // A new item has nothing on GitHub to load yet; it loads once created (`settle`).
+        if is_placeholder(&item) {
+            return Vec::new();
+        }
         vec![Command::LoadDetail { item, before: None }]
     }
 

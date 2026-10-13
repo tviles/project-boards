@@ -2013,7 +2013,7 @@ mod tests {
             Ok(Confirmed::Created {
                 temp,
                 item,
-                warning: None,
+                refused: vec![],
             }),
             t0,
         );

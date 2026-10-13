@@ -22,6 +22,9 @@ pub enum OpKind {
     Close,
     Reopen,
     Convert,
+    /// Adding a new item (a draft, a new issue, or an existing one) to the board. Not an
+    /// operation on an item, so not in `ALL`; `check_new` decides it.
+    Create,
 }
 
 impl OpKind {
@@ -60,6 +63,7 @@ impl OpKind {
             OpKind::Close => "close",
             OpKind::Reopen => "reopen",
             OpKind::Convert => "convert to issue",
+            OpKind::Create => "add an item",
         }
     }
 
@@ -216,6 +220,10 @@ pub fn check_new(needs_repo: bool, ctx: &EditContext) -> Result<(), Denial> {
 /// Whether `kind` is allowed on `item`; the reason when it is not.
 pub fn check(kind: OpKind, item: &Item, ctx: &EditContext) -> Result<(), Denial> {
     use OpKind::*;
+    if kind == Create {
+        // The board decides; which item is selected does not matter.
+        return board_check(ctx);
+    }
     if is_placeholder(&item.id) {
         return Err(Denial::Creating);
     }
@@ -244,7 +252,7 @@ pub fn check(kind: OpKind, item: &Item, ctx: &EditContext) -> Result<(), Denial>
                 Close | Reopen => Err(Denial::DraftNotClosable),
                 Convert if ctx.has_repo_scope() => Ok(()),
                 Convert => Err(Denial::NoRepoScope),
-                Move | Archive | Unarchive | Remove => Ok(()),
+                Move | Archive | Unarchive | Remove | Create => Ok(()),
             };
         }
         ItemContent::Redacted => return Err(Denial::Private),
@@ -690,5 +698,22 @@ mod tests {
             check(Close, &pull(ContentState::Open), &no_repo),
             Err(Denial::NoRepoScope)
         );
+    }
+
+    #[test]
+    fn adding_an_item_needs_only_the_board_and_is_not_an_item_operation() {
+        let mut placeholder = issue("I", 0, "x");
+        placeholder.id = ItemId::new("local:1");
+        assert_eq!(check(OpKind::Create, &placeholder, &ctx()), Ok(()));
+        let read_only = EditContext {
+            viewer_can_update: false,
+            ..ctx()
+        };
+        assert_eq!(
+            check(OpKind::Create, &issue("I", 1, "x"), &read_only),
+            Err(Denial::ReadOnly)
+        );
+        assert!(!OpKind::ALL.contains(&OpKind::Create));
+        assert_eq!(OpKind::Create.label(), "add an item");
     }
 }
