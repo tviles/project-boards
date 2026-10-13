@@ -19,6 +19,10 @@ const REQUIRED: &[&str] = &[
     "subIssuesSummary: SubIssuesSummary",
     "issueType: IssueType",
     "stateReason: IssueStateReason",
+    "updateProjectV2ItemFieldValue(",
+    "clearProjectV2ItemFieldValue(",
+    "updateProjectV2ItemPosition(",
+    "multiSelectOptionIds: [String!]",
 ];
 
 #[test]

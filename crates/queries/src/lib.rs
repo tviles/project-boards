@@ -32,4 +32,12 @@ operation!(
     RepoProjects,
     ViewerProjects,
     Viewer,
+    SetTextValue,
+    SetNumberValue,
+    SetDateValue,
+    SetSingleSelectValue,
+    SetMultiSelectValue,
+    SetIterationValue,
+    ClearFieldValue,
+    UpdateItemPosition,
 );
