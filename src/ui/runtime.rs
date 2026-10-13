@@ -11,6 +11,7 @@ use crossterm::execute;
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use std::sync::Arc;
+use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
@@ -24,6 +25,7 @@ pub async fn run(options: PaneOptions) -> anyhow::Result<()> {
         hup: signal(SignalKind::hangup())?,
     };
     let mut terminal = ratatui::try_init()?;
+    keep_terminal_on_worker_panics(std::thread::current().id());
     let _ = execute!(std::io::stdout(), EnableFocusChange);
     let result = event_loop(&mut terminal, options, herdr.clone(), signals).await;
     let _ = execute!(std::io::stdout(), DisableFocusChange);
@@ -41,6 +43,44 @@ pub async fn run(options: PaneOptions) -> anyhow::Result<()> {
         tracing::warn!(error = %e, "could not close the board pane");
     }
     result
+}
+
+/// `ratatui::try_init` installs a panic hook that restores the terminal. A panic in a tokio
+/// worker (a sync job; the syncer catches an edit's panic on purpose) must not do that while
+/// the board keeps running, nor print over it: such panics are logged instead. A panic on the
+/// UI thread still restores the terminal through the previous hook.
+fn keep_terminal_on_worker_panics(ui: ThreadId) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if should_restore(std::thread::current().id(), ui) {
+            previous(info);
+        } else {
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_default();
+            tracing::error!(
+                message = %panic_message(info.payload()),
+                %location,
+                "a background task panicked"
+            );
+        }
+    }));
+}
+
+/// Whether a panic on thread `current` should restore the terminal: only one on the thread
+/// that runs the UI (`ui`).
+fn should_restore(current: ThreadId, ui: ThreadId) -> bool {
+    current == ui
+}
+
+/// The text a panic was raised with.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
 }
 
 struct Signals {
@@ -246,6 +286,23 @@ mod tests {
     use crate::model::{FieldId, ItemId, ProjectId};
     use crate::ops::Op;
     use crate::sync::SyncEvent;
+
+    #[test]
+    fn only_a_panic_on_the_ui_thread_restores_the_terminal() {
+        let ui = std::thread::current().id();
+        assert!(should_restore(ui, ui));
+        let worker = std::thread::spawn(|| std::thread::current().id())
+            .join()
+            .unwrap();
+        assert!(!should_restore(worker, ui));
+    }
+
+    #[test]
+    fn a_panic_message_is_read_from_str_and_string_payloads() {
+        assert_eq!(panic_message(&"boom"), "boom");
+        assert_eq!(panic_message(&String::from("bang")), "bang");
+        assert_eq!(panic_message(&42_u8), "non-string panic payload");
+    }
 
     #[test]
     fn an_edit_with_no_client_is_answered_with_an_error() {
