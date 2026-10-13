@@ -157,6 +157,7 @@ pub struct IssueType {
 /// What an issue or pull request says about itself beyond its title and state: the values
 /// of the built-in fields GitHub derives from content. Empty for drafts and other content.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ContentFields {
     /// RFC 3339
     pub created_at: Option<String>,
@@ -169,6 +170,13 @@ pub struct ContentFields {
     pub parent: Option<ParentIssue>,
     pub sub_issues: Option<SubIssuesSummary>,
     pub linked_prs: Vec<LinkedPullRequest>,
+    /// The node id of the Issue, PullRequest or DraftIssue, which content edits go to.
+    pub content_id: Option<String>,
+    /// Assignee login -> user node id, to remove one.
+    pub assignee_ids: BTreeMap<String, String>,
+    /// Label name -> label node id, to remove one.
+    pub label_ids: BTreeMap<String, String>,
+    pub milestone: Option<crate::model::MilestoneRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -223,6 +231,18 @@ impl Item {
             | ItemContent::Draft { title } => title,
             ItemContent::Redacted => "Private item",
             ItemContent::Unknown { .. } => "Unsupported item",
+        }
+    }
+
+    /// Where content edits go: the issue, pull request or draft behind the item.
+    pub fn content_id(&self) -> Option<crate::model::ContentId> {
+        use crate::model::ContentId;
+        let id = self.content_fields.content_id.clone()?;
+        match &self.content {
+            ItemContent::Issue { .. } => Some(ContentId::Issue(id)),
+            ItemContent::PullRequest { .. } => Some(ContentId::PullRequest(id)),
+            ItemContent::Draft { .. } => Some(ContentId::Draft(id)),
+            ItemContent::Redacted | ItemContent::Unknown { .. } => None,
         }
     }
 
@@ -322,7 +342,10 @@ pub(crate) mod tests {
             archived: false,
             updated_at: "2026-10-01T00:00:00Z".into(),
             values: BTreeMap::new(),
-            content_fields: ContentFields::default(),
+            content_fields: ContentFields {
+                content_id: Some(format!("I_{id}")),
+                ..ContentFields::default()
+            },
         }
     }
 
@@ -379,6 +402,7 @@ pub(crate) mod tests {
                 state: ContentState::Merged,
                 is_draft: false,
             }],
+            ..ContentFields::default()
         };
         let value = |item: &Item, kind| item.field_value(&field(kind)).map(|v| v.display());
         assert_eq!(

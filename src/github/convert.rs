@@ -145,6 +145,15 @@ pub fn project_from_wire(v: &Value, board: &BoardRef) -> Result<Project, GithubE
         viewer_can_update: v["viewerCanUpdate"].as_bool().unwrap_or(false),
         fields,
         views,
+        linked_repos: nodes(v, "repositories")
+            .into_iter()
+            .filter_map(|r| {
+                Some(RepoRef {
+                    id: r["id"].as_str()?.to_string(),
+                    slug: r["nameWithOwner"].as_str()?.parse().ok()?,
+                })
+            })
+            .collect(),
     })
 }
 
@@ -257,6 +266,29 @@ fn content_fields_from_wire(c: &Value) -> ContentFields {
             completed: subs["completed"].as_u64().unwrap_or(0) as u32,
         }),
         linked_prs: linked_prs(c),
+        content_id: c["id"].as_str().map(String::from),
+        assignee_ids: nodes(c, "assignees")
+            .into_iter()
+            .filter_map(|n| {
+                Some((
+                    n["login"].as_str()?.to_string(),
+                    n["id"].as_str()?.to_string(),
+                ))
+            })
+            .collect(),
+        label_ids: nodes(c, "labels")
+            .into_iter()
+            .filter_map(|n| {
+                Some((
+                    n["name"].as_str()?.to_string(),
+                    n["id"].as_str()?.to_string(),
+                ))
+            })
+            .collect(),
+        milestone: c["milestone"]["id"].as_str().map(|id| MilestoneRef {
+            id: id.to_string(),
+            title: str_of(&c["milestone"]["title"]),
+        }),
     }
 }
 
@@ -877,5 +909,54 @@ pub(crate) mod tests {
         let d = detail_from_wire(&json!({"content": {"__typename": "DraftIssue", "body": "idea"}}));
         assert_eq!(d.body, "idea");
         assert!(d.comments.is_empty() && d.older_cursor.is_none());
+    }
+
+    #[test]
+    fn content_ids_label_ids_assignee_ids_and_milestone_decode() {
+        let mut v = item_json();
+        let c = &mut v["content"];
+        c["id"] = json!("I_kw1");
+        c["labels"] = json!({"nodes": [{"id": "LA_1", "name": "bug", "color": "d73a4a"}]});
+        c["assignees"] = json!({"nodes": [{"id": "U_1", "login": "octo"}]});
+        c["milestone"] = json!({"id": "MI_1", "title": "v1"});
+        let item = item_from_wire(&v).unwrap();
+        let f = &item.content_fields;
+        assert_eq!(f.content_id.as_deref(), Some("I_kw1"));
+        assert_eq!(f.label_ids.get("bug").map(String::as_str), Some("LA_1"));
+        assert_eq!(f.assignee_ids.get("octo").map(String::as_str), Some("U_1"));
+        assert_eq!(
+            f.milestone,
+            Some(MilestoneRef {
+                id: "MI_1".into(),
+                title: "v1".into()
+            })
+        );
+        assert_eq!(item.content_id(), Some(ContentId::Issue("I_kw1".into())));
+    }
+
+    #[test]
+    fn drafts_carry_their_id_and_assignees() {
+        let mut v = item_json();
+        v["content"] = json!({"__typename": "DraftIssue", "id": "DI_9", "title": "Idea",
+                              "assignees": {"nodes": [{"id": "U_1", "login": "octo"}]}});
+        let item = item_from_wire(&v).unwrap();
+        assert_eq!(item.content_id(), Some(ContentId::Draft("DI_9".into())));
+        assert_eq!(item.assignees(), ["octo"]);
+    }
+
+    #[test]
+    fn linked_repositories_decode() {
+        let mut v = project_json();
+        v["repositories"] = json!({"nodes": [{"id": "R_1", "nameWithOwner": "tviles/app"}, null]});
+        let p = project_from_wire(&v, &board()).unwrap();
+        assert_eq!(
+            p.linked_repos,
+            [RepoRef {
+                id: "R_1".into(),
+                slug: "tviles/app".parse().unwrap()
+            }]
+        );
+        let p = project_from_wire(&project_json(), &board()).unwrap();
+        assert!(p.linked_repos.is_empty(), "older recordings have none");
     }
 }

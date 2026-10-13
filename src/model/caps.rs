@@ -179,6 +179,15 @@ impl Denial {
     }
 }
 
+/// Content edits go to the issue, pull request or draft node.
+fn needs_content_id(item: &Item) -> Result<(), Denial> {
+    if item.content_fields.content_id.is_some() {
+        Ok(())
+    } else {
+        Err(Denial::NeedsRefresh)
+    }
+}
+
 /// A new item that GitHub has not created yet.
 pub fn is_placeholder(id: &ItemId) -> bool {
     id.as_str().starts_with("local:")
@@ -229,7 +238,8 @@ pub fn check(kind: OpKind, item: &Item, ctx: &EditContext) -> Result<(), Denial>
         ItemContent::PullRequest { state, .. } => (*state, true),
         ItemContent::Draft { .. } => {
             return match kind {
-                Reorder | SetField | Title | Body | Assignees => Ok(()),
+                Title | Body | Assignees => needs_content_id(item),
+                Reorder | SetField => Ok(()),
                 Labels | Milestone | Comment => Err(Denial::DraftHasNo(kind)),
                 Close | Reopen => Err(Denial::DraftNotClosable),
                 Convert if ctx.has_repo_scope() => Ok(()),
@@ -255,6 +265,9 @@ pub fn check(kind: OpKind, item: &Item, ctx: &EditContext) -> Result<(), Denial>
             ContentState::Merged | ContentState::Unknown => return Err(Denial::StateUnknown),
         },
         _ => {}
+    }
+    if !matches!(kind, Reorder | SetField) {
+        needs_content_id(item)?;
     }
     if !ctx.has_repo_scope() {
         return Err(Denial::NoRepoScope);
@@ -314,6 +327,26 @@ mod tests {
     }
 
     use OpKind::*;
+
+    #[test]
+    fn an_item_cached_without_content_ids_needs_a_refresh() {
+        let mut i = issue("i", 1, "x");
+        i.content_fields.content_id = None;
+        assert_eq!(check(Labels, &i, &ctx()), Err(Denial::NeedsRefresh));
+        assert_eq!(
+            check(Move, &i, &ctx()),
+            Ok(()),
+            "project ops need only the item id"
+        );
+        let mut d = with(ItemContent::Draft { title: "d".into() });
+        d.content_fields.content_id = None;
+        assert_eq!(check(Title, &d, &ctx()), Err(Denial::NeedsRefresh));
+        assert_eq!(
+            check(Labels, &d, &ctx()),
+            Err(Denial::DraftHasNo(Labels)),
+            "the draft rule first"
+        );
+    }
 
     #[test]
     fn the_matrix_per_content_type() {

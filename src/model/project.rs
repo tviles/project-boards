@@ -19,6 +19,9 @@ pub struct Project {
     pub viewer_can_update: bool,
     pub fields: Vec<Field>,
     pub views: Vec<View>,
+    /// Repositories linked to the project: candidates for new issues and draft assignees.
+    #[serde(default)]
+    pub linked_repos: Vec<crate::model::RepoRef>,
 }
 
 impl Project {
@@ -66,6 +69,7 @@ mod tests {
             viewer_can_update: false,
             fields: vec![field("PVTSSF_abc", "Status"), field("PVTF_abc2", "Other")],
             views: vec![],
+            linked_repos: vec![],
         };
         let name = |id: &str| p.field(&FieldId::new(id)).map(|f| f.name.clone());
         assert_eq!(name("PVTSSF_abc").as_deref(), Some("Status"));

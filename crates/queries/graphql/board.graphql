@@ -36,6 +36,7 @@ fragment ProjectSchemaFields on ProjectV2 {
       sortByFields(first: 5) { nodes { direction field { ...FieldRef } } }
     }
   }
+  repositories(first: 20) { nodes { id nameWithOwner } }
 }
 
 fragment ItemFields on ProjectV2Item {
@@ -48,23 +49,25 @@ fragment ItemFields on ProjectV2Item {
     __typename
     # Card fields: plain objects, no connection, so they add nothing to the cost.
     ... on Issue {
-      number title url state stateReason repository { nameWithOwner }
+      id number title url state stateReason repository { nameWithOwner }
       createdAt updatedAt closedAt
       issueType { name color }
       parent { number title state }
       subIssuesSummary { total completed }
-      labels(first: 20) { nodes { name color } }
-      assignees(first: 10) { nodes { login } }
+      milestone { id title }
+      labels(first: 20) { nodes { id name color } }
+      assignees(first: 10) { nodes { id login } }
       closedByPullRequestsReferences(first: 5, includeClosedPrs: true) { nodes { number state isDraft } }
     }
     ... on PullRequest {
-      number title url state isDraft repository { nameWithOwner }
+      id number title url state isDraft repository { nameWithOwner }
       createdAt updatedAt closedAt
-      labels(first: 20) { nodes { name color } }
-      assignees(first: 10) { nodes { login } }
+      milestone { id title }
+      labels(first: 20) { nodes { id name color } }
+      assignees(first: 10) { nodes { id login } }
       reviewRequests(first: 10) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { slug } } } }
     }
-    ... on DraftIssue { title }
+    ... on DraftIssue { id title assignees(first: 10) { nodes { id login } } }
   }
   fieldValues(first: 50) {
     nodes {

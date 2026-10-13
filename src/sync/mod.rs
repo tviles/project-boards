@@ -42,6 +42,8 @@ pub enum SyncTask {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+// Events are sent one at a time over a channel; boxing `OpDone`'s items would only add noise.
+#[allow(clippy::large_enum_variant)]
 pub enum SyncEvent {
     Project(Project),
     /// A page of a full load, applied as an upsert so a failed load never deletes anything.
