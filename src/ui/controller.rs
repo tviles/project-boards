@@ -513,7 +513,7 @@ impl Controller {
     }
 
     fn persist_cache(&self) {
-        let Some(snapshot) = self.app.snapshot() else {
+        let Some(snapshot) = self.app.store.confirmed() else {
             return;
         };
         // A list fetched with a session-only local filter would reopen next time without it.
