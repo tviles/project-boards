@@ -225,4 +225,132 @@ mod tests {
             ]
         );
     }
+
+    #[tokio::test]
+    async fn two_call_ops_send_both_in_order_and_the_other_arms_send_theirs() {
+        use crate::model::{ContentId, LabelRef, MilestoneRef, UserRef};
+        let t = Arc::new(FixtureTransport::new());
+        for (op, body) in [
+            (
+                "AddAssignees",
+                json!({"addAssigneesToAssignable": {"clientMutationId": null}}),
+            ),
+            (
+                "RemoveAssignees",
+                json!({"removeAssigneesFromAssignable": {"clientMutationId": null}}),
+            ),
+            (
+                "AddLabels",
+                json!({"addLabelsToLabelable": {"clientMutationId": null}}),
+            ),
+            (
+                "RemoveLabels",
+                json!({"removeLabelsFromLabelable": {"clientMutationId": null}}),
+            ),
+            (
+                "SetIssueMilestone",
+                json!({"updateIssue": {"issue": {"id": "I_1"}}}),
+            ),
+            (
+                "UpdateIssueTitle",
+                json!({"updateIssue": {"issue": {"id": "I_1"}}}),
+            ),
+            (
+                "UpdateIssueBody",
+                json!({"updateIssue": {"issue": {"id": "I_1"}}}),
+            ),
+            (
+                "ReopenIssue",
+                json!({"reopenIssue": {"issue": {"id": "I_1"}}}),
+            ),
+            (
+                "ClosePullRequest",
+                json!({"closePullRequest": {"pullRequest": {"id": "PR_1"}}}),
+            ),
+        ] {
+            t.push(op, body);
+        }
+        let gh = Github::new(t.clone());
+        let p = ProjectId::new("PVT_1");
+        let item = ItemId::new("a");
+        let issue = ContentId::Issue("I_1".into());
+        let u = |n: &str| UserRef {
+            id: format!("U_{n}"),
+            login: n.into(),
+        };
+        let l = |n: &str| LabelRef {
+            id: format!("L_{n}"),
+            name: n.into(),
+            color: "f00".into(),
+        };
+        let ops = [
+            Op::Assignees {
+                item: item.clone(),
+                content: issue.clone(),
+                add: vec![u("a")],
+                remove: vec![u("b")],
+                all: vec![u("a")],
+            },
+            Op::Labels {
+                item: item.clone(),
+                content: issue.clone(),
+                add: vec![l("x")],
+                remove: vec![l("y")],
+            },
+            Op::Milestone {
+                item: item.clone(),
+                content: issue.clone(),
+                milestone: Some(MilestoneRef {
+                    id: "MI_1".into(),
+                    title: "v1".into(),
+                }),
+            },
+            Op::Title {
+                item: item.clone(),
+                content: issue.clone(),
+                title: "T".into(),
+            },
+            Op::Body {
+                item: item.clone(),
+                content: issue.clone(),
+                body: "B".into(),
+            },
+            Op::Reopen {
+                item: item.clone(),
+                content: issue,
+            },
+            Op::Close {
+                item,
+                content: ContentId::PullRequest("PR_1".into()),
+                reason: None,
+            },
+        ];
+        for op in &ops {
+            assert_eq!(
+                send(&gh, &p, op).await,
+                Ok(Confirmed::Applied),
+                "{}",
+                op.name()
+            );
+        }
+        let names: Vec<String> = t
+            .requests()
+            .iter()
+            .map(|r| r.operation_name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "AddAssignees",
+                "RemoveAssignees",
+                "AddLabels",
+                "RemoveLabels",
+                "SetIssueMilestone",
+                "UpdateIssueTitle",
+                "UpdateIssueBody",
+                "ReopenIssue",
+                "ClosePullRequest"
+            ]
+        );
+    }
 }

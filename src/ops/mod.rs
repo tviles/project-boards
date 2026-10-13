@@ -324,16 +324,24 @@ impl Op {
             Op::Close { item, reason, .. } => {
                 if let Some(i) = snap.items.get_mut(item) {
                     set_state(&mut i.content, ContentState::Closed);
-                    i.content_fields.state_reason = reason.map(|r| match r {
-                        CloseReason::Completed => StateReason::Completed,
-                        CloseReason::NotPlanned => StateReason::NotPlanned,
-                    });
+                    // GitHub closes an issue as completed unless told otherwise; a pull
+                    // request has no reason.
+                    i.content_fields.state_reason = match (&i.content, reason) {
+                        (ItemContent::Issue { .. }, Some(CloseReason::NotPlanned)) => {
+                            Some(StateReason::NotPlanned)
+                        }
+                        (ItemContent::Issue { .. }, _) => Some(StateReason::Completed),
+                        _ => None,
+                    };
                 }
             }
             Op::Reopen { item, .. } => {
                 if let Some(i) = snap.items.get_mut(item) {
                     set_state(&mut i.content, ContentState::Open);
-                    i.content_fields.state_reason = None;
+                    i.content_fields.state_reason = match i.content {
+                        ItemContent::Issue { .. } => Some(StateReason::Reopened),
+                        _ => None,
+                    };
                 }
             }
         }
@@ -803,6 +811,181 @@ mod tests {
             }
             .describe(Some(&s)),
             "comment on 'Fix crash'"
+        );
+    }
+
+    #[test]
+    fn a_retitle_reorders_a_title_sorted_view() {
+        use crate::model::{SortDirection, SortSpec, sort_items};
+        let mut s = snapshot();
+        let order = |s: &BoardSnapshot| {
+            let mut items: Vec<&Item> = ["a", "b"]
+                .iter()
+                .map(|i| &s.items[&ItemId::new(*i)])
+                .collect();
+            sort_items(
+                &mut items,
+                &[SortSpec {
+                    field: FieldId::new("F_title"),
+                    direction: SortDirection::Asc,
+                }],
+                &s.project.fields,
+            );
+            items
+                .iter()
+                .map(|i| i.id.as_str().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order(&s),
+            ["b", "a"],
+            "'Add iteration columns' sorts before 'Fix crash'"
+        );
+        Op::Title {
+            item: ItemId::new("a"),
+            content: content(),
+            title: "Aardvark".into(),
+        }
+        .apply(&mut s);
+        assert_eq!(order(&s), ["a", "b"]);
+    }
+
+    #[test]
+    fn close_and_reopen_set_the_reason_github_would() {
+        let mut s = snapshot();
+        let a = || ItemId::new("a");
+        let close = Op::Close {
+            item: a(),
+            content: content(),
+            reason: None,
+        };
+        close.apply(&mut s);
+        let once = s.clone();
+        close.apply(&mut s);
+        assert_eq!(s, once);
+        assert_eq!(
+            item_a(&s).content_fields.state_reason,
+            Some(StateReason::Completed)
+        );
+        let reopen = Op::Reopen {
+            item: a(),
+            content: content(),
+        };
+        reopen.apply(&mut s);
+        let once = s.clone();
+        reopen.apply(&mut s);
+        assert_eq!(s, once);
+        assert_eq!(
+            item_a(&s).content_fields.state_reason,
+            Some(StateReason::Reopened)
+        );
+    }
+
+    #[test]
+    fn close_and_reopen_a_pull_request_carry_no_reason() {
+        let mut s = snapshot();
+        let id = ItemId::new("a");
+        s.items.get_mut(&id).unwrap().content = ItemContent::PullRequest {
+            reference: crate::model::ContentRef {
+                repo: "o/r".into(),
+                number: 9,
+                url: "u".into(),
+            },
+            title: "pr".into(),
+            state: ContentState::Open,
+            is_draft: false,
+        };
+        let pr = ContentId::PullRequest("PR_a".into());
+        Op::Close {
+            item: id.clone(),
+            content: pr.clone(),
+            reason: None,
+        }
+        .apply(&mut s);
+        let i = item_a(&s);
+        assert!(matches!(
+            i.content,
+            ItemContent::PullRequest {
+                state: ContentState::Closed,
+                ..
+            }
+        ));
+        assert_eq!(i.content_fields.state_reason, None);
+        Op::Reopen {
+            item: id,
+            content: pr,
+        }
+        .apply(&mut s);
+        let i = item_a(&s);
+        assert!(matches!(
+            i.content,
+            ItemContent::PullRequest {
+                state: ContentState::Open,
+                ..
+            }
+        ));
+        assert_eq!(i.content_fields.state_reason, None);
+    }
+
+    #[test]
+    fn labels_milestone_and_removals_are_idempotent() {
+        let mut s = snapshot();
+        let a = || ItemId::new("a");
+        let labels = Op::Labels {
+            item: a(),
+            content: content(),
+            add: vec![label("docs")],
+            remove: vec![label("bug"), label("never-had")],
+        };
+        labels.apply(&mut s);
+        let once = s.clone();
+        labels.apply(&mut s);
+        assert_eq!(s, once);
+        let people = Op::Assignees {
+            item: a(),
+            content: content(),
+            add: vec![],
+            remove: vec![user("nobody")],
+            all: vec![user("tviles")],
+        };
+        people.apply(&mut s);
+        assert_eq!(
+            item_a(&s).assignees(),
+            ["tviles"],
+            "removing an absent assignee changes nothing"
+        );
+        s.project.fields.push(crate::model::Field {
+            id: FieldId::new("F_milestone"),
+            name: "Milestone".into(),
+            kind: FieldKind::Milestone,
+        });
+        let set = Op::Milestone {
+            item: a(),
+            content: content(),
+            milestone: Some(MilestoneRef {
+                id: "MI_1".into(),
+                title: "v1".into(),
+            }),
+        };
+        set.apply(&mut s);
+        let once = s.clone();
+        set.apply(&mut s);
+        assert_eq!(s, once);
+        assert_eq!(
+            item_a(&s).values.get(&FieldId::new("F_milestone")),
+            Some(&FieldValue::Milestone("v1".into()))
+        );
+        Op::Milestone {
+            item: a(),
+            content: content(),
+            milestone: None,
+        }
+        .apply(&mut s);
+        assert!(
+            !item_a(&s)
+                .values
+                .values()
+                .any(|v| matches!(v, FieldValue::Milestone(_)))
         );
     }
 }

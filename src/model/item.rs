@@ -286,6 +286,7 @@ impl Item {
                 .sub_issues
                 .filter(|s| s.total > 0)
                 .map(FieldValue::SubIssues),
+            FieldKind::Title => Some(FieldValue::Text(self.title().to_string())),
             FieldKind::IssueType => c.issue_type.clone().map(FieldValue::IssueType),
             FieldKind::LinkedPullRequests if !c.linked_prs.is_empty() => {
                 Some(FieldValue::PullRequests(c.linked_prs.clone()))
