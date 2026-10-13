@@ -9,6 +9,7 @@ pub mod github;
 pub mod herdr;
 pub mod logging;
 pub mod model;
+pub mod ops;
 pub mod state;
 pub mod store;
 pub mod sync;
