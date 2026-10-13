@@ -2,6 +2,7 @@
 //! replays pending ops with it on top of the confirmed board. `send` (ops::send) carries
 //! an op to GitHub. Generated GraphQL types never appear here.
 
+pub mod queue;
 pub mod send;
 
 use crate::model::{FieldId, FieldValue, Item, ItemId};
