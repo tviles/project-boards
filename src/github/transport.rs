@@ -271,6 +271,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_empty_scopes_header_means_no_scopes_and_an_absent_one_means_unknown() {
+        let body = json!({"data": {"viewer": {"login": "tviles"}}});
+        let (_s, t) = server_with(
+            ResponseTemplate::new(200)
+                .set_body_json(body.clone())
+                .insert_header("x-oauth-scopes", ""),
+        )
+        .await;
+        assert_eq!(t.execute(request()).await.unwrap().scopes, Some(vec![]));
+        let (_s, t) = server_with(ResponseTemplate::new(200).set_body_json(body)).await;
+        assert_eq!(t.execute(request()).await.unwrap().scopes, None);
+    }
+
+    #[tokio::test]
     async fn unauthorized() {
         let (_s, t) = server_with(
             ResponseTemplate::new(401).set_body_json(json!({"message": "Bad credentials"})),
