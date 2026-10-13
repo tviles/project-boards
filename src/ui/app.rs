@@ -99,6 +99,10 @@ pub struct App {
     current: Option<ViewId>,
     /// The selected item, so polls, re-sorts and search never move the cursor to another one.
     selected_id: Option<ItemId>,
+    /// Items edited during this visit of the current view: they stay where they are, even
+    /// when the view's filter no longer matches them, until the view or its filter changes
+    /// or `r` (spec section 5, "Items that stop matching the view").
+    sticky: Vec<edit::Sticky>,
     search: String,
     layout_toggle: HashMap<ViewId, Layout>,
     /// Per view, a filter the user added on top of the view's GitHub filter. Session only.
@@ -163,6 +167,7 @@ impl App {
             quit: false,
             current: None,
             selected_id: None,
+            sticky: Vec::new(),
             search: String::new(),
             layout_toggle: HashMap::new(),
             extra_filter: HashMap::new(),
@@ -248,6 +253,7 @@ impl App {
         }
         // A changed filter invalidates the cached list.
         self.store.apply(StoreUpdate::ClearViewIds(view.id.clone()));
+        self.sticky.clear();
         self.table_selected = 0;
         self.board_sel = BoardSelection::default();
         self.sync_selected_id();
@@ -264,6 +270,7 @@ impl App {
     /// Forgets what belonged to the previous board when another one opens: the quick search,
     /// the error and the "loaded N of M" note. Config warnings stay.
     pub fn reset_for_new_board(&mut self) {
+        self.sticky.clear();
         self.search.clear();
         self.input.clear();
         self.status.error = None;
@@ -284,11 +291,15 @@ impl App {
         let snap = self.snapshot()?;
         let view = self.current_view()?;
         let filter = self.effective_filter();
-        let mut items = if filter.trim().is_empty() {
+        let mut items: Vec<&Item> = if filter.trim().is_empty() {
             snap.all_items()
+                .into_iter()
+                .filter(|i| !i.archived)
+                .collect()
         } else {
             snap.view_items(&view.id)?
         };
+        self.add_sticky(snap, &mut items);
         let query = self.search_query();
         if !query.is_empty() {
             items.retain(|i| search::matches(i, query));
@@ -330,7 +341,17 @@ impl App {
         };
         let items = self.view_items().unwrap_or_default();
         let columns = build_columns(&items, field, view.group_field(&project.fields));
-        constrain_columns(columns, &column_constraint(&self.effective_filter(), field))
+        let constraint = column_constraint(&self.effective_filter(), field);
+        constrain_columns(columns, &constraint)
+            .into_iter()
+            .map(|mut c| {
+                // Kept only because it holds items: a card moved there (spec: "Done (filtered)").
+                if !constraint.allows(&c.bucket.title, c.bucket.key.is_none()) {
+                    c.bucket.title = format!("{} (filtered)", c.bucket.title);
+                }
+                c
+            })
+            .collect()
     }
 
     /// The fields board cards show as pills in the current view.
@@ -452,6 +473,7 @@ impl App {
         };
         let id = project.views[next].id.clone();
         self.current = Some(id.clone());
+        self.sticky.clear();
         self.table_selected = 0;
         self.board_sel = BoardSelection::default();
         self.sync_selected_id();
@@ -756,7 +778,10 @@ impl App {
                     Some(Action::ClearFilter) if self.extra_filter().is_some() => {
                         self.set_extra_filter("")
                     }
-                    Some(Action::Refresh) => vec![Command::Refresh],
+                    Some(Action::Refresh) => {
+                        self.sticky.clear();
+                        vec![Command::Refresh]
+                    }
                     Some(Action::OpenBrowser) => {
                         let url = self
                             .selected_item()

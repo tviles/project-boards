@@ -2,6 +2,7 @@
 //! the filter excludes. Only that field's qualifiers are read; everything else is ignored.
 
 use crate::model::field::Field;
+use crate::model::item::Item;
 use std::collections::BTreeSet;
 
 /// The columns a filter allows for one field. The default constrains nothing.
@@ -35,6 +36,34 @@ impl ColumnConstraint {
         let included = self.include.as_ref().is_none_or(|set| set.contains(&title));
         included && !self.exclude.contains(&title)
     }
+}
+
+/// Whether `item` still matches `filter`, as far as can be told without GitHub: every
+/// single-select and iteration field the filter names allows the item's value, and an item
+/// is archived exactly when the filter has `is:archived`. Qualifiers this cannot read count
+/// as matching; GitHub's next list for the view decides those.
+pub fn still_matches(filter: &str, item: &Item, fields: &[Field]) -> bool {
+    let archived_view = tokens(filter)
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case("is:archived"));
+    if item.archived != archived_view {
+        return false;
+    }
+    fields.iter().filter(|f| f.kind.can_be_column()).all(|f| {
+        let constraint = column_constraint(filter, f);
+        if !constraint.is_constrained() {
+            return true;
+        }
+        let buckets = f.buckets().unwrap_or_default();
+        let bucket = item
+            .value(&f.id)
+            .and_then(|v| v.bucket_key())
+            .and_then(|key| buckets.iter().find(|b| b.matches(&key)).cloned());
+        match bucket {
+            Some(b) => constraint.allows(&b.title, false),
+            None => constraint.allows("", true),
+        }
+    })
 }
 
 /// Splits on whitespace outside double quotes.
@@ -313,5 +342,44 @@ mod tests {
         assert_eq!(shown("sprint:\"sprint 3\"", &f).join(" "), "Sprint 3");
         assert_eq!(shown("sprint:@current", &f)[0], "*");
         assert_eq!(shown("-sprint:@previous", &f)[0], "*");
+    }
+
+    use crate::model::FieldValue;
+    use crate::model::item::tests::issue;
+
+    /// An item whose Status (the `status()` helper: field `F`, option ids equal to their
+    /// names) is `option`.
+    fn with_status(option: &str) -> crate::model::Item {
+        let mut i = issue("i", 1, "x");
+        i.values.insert(
+            FieldId::new("F"),
+            FieldValue::SingleSelect {
+                option_id: OptionId::new(option),
+                name: option.into(),
+            },
+        );
+        i
+    }
+
+    #[test]
+    fn still_matches_reads_select_qualifiers_and_archived() {
+        let f = vec![status()];
+        assert!(still_matches("status:Todo", &with_status("Todo"), &f));
+        assert!(!still_matches("status:Todo", &with_status("Done"), &f));
+        assert!(!still_matches("-status:Done", &with_status("Done"), &f));
+        assert!(
+            still_matches("-status:Done label:bug", &with_status("Todo"), &f),
+            "other qualifiers are GitHub's call"
+        );
+        assert!(
+            !still_matches("status:Todo", &issue("i", 1, "x"), &f),
+            "no value, include terms"
+        );
+        assert!(still_matches("no:status", &issue("i", 1, "x"), &f));
+        let mut archived = with_status("Todo");
+        archived.archived = true;
+        assert!(!still_matches("", &archived, &f));
+        assert!(still_matches("is:archived", &archived, &f));
+        assert!(!still_matches("is:archived", &with_status("Todo"), &f));
     }
 }

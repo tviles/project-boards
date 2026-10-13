@@ -4,8 +4,17 @@
 use super::*;
 use crate::model::{Denial, EditContext, OpKind, check};
 use crate::ops::{Confirmed, Op, OpId};
+use crate::store::BoardSnapshot;
 use crate::ui::table::Row;
+use std::collections::HashMap;
 use std::time::Instant;
+
+/// A sticky item, and whether the view's list held it when it became sticky.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Sticky {
+    pub id: ItemId,
+    pub listed: bool,
+}
 
 /// An edit GitHub refused, for the error log.
 #[derive(Debug, Clone, PartialEq)]
@@ -102,10 +111,79 @@ impl App {
             self.status.flash = Some(self.denial_text(denial));
             return Vec::new();
         }
+        self.stick(&item.id);
         let id = self.store.begin(op);
         self.pending_kinds.insert(id, kind);
         self.restore_selection();
         vec![Command::Send(id)]
+    }
+
+    /// Keeps `id` in the current view for this visit, if it is shown there (or new).
+    pub(crate) fn stick(&mut self, id: &ItemId) {
+        if self.sticky.iter().any(|s| &s.id == id) {
+            return;
+        }
+        let shown = self
+            .view_items()
+            .is_some_and(|items| items.iter().any(|i| &i.id == id));
+        if !shown && !is_placeholder(id) {
+            return;
+        }
+        let listed = match (self.snapshot(), self.current_view()) {
+            (Some(s), Some(v)) => s.views.get(&v.id).is_some_and(|l| l.ids.contains(id)),
+            _ => false,
+        };
+        self.sticky.push(Sticky {
+            id: id.clone(),
+            listed,
+        });
+    }
+
+    /// Puts each sticky item missing from `items` where its project rank places it.
+    pub(super) fn add_sticky<'a>(&'a self, snap: &'a BoardSnapshot, items: &mut Vec<&'a Item>) {
+        if self.sticky.is_empty() {
+            return;
+        }
+        let rank: HashMap<&ItemId, usize> = snap
+            .order
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id, i))
+            .collect();
+        let rank_of = |id: &ItemId| rank.get(id).copied().unwrap_or(usize::MAX);
+        for sticky in &self.sticky {
+            if items.iter().any(|i| i.id == sticky.id) {
+                continue;
+            }
+            let Some(item) = snap.items.get(&sticky.id) else {
+                continue;
+            };
+            let mine = rank_of(&sticky.id);
+            let at = items
+                .iter()
+                .position(|i| rank_of(&i.id) > mine)
+                .unwrap_or(items.len());
+            items.insert(at, item);
+        }
+    }
+
+    /// A sticky item the view no longer matches: GitHub's latest list for the view dropped
+    /// it, or its values fail the filter as far as `still_matches` can tell.
+    pub fn unmatched(&self, item: &Item) -> bool {
+        let Some(sticky) = self.sticky.iter().find(|s| s.id == item.id) else {
+            return false;
+        };
+        let (Some(snap), Some(view)) = (self.snapshot(), self.current_view()) else {
+            return false;
+        };
+        let filter = self.effective_filter();
+        let dropped = !filter.trim().is_empty()
+            && sticky.listed
+            && snap
+                .views
+                .get(&view.id)
+                .is_some_and(|l| !l.ids.contains(&item.id));
+        dropped || !still_matches(&filter, item, &snap.project.fields)
     }
 
     /// Runs an edit key on `action_item`. `None` when `action` is not an edit key.
@@ -1253,5 +1331,132 @@ mod tests {
             }
         );
         assert_eq!(a.mode, Mode::Detail);
+    }
+
+    use crate::store::ViewList;
+
+    fn app_edited(edit: impl FnOnce(&mut crate::store::BoardSnapshot)) -> App {
+        let mut snap = snapshot();
+        edit(&mut snap);
+        App::new(
+            Box::new(crate::store::MemoryStore::new(Some(snap))),
+            crate::ui::keymap::Keymap::defaults(),
+            crate::ui::theme::Theme::plain(),
+        )
+    }
+
+    fn list(ids: &[&str]) -> ViewList {
+        ViewList {
+            ids: ids.iter().map(|i| ItemId::new(*i)).collect(),
+            total: ids.len(),
+            truncated: false,
+        }
+    }
+
+    fn column_titles(a: &App) -> Vec<String> {
+        a.board_columns()
+            .iter()
+            .map(|c| c.bucket.title.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_card_moved_out_of_a_filtered_board_waits_in_a_filtered_column() {
+        let mut a = app_edited(|s| s.project.views[1].filter = "-status:Done".into());
+        let board = crate::model::ViewId::new("V_board");
+        a.select_view(&board);
+        a.on_sync(SyncEvent::ViewIds {
+            view: board.clone(),
+            filter: "-status:Done".into(),
+            list: list(&["a", "b", "c", "e"]),
+        });
+        a.handle_key(code(KeyCode::Home));
+        assert_eq!(column_titles(&a), ["Todo", "In Progress", "No Status"]);
+        assert_eq!(a.handle_key(key('>')).len(), 1, "to In Progress");
+        assert!(
+            a.handle_key(key('>')).is_empty(),
+            "Done is not shown and No Status is no destination"
+        );
+        // Setting Done as `e` would (Task 17 adds the key).
+        a.submit(OpKind::SetField, set_status("a", "o_done", "Done"));
+        assert_eq!(
+            column_titles(&a),
+            ["Todo", "In Progress", "Done (filtered)", "No Status"]
+        );
+        let moved = a.snapshot().unwrap().items[&ItemId::new("a")].clone();
+        assert!(a.unmatched(&moved));
+        assert_eq!(selected(&a), "a");
+        assert!(
+            !a.unmatched(&a.snapshot().unwrap().items[&ItemId::new("c")].clone()),
+            "untouched items are not marked"
+        );
+    }
+
+    #[test]
+    fn an_item_the_next_list_leaves_out_stays_marked_until_the_view_is_left() {
+        let mut a = test_app();
+        let bugs = crate::model::ViewId::new("V_bugs");
+        a.select_view(&bugs);
+        a.on_sync(SyncEvent::ViewIds {
+            view: bugs.clone(),
+            filter: "label:bug".into(),
+            list: list(&["a"]),
+        });
+        a.handle_key(key('>'));
+        assert!(
+            !a.unmatched(&a.snapshot().unwrap().items[&ItemId::new("a")].clone()),
+            "still listed"
+        );
+        a.on_sync(SyncEvent::ViewIds {
+            view: bugs.clone(),
+            filter: "label:bug".into(),
+            list: list(&[]),
+        });
+        let ids: Vec<String> = a
+            .view_items()
+            .unwrap()
+            .iter()
+            .map(|i| i.id.0.clone())
+            .collect();
+        assert_eq!(ids, ["a"], "sticky");
+        assert!(a.unmatched(&a.snapshot().unwrap().items[&ItemId::new("a")].clone()));
+        a.handle_key(code(KeyCode::Tab));
+        a.handle_key(code(KeyCode::BackTab));
+        assert!(
+            a.view_items().unwrap().is_empty(),
+            "leaving the view lets go"
+        );
+    }
+
+    #[test]
+    fn r_lets_sticky_items_go() {
+        let mut a = test_app();
+        let bugs = crate::model::ViewId::new("V_bugs");
+        a.select_view(&bugs);
+        a.on_sync(SyncEvent::ViewIds {
+            view: bugs.clone(),
+            filter: "label:bug".into(),
+            list: list(&["a"]),
+        });
+        a.handle_key(key('>'));
+        a.on_sync(SyncEvent::ViewIds {
+            view: bugs,
+            filter: "label:bug".into(),
+            list: list(&[]),
+        });
+        assert_eq!(a.handle_key(key('r')), vec![Command::Refresh]);
+        assert!(a.view_items().unwrap().is_empty());
+    }
+
+    #[test]
+    fn views_without_a_filter_hide_archived_items() {
+        let a = app_edited(|s| s.items.get_mut(&ItemId::new("b")).unwrap().archived = true);
+        let ids: Vec<String> = a
+            .view_items()
+            .unwrap()
+            .iter()
+            .map(|i| i.id.0.clone())
+            .collect();
+        assert_eq!(ids, ["a", "c", "d", "e"]);
     }
 }
