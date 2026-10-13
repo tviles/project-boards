@@ -204,13 +204,17 @@ impl App {
                 .iter()
                 .map(|p| p.op.item().clone())
                 .collect(),
-            unmatched: self
-                .view_items()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|i| self.unmatched(i))
-                .map(|i| i.id.clone())
-                .collect(),
+            // Only sticky items can be unmatched; skip building the view without any.
+            unmatched: if self.sticky.is_empty() {
+                Default::default()
+            } else {
+                self.view_items()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|i| self.unmatched(i))
+                    .map(|i| i.id.clone())
+                    .collect()
+            },
             highlight: self.highlight.clone(),
         }
     }
@@ -1668,6 +1672,17 @@ mod tests {
         assert_eq!(a.marks().highlight, Some(id));
         a.handle_key(key('j'));
         assert_eq!(a.marks().highlight, None);
+    }
+
+    #[test]
+    fn with_no_sticky_items_marks_name_only_pending_items() {
+        let mut a = test_app();
+        a.store.begin(set_status("a", "o_done", "Done"));
+        assert!(a.sticky.is_empty());
+        let marks = a.marks();
+        assert_eq!(marks.pending, [ItemId::new("a")].into_iter().collect());
+        assert!(marks.unmatched.is_empty());
+        assert_eq!(marks.highlight, None);
     }
 
     #[test]

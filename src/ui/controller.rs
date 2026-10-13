@@ -160,6 +160,8 @@ pub struct Controller {
     generation: u64,
     /// When each pending edit goes out.
     queue: OpQueue,
+    /// Edit results not yet in the disk cache; saved at most once per tick and on exit.
+    cache_dirty: bool,
 }
 
 impl Controller {
@@ -194,6 +196,7 @@ impl Controller {
             awaiting_repo_projects: false,
             generation: 0,
             queue: OpQueue::new(),
+            cache_dirty: false,
         }
     }
 
@@ -329,6 +332,9 @@ impl Controller {
 
     /// Unregisters this pane from the board it shows. Called on board switch and on exit.
     pub fn release(&mut self) {
+        if self.cache_dirty {
+            self.persist_cache();
+        }
         if let (Some(board), Some(own)) = (self.board.take(), &self.options.own_pane)
             && let Err(e) = PaneRegistry::new(&self.options.state_dir).unregister(&board, own)
         {
@@ -387,6 +393,9 @@ impl Controller {
                 .map(|k| self.poll(k, now))
                 .unwrap_or_default(),
             Input::Tick => {
+                if self.cache_dirty {
+                    self.persist_cache();
+                }
                 let mut effects = self
                     .scheduler
                     .tick(now)
@@ -416,6 +425,7 @@ impl Controller {
             self.queue.finished(*id);
         }
         let op_done = matches!(event, SyncEvent::OpDone { .. });
+        let op_applied = matches!(event, SyncEvent::OpDone { result: Ok(_), .. });
         match &event {
             SyncEvent::Rate(rate) => self.scheduler.set_low_budget(rate.is_low()),
             SyncEvent::Failed {
@@ -449,9 +459,7 @@ impl Controller {
             self.scheduler.finished();
         }
         let persist = match &event {
-            SyncEvent::ItemsComplete { .. } | SyncEvent::Hydrated(_) | SyncEvent::OpDone { .. } => {
-                true
-            }
+            SyncEvent::ItemsComplete { .. } | SyncEvent::Hydrated(_) => true,
             SyncEvent::ItemsUpdated { items, .. } => !items.is_empty(),
             _ => false,
         };
@@ -509,6 +517,9 @@ impl Controller {
         }
         if persist {
             self.persist_cache();
+        } else if op_applied {
+            // Edits settle in bursts; the next tick saves them all at once.
+            self.cache_dirty = true;
         }
         let mut effects = self.commands(cmds, now);
         if op_done {
@@ -583,7 +594,8 @@ impl Controller {
         ));
     }
 
-    fn persist_cache(&self) {
+    fn persist_cache(&mut self) {
+        self.cache_dirty = false;
         let Some(snapshot) = self.app.store.confirmed() else {
             return;
         };
@@ -1751,6 +1763,7 @@ mod tests {
         submit(&mut c, set_status("a", "o_done"), t0);
         submit(&mut c, set_status("b", "o_done"), t0);
         done(&mut c, 1, Ok(Confirmed::Applied), t0);
+        c.handle(Input::Tick, t0);
         let cached = load_cache(&cache_path(dir.path(), &board())).unwrap();
         let status = |id: &str| {
             cached.items[&ItemId::new(id)]
@@ -1759,6 +1772,49 @@ mod tests {
         };
         assert_eq!(status("a").as_deref(), Some("o_done"));
         assert_eq!(status("b").as_deref(), Some("In Progress"));
+    }
+
+    fn cached_status(dir: &Path, item: &str) -> Option<String> {
+        load_cache(&cache_path(dir, &board()))?.items[&ItemId::new(item)]
+            .value(&FieldId::new("F_status"))
+            .map(|v| v.display())
+    }
+
+    #[test]
+    fn quick_edit_results_save_the_cache_once_on_the_next_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        let before = cached_status(dir.path(), "a");
+        for item in ["a", "b", "c", "d"] {
+            submit(&mut c, set_status(item, "o_done"), t0);
+        }
+        for id in 1..=4 {
+            done(&mut c, id, Ok(Confirmed::Applied), t0);
+        }
+        assert_eq!(
+            cached_status(dir.path(), "a"),
+            before,
+            "not saved per result"
+        );
+        c.handle(Input::Tick, t0);
+        assert_eq!(cached_status(dir.path(), "a").as_deref(), Some("o_done"));
+        assert_eq!(cached_status(dir.path(), "d").as_deref(), Some("o_done"));
+        std::fs::remove_file(cache_path(dir.path(), &board())).unwrap();
+        c.handle(Input::Tick, t0 + Duration::from_millis(1));
+        assert!(
+            !cache_path(dir.path(), &board()).exists(),
+            "one save: the next tick has nothing to write"
+        );
+    }
+
+    #[test]
+    fn exit_saves_edit_results_not_yet_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        submit(&mut c, set_status("a", "o_done"), t0);
+        done(&mut c, 1, Ok(Confirmed::Applied), t0);
+        c.release();
+        assert_eq!(cached_status(dir.path(), "a").as_deref(), Some("o_done"));
     }
 
     /// Review Focus 1, end to end.
