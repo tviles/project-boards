@@ -25,6 +25,19 @@ const REQUIRED: &[&str] = &[
     "clearProjectV2ItemFieldValue(",
     "updateProjectV2ItemPosition(",
     "multiSelectOptionIds: [String!]",
+    "addAssigneesToAssignable(",
+    "removeAssigneesFromAssignable(",
+    "addLabelsToLabelable(",
+    "removeLabelsFromLabelable(",
+    "updateIssue(",
+    "updatePullRequest(",
+    "updateProjectV2DraftIssue(",
+    "addComment(",
+    "closeIssue(",
+    "reopenIssue(",
+    "closePullRequest(",
+    "reopenPullRequest(",
+    "enum IssueClosedStateReason",
 ];
 
 #[test]

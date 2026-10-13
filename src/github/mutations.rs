@@ -183,6 +183,253 @@ impl Github {
     }
 }
 
+impl Github {
+    /// Runs a mutation whose payload carries nothing the board needs.
+    async fn mutate_ok<V: serde::Serialize>(
+        &self,
+        body: graphql_client::QueryBody<V>,
+        name: &str,
+    ) -> Result<(), GithubError> {
+        let response = self.run(GraphqlRequest::from_body(body)).await?;
+        payload(&response, name).map(|_| ())
+    }
+
+    pub async fn add_assignees(&self, content: &str, users: &[String]) -> Result<(), GithubError> {
+        let vars = queries::add_assignees::Variables {
+            id: content.into(),
+            users: users.to_vec(),
+        };
+        self.mutate_ok(
+            queries::AddAssignees::build_query(vars),
+            "addAssigneesToAssignable",
+        )
+        .await
+    }
+
+    pub async fn remove_assignees(
+        &self,
+        content: &str,
+        users: &[String],
+    ) -> Result<(), GithubError> {
+        let vars = queries::remove_assignees::Variables {
+            id: content.into(),
+            users: users.to_vec(),
+        };
+        self.mutate_ok(
+            queries::RemoveAssignees::build_query(vars),
+            "removeAssigneesFromAssignable",
+        )
+        .await
+    }
+
+    /// Replaces a draft's assignees (drafts have no add/remove mutation).
+    pub async fn set_draft_assignees(
+        &self,
+        draft: &str,
+        users: &[String],
+    ) -> Result<(), GithubError> {
+        let vars = queries::set_draft_assignees::Variables {
+            id: draft.into(),
+            users: users.to_vec(),
+        };
+        self.mutate_ok(
+            queries::SetDraftAssignees::build_query(vars),
+            "updateProjectV2DraftIssue",
+        )
+        .await
+    }
+
+    pub async fn add_labels(&self, content: &str, labels: &[String]) -> Result<(), GithubError> {
+        let vars = queries::add_labels::Variables {
+            id: content.into(),
+            labels: labels.to_vec(),
+        };
+        self.mutate_ok(
+            queries::AddLabels::build_query(vars),
+            "addLabelsToLabelable",
+        )
+        .await
+    }
+
+    pub async fn remove_labels(&self, content: &str, labels: &[String]) -> Result<(), GithubError> {
+        let vars = queries::remove_labels::Variables {
+            id: content.into(),
+            labels: labels.to_vec(),
+        };
+        self.mutate_ok(
+            queries::RemoveLabels::build_query(vars),
+            "removeLabelsFromLabelable",
+        )
+        .await
+    }
+
+    pub async fn set_title(&self, content: &ContentId, title: &str) -> Result<(), GithubError> {
+        let (id, title) = (content.node_id().to_string(), title.to_string());
+        match content {
+            ContentId::Issue(_) => {
+                self.mutate_ok(
+                    queries::UpdateIssueTitle::build_query(
+                        queries::update_issue_title::Variables { id, title },
+                    ),
+                    "updateIssue",
+                )
+                .await
+            }
+            ContentId::PullRequest(_) => {
+                self.mutate_ok(
+                    queries::UpdatePullRequestTitle::build_query(
+                        queries::update_pull_request_title::Variables { id, title },
+                    ),
+                    "updatePullRequest",
+                )
+                .await
+            }
+            ContentId::Draft(_) => {
+                self.mutate_ok(
+                    queries::UpdateDraftTitle::build_query(
+                        queries::update_draft_title::Variables { id, title },
+                    ),
+                    "updateProjectV2DraftIssue",
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn set_body(&self, content: &ContentId, body: &str) -> Result<(), GithubError> {
+        let (id, body) = (content.node_id().to_string(), body.to_string());
+        match content {
+            ContentId::Issue(_) => {
+                self.mutate_ok(
+                    queries::UpdateIssueBody::build_query(queries::update_issue_body::Variables {
+                        id,
+                        body,
+                    }),
+                    "updateIssue",
+                )
+                .await
+            }
+            ContentId::PullRequest(_) => {
+                self.mutate_ok(
+                    queries::UpdatePullRequestBody::build_query(
+                        queries::update_pull_request_body::Variables { id, body },
+                    ),
+                    "updatePullRequest",
+                )
+                .await
+            }
+            ContentId::Draft(_) => {
+                self.mutate_ok(
+                    queries::UpdateDraftBody::build_query(queries::update_draft_body::Variables {
+                        id,
+                        body,
+                    }),
+                    "updateProjectV2DraftIssue",
+                )
+                .await
+            }
+        }
+    }
+
+    /// Sets (`Some(milestone id)`) or clears (`None`) the milestone. Drafts have none.
+    pub async fn set_milestone(
+        &self,
+        content: &ContentId,
+        milestone: Option<&str>,
+    ) -> Result<(), GithubError> {
+        let (id, milestone) = (content.node_id().to_string(), milestone.map(String::from));
+        match content {
+            ContentId::Issue(_) => {
+                self.mutate_ok(
+                    queries::SetIssueMilestone::build_query(
+                        queries::set_issue_milestone::Variables { id, milestone },
+                    ),
+                    "updateIssue",
+                )
+                .await
+            }
+            ContentId::PullRequest(_) => {
+                self.mutate_ok(
+                    queries::SetPullRequestMilestone::build_query(
+                        queries::set_pull_request_milestone::Variables { id, milestone },
+                    ),
+                    "updatePullRequest",
+                )
+                .await
+            }
+            ContentId::Draft(_) => Err(GithubError::Decode("drafts have no milestone".into())),
+        }
+    }
+
+    pub async fn add_comment(&self, subject: &str, body: &str) -> Result<(), GithubError> {
+        let vars = queries::add_comment::Variables {
+            subject: subject.into(),
+            body: body.into(),
+        };
+        self.mutate_ok(queries::AddComment::build_query(vars), "addComment")
+            .await
+    }
+
+    /// Closes an issue (as completed unless `reason` says otherwise) or a pull request.
+    pub async fn close(
+        &self,
+        content: &ContentId,
+        reason: Option<CloseReason>,
+    ) -> Result<(), GithubError> {
+        use queries::close_issue::IssueClosedStateReason as Reason;
+        let id = content.node_id().to_string();
+        match content {
+            ContentId::Issue(_) => {
+                let reason = match reason {
+                    Some(CloseReason::NotPlanned) => Reason::NOT_PLANNED,
+                    Some(CloseReason::Completed) | None => Reason::COMPLETED,
+                };
+                self.mutate_ok(
+                    queries::CloseIssue::build_query(queries::close_issue::Variables {
+                        id,
+                        reason,
+                    }),
+                    "closeIssue",
+                )
+                .await
+            }
+            ContentId::PullRequest(_) => {
+                self.mutate_ok(
+                    queries::ClosePullRequest::build_query(
+                        queries::close_pull_request::Variables { id },
+                    ),
+                    "closePullRequest",
+                )
+                .await
+            }
+            ContentId::Draft(_) => Err(GithubError::Decode("drafts cannot be closed".into())),
+        }
+    }
+
+    pub async fn reopen(&self, content: &ContentId) -> Result<(), GithubError> {
+        let id = content.node_id().to_string();
+        match content {
+            ContentId::Issue(_) => {
+                self.mutate_ok(
+                    queries::ReopenIssue::build_query(queries::reopen_issue::Variables { id }),
+                    "reopenIssue",
+                )
+                .await
+            }
+            ContentId::PullRequest(_) => {
+                self.mutate_ok(
+                    queries::ReopenPullRequest::build_query(
+                        queries::reopen_pull_request::Variables { id },
+                    ),
+                    "reopenPullRequest",
+                )
+                .await
+            }
+            ContentId::Draft(_) => Err(GithubError::Decode("drafts cannot be reopened".into())),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +693,154 @@ mod tests {
             (Some("Idea"), Some("Body"))
         );
         assert_eq!(r[1].variables["item"], "PVTI_1");
+    }
+    fn ok_payload(t: &FixtureTransport, op: &str, mutation: &str) {
+        let mut data = serde_json::Map::new();
+        data.insert(mutation.into(), json!({"clientMutationId": null}));
+        t.push(op, serde_json::Value::Object(data));
+    }
+
+    #[tokio::test]
+    async fn assignee_and_label_changes_send_node_ids() {
+        let t = Arc::new(FixtureTransport::new());
+        ok_payload(&t, "AddAssignees", "addAssigneesToAssignable");
+        ok_payload(&t, "RemoveAssignees", "removeAssigneesFromAssignable");
+        ok_payload(&t, "SetDraftAssignees", "updateProjectV2DraftIssue");
+        ok_payload(&t, "AddLabels", "addLabelsToLabelable");
+        ok_payload(&t, "RemoveLabels", "removeLabelsFromLabelable");
+        let gh = Github::new(t.clone());
+        gh.add_assignees("I_1", &["U_1".into()]).await.unwrap();
+        gh.remove_assignees("I_1", &["U_2".into()]).await.unwrap();
+        gh.set_draft_assignees("DI_1", &["U_1".into(), "U_3".into()])
+            .await
+            .unwrap();
+        gh.add_labels("I_1", &["LA_1".into()]).await.unwrap();
+        gh.remove_labels("I_1", &["LA_2".into()]).await.unwrap();
+        let r = t.requests();
+        assert_eq!(
+            (r[0].variables["id"].as_str(), &r[0].variables["users"]),
+            (Some("I_1"), &json!(["U_1"]))
+        );
+        assert_eq!(r[2].variables["users"], json!(["U_1", "U_3"]));
+        assert_eq!(r[4].variables["labels"], json!(["LA_2"]));
+    }
+
+    #[tokio::test]
+    async fn title_body_and_milestone_go_to_the_right_mutation_per_content_type() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push(
+            "UpdateIssueTitle",
+            json!({"updateIssue": {"issue": {"id": "I_1"}}}),
+        );
+        t.push(
+            "UpdatePullRequestBody",
+            json!({"updatePullRequest": {"pullRequest": {"id": "PR_1"}}}),
+        );
+        t.push(
+            "UpdateDraftTitle",
+            json!({"updateProjectV2DraftIssue": {"draftIssue": {"id": "DI_1"}}}),
+        );
+        t.push(
+            "SetIssueMilestone",
+            json!({"updateIssue": {"issue": {"id": "I_1"}}}),
+        );
+        t.push(
+            "SetPullRequestMilestone",
+            json!({"updatePullRequest": {"pullRequest": {"id": "PR_1"}}}),
+        );
+        let gh = Github::new(t.clone());
+        gh.set_title(&ContentId::Issue("I_1".into()), "New")
+            .await
+            .unwrap();
+        gh.set_body(&ContentId::PullRequest("PR_1".into()), "Body")
+            .await
+            .unwrap();
+        gh.set_title(&ContentId::Draft("DI_1".into()), "Idea")
+            .await
+            .unwrap();
+        gh.set_milestone(&ContentId::Issue("I_1".into()), None)
+            .await
+            .unwrap();
+        gh.set_milestone(&ContentId::PullRequest("PR_1".into()), Some("MI_1"))
+            .await
+            .unwrap();
+        let r = t.requests();
+        let names: Vec<&str> = r.iter().map(|q| q.operation_name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "UpdateIssueTitle",
+                "UpdatePullRequestBody",
+                "UpdateDraftTitle",
+                "SetIssueMilestone",
+                "SetPullRequestMilestone"
+            ]
+        );
+        assert!(
+            r[3].variables["milestone"].is_null(),
+            "null clears the milestone"
+        );
+        assert_eq!(r[4].variables["milestone"], "MI_1");
+        let refused = gh
+            .set_milestone(&ContentId::Draft("DI_1".into()), Some("MI_1"))
+            .await;
+        assert!(refused.is_err());
+        assert_eq!(t.requests().len(), 5, "no request for a draft milestone");
+    }
+
+    #[tokio::test]
+    async fn comments_close_and_reopen() {
+        let t = Arc::new(FixtureTransport::new());
+        ok_payload(&t, "AddComment", "addComment");
+        t.push(
+            "CloseIssue",
+            json!({"closeIssue": {"issue": {"id": "I_1"}}}),
+        );
+        t.push(
+            "CloseIssue",
+            json!({"closeIssue": {"issue": {"id": "I_1"}}}),
+        );
+        t.push(
+            "ReopenIssue",
+            json!({"reopenIssue": {"issue": {"id": "I_1"}}}),
+        );
+        t.push(
+            "ClosePullRequest",
+            json!({"closePullRequest": {"pullRequest": {"id": "PR_1"}}}),
+        );
+        t.push(
+            "ReopenPullRequest",
+            json!({"reopenPullRequest": {"pullRequest": {"id": "PR_1"}}}),
+        );
+        let gh = Github::new(t.clone());
+        let issue = ContentId::Issue("I_1".into());
+        let pr = ContentId::PullRequest("PR_1".into());
+        gh.add_comment("I_1", "LGTM").await.unwrap();
+        gh.close(&issue, Some(CloseReason::NotPlanned))
+            .await
+            .unwrap();
+        gh.close(&issue, None).await.unwrap();
+        gh.reopen(&issue).await.unwrap();
+        gh.close(&pr, None).await.unwrap();
+        gh.reopen(&pr).await.unwrap();
+        let r = t.requests();
+        assert_eq!(
+            (
+                r[0].variables["subject"].as_str(),
+                r[0].variables["body"].as_str()
+            ),
+            (Some("I_1"), Some("LGTM"))
+        );
+        assert_eq!(r[1].variables["reason"], "NOT_PLANNED");
+        assert_eq!(
+            r[2].variables["reason"], "COMPLETED",
+            "issues default to completed"
+        );
+        assert_eq!(r[4].operation_name, "ClosePullRequest");
+        assert!(
+            gh.close(&ContentId::Draft("DI_1".into()), None)
+                .await
+                .is_err()
+        );
     }
 }
