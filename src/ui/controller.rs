@@ -14,6 +14,7 @@ use crate::store::cache::{cache_path, load_cache, save_cache};
 use crate::sync::scheduler::{PollConfig, PollKind, Scheduler};
 use crate::sync::{IncrementalMode, SyncEvent, SyncTask};
 use crate::ui::app::{App, Command, EditPurpose, Mode, setup_message};
+use crate::ui::editor::Edited;
 use crate::ui::keymap::Keymap;
 use crate::ui::picker::PickerState;
 use crate::ui::theme::Theme;
@@ -51,10 +52,10 @@ pub enum Input {
         generation: u64,
         event: SyncEvent,
     },
-    /// `$EDITOR` closed (`Effect::Editor`); `None` when it failed or could not run.
+    /// `$EDITOR` closed (`Effect::Editor`).
     Edited {
         purpose: EditPurpose,
-        text: Option<String>,
+        edited: Edited,
     },
 }
 
@@ -434,8 +435,8 @@ impl Controller {
                 }
                 self.on_sync(event, now)
             }
-            Input::Edited { purpose, text } => {
-                let cmds = self.app.on_edited(purpose, text);
+            Input::Edited { purpose, edited } => {
+                let cmds = self.app.on_edited(purpose, edited);
                 self.commands(cmds, now)
             }
         }
@@ -2129,7 +2130,7 @@ mod tests {
         let effects = c.handle(
             Input::Edited {
                 purpose: EditPurpose::Comment(ItemId::new("a")),
-                text: Some("LGTM".into()),
+                edited: Some("LGTM".to_string()).into(),
             },
             t0,
         );

@@ -8,6 +8,7 @@ use crate::store::BoardSnapshot;
 use crate::ui::app::popups::{
     GONE, assignee_options, fill_checklist, label_options, milestone_choices,
 };
+use crate::ui::editor::{Edited, trim_blank_lines};
 use crate::ui::marks::ItemMarks;
 use crate::ui::table::Row;
 use std::collections::HashMap;
@@ -70,6 +71,19 @@ fn creates_content(op: &Op) -> bool {
             ..
         }
     )
+}
+
+/// The editor came back at once with nothing changed: it probably opened a window and did
+/// not wait for it.
+pub const RETURNED_AT_ONCE: &str =
+    "Nothing changed — if your editor opens a window, use a waiting flag such as `code -w`";
+
+/// The editor saved bytes that aren't UTF-8.
+pub const NOT_UTF8: &str = "The editor saved text that isn't UTF-8; nothing was sent";
+
+/// `text` with CRLF line endings as LF.
+fn lf(text: &str) -> String {
+    text.replace("\r\n", "\n")
 }
 
 /// Failed edits kept in the log; the oldest drop first.
@@ -609,15 +623,26 @@ impl App {
         }
     }
 
+    /// The `Command::Edit` for `purpose`: on `initial`, or on text an earlier session of the
+    /// same purpose saved but could not send (not UTF-8), so it is not lost.
+    fn open_editor(&mut self, purpose: EditPurpose, initial: String) -> Vec<Command> {
+        let initial = match self.unsent.take() {
+            Some((p, text)) if p == purpose => text,
+            other => {
+                self.unsent = other;
+                initial
+            }
+        };
+        vec![Command::Edit { purpose, initial }]
+    }
+
     /// Opens `$EDITOR` on the item's title.
     pub(crate) fn edit_title(&mut self) -> Vec<Command> {
         let Some(item) = self.guarded(OpKind::Title) else {
             return Vec::new();
         };
-        vec![Command::Edit {
-            initial: item.title().to_string(),
-            purpose: EditPurpose::Title(item.id),
-        }]
+        let title = item.title().to_string();
+        self.open_editor(EditPurpose::Title(item.id), title)
     }
 
     /// Opens `$EDITOR` on the item's body. The body is only known once the item detail has
@@ -628,10 +653,7 @@ impl App {
             return Vec::new();
         };
         if let Some(body) = self.loaded_body(&item.id) {
-            return vec![Command::Edit {
-                purpose: EditPurpose::Body(item.id),
-                initial: body,
-            }];
+            return self.open_editor(EditPurpose::Body(item.id), body);
         }
         let cmds = match self.detail.as_ref().filter(|d| d.item == item.id) {
             // Still loading.
@@ -651,10 +673,7 @@ impl App {
         let Some(item) = self.guarded(OpKind::Comment) else {
             return Vec::new();
         };
-        vec![Command::Edit {
-            purpose: EditPurpose::Comment(item.id),
-            initial: String::new(),
-        }]
+        self.open_editor(EditPurpose::Comment(item.id), String::new())
     }
 
     /// The body the open detail has loaded for `item`.
@@ -663,12 +682,27 @@ impl App {
         d.detail.as_ref().map(|x| x.body.clone())
     }
 
-    /// The editor closed with `text` (`None`: it exited with an error). Sends the edit unless
-    /// that, or the text is empty or unchanged; the status line says which.
-    pub(crate) fn on_edited(&mut self, purpose: EditPurpose, text: Option<String>) -> Vec<Command> {
-        let Some(text) = text else {
-            return self.say("The editor exited with an error; nothing was sent");
+    /// The editor closed. Sends the edit unless the editor failed, the text isn't UTF-8 (it is
+    /// kept for the next session of the same purpose), or it is empty or unchanged; the
+    /// status line says which. Nothing changed after an editor that returned at once suggests
+    /// a waiting flag. `Option<String>` converts: `Some` saved, `None` failed.
+    pub(crate) fn on_edited(
+        &mut self,
+        purpose: EditPurpose,
+        edited: impl Into<Edited>,
+    ) -> Vec<Command> {
+        let (text, quick) = match edited.into() {
+            Edited::Saved { text, quick } => (text, quick),
+            Edited::Failed => {
+                return self.say("The editor exited with an error; nothing was sent");
+            }
+            Edited::NotUtf8 { lossy } => {
+                self.unsent = Some((purpose, lossy));
+                return self.say(NOT_UTF8);
+            }
+            Edited::Error(message) => return self.say(&message),
         };
+        let unchanged = |what: &'static str| if quick { RETURNED_AT_ONCE } else { what };
         match purpose {
             EditPurpose::Title(id) => {
                 let title = text
@@ -681,7 +715,7 @@ impl App {
                     return self.say("Empty title; nothing was sent");
                 }
                 if self.item(&id).is_some_and(|i| i.title() == title) {
-                    return self.say("Title unchanged");
+                    return self.say(unchanged("Title unchanged"));
                 }
                 self.submit_content(OpKind::Title, id, |item, content| Op::Title {
                     item,
@@ -692,8 +726,9 @@ impl App {
             EditPurpose::Body(id) => {
                 let body = text.trim_end().to_string();
                 let current = self.loaded_body(&id).unwrap_or_default();
-                if body == current.trim_end() {
-                    return self.say("Body unchanged");
+                // An editor that rewrites line endings has not changed the body.
+                if lf(&body).trim_end() == lf(&current).trim_end() {
+                    return self.say(unchanged("Body unchanged"));
                 }
                 self.submit_content(OpKind::Body, id, |item, content| Op::Body {
                     item,
@@ -702,9 +737,9 @@ impl App {
                 })
             }
             EditPurpose::Comment(id) => {
-                let body = text.trim().to_string();
+                let body = trim_blank_lines(&text);
                 if body.is_empty() {
-                    return self.say("Empty comment; nothing was sent");
+                    return self.say(unchanged("Empty comment; nothing was sent"));
                 }
                 self.submit_content(OpKind::Comment, id, |item, content| Op::Comment {
                     item,
@@ -3442,5 +3477,106 @@ mod tests {
                 before: None
             }]
         );
+    }
+
+    #[test]
+    fn text_that_isnt_utf8_is_not_sent_and_reopens_next_time() {
+        let mut a = test_app();
+        let comment = || EditPurpose::Comment(ItemId::new("a"));
+        let lossy = Edited::NotUtf8 {
+            lossy: "caf\u{FFFD}".into(),
+        };
+        assert!(a.on_edited(comment(), lossy).is_empty());
+        assert_eq!(a.status.flash.as_deref(), Some(NOT_UTF8));
+        assert_eq!(a.pending_count(), 0);
+        assert_eq!(
+            a.edit_title(),
+            vec![Command::Edit {
+                purpose: EditPurpose::Title(ItemId::new("a")),
+                initial: "Fix crash".into()
+            }],
+            "another purpose opens as usual"
+        );
+        let reopen = vec![Command::Edit {
+            purpose: comment(),
+            initial: "caf\u{FFFD}".into(),
+        }];
+        assert_eq!(a.comment(), reopen);
+        assert_eq!(
+            a.comment()[0],
+            Command::Edit {
+                purpose: comment(),
+                initial: String::new()
+            },
+            "once"
+        );
+    }
+
+    #[test]
+    fn an_editor_that_could_not_start_says_why() {
+        let mut a = test_app();
+        let error = Edited::Error("Could not start vi: No such file or directory".into());
+        assert!(
+            a.on_edited(EditPurpose::Title(ItemId::new("a")), error)
+                .is_empty()
+        );
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Could not start vi: No such file or directory")
+        );
+    }
+
+    #[test]
+    fn nothing_changed_at_once_suggests_a_waiting_flag() {
+        let mut a = test_app();
+        let at_once = |text: &str| Edited::Saved {
+            text: text.into(),
+            quick: true,
+        };
+        assert!(
+            a.on_edited(EditPurpose::Title(ItemId::new("a")), at_once("Fix crash"))
+                .is_empty()
+        );
+        assert_eq!(a.status.flash.as_deref(), Some(RETURNED_AT_ONCE));
+        assert!(
+            a.on_edited(EditPurpose::Comment(ItemId::new("a")), at_once(""))
+                .is_empty()
+        );
+        assert_eq!(a.status.flash.as_deref(), Some(RETURNED_AT_ONCE));
+        assert_eq!(
+            a.on_edited(EditPurpose::Title(ItemId::new("a")), at_once("Quick fix")),
+            vec![Command::Send(1)],
+            "a quick change is still sent"
+        );
+    }
+
+    #[test]
+    fn a_body_whose_line_endings_changed_is_unchanged() {
+        let mut a = test_app();
+        open_detail_with_body(&mut a, "Steps\r\n1. run\r\n");
+        let body = || EditPurpose::Body(ItemId::new("a"));
+        assert!(
+            a.on_edited(body(), Some("Steps\n1. run\n".into()))
+                .is_empty()
+        );
+        assert_eq!(a.status.flash.as_deref(), Some("Body unchanged"));
+        assert_eq!(
+            a.on_edited(body(), Some("Steps\n1. run\n2. crash\n".into())),
+            vec![Command::Send(1)]
+        );
+    }
+
+    #[test]
+    fn a_comment_keeps_its_indentation() {
+        let mut a = test_app();
+        let text = "\n\n    let x = 1;\n  - item\n\n";
+        assert_eq!(
+            a.on_edited(EditPurpose::Comment(ItemId::new("a")), Some(text.into())),
+            vec![Command::Send(1)]
+        );
+        match &a.store.pending()[0].op {
+            Op::Comment { body, .. } => assert_eq!(body, "    let x = 1;\n  - item"),
+            other => panic!("expected a comment, got {other:?}"),
+        }
     }
 }

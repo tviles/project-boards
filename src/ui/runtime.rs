@@ -6,6 +6,7 @@ use crate::sync::INCREMENTAL_MODE;
 use crate::sync::syncer::Syncer;
 use crate::ui::chrome;
 use crate::ui::controller::{Controller, Effect, Input, PaneOptions, SyncJob};
+use crate::ui::editor::Edited;
 use anyhow::Context;
 use crossterm::cursor::Show;
 use crossterm::event::{DisableFocusChange, EnableFocusChange, Event, EventStream};
@@ -90,7 +91,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
 
 /// SIGTERM, SIGHUP and SIGINT take the clean exit path. In raw mode `Ctrl+C` is a key, so
 /// SIGINT only comes from outside, or from `Ctrl+C` while `$EDITOR` has the terminal: that one
-/// is the editor's and is dropped (`suspended_edit`).
+/// is the editor's and is dropped (`ended_while_editing`).
 struct Signals {
     term: tokio::signal::unix::Signal,
     hup: tokio::signal::unix::Signal,
@@ -112,6 +113,11 @@ async fn event_loop(
     };
     // Events arrive tagged with the generation of the job that produced them.
     let (tx, rx) = mpsc::unbounded_channel::<Tagged>();
+    // Files of editor sessions a crashed or killed pane left behind hold the user's text.
+    let edits = crate::ui::editor::edit_dir(&options.state_dir);
+    if let Err(e) = crate::ui::editor::clear_stale(&edits, crate::ui::editor::pid_alive) {
+        tracing::warn!(error = %e, "could not clear old editor files");
+    }
     let mut controller = Controller::new(options, herdr, INCREMENTAL_MODE, Instant::now());
     let result = drive(terminal, &mut controller, tx, rx, &settings, signals).await;
     // Every exit path (Exit effect, SIGTERM/SIGHUP, a failed draw) unregisters the pane.
@@ -155,13 +161,17 @@ async fn drive(
                         pending.extend(start(controller, &mut runner, &tx, settings))
                     }
                     Effect::Editor { purpose, initial } => {
-                        let dir = settings.state_dir.join("edit");
-                        let text = suspended_edit(terminal, &initial, &dir, &mut signals)?;
+                        let dir = crate::ui::editor::edit_dir(&settings.state_dir);
+                        let edited = suspended_edit(terminal, &initial, &dir)?;
+                        if ended_while_editing(&mut signals) {
+                            // Asked to stop meanwhile: stop now, sending nothing.
+                            return Ok(());
+                        }
                         // A fresh reader: nothing typed into the editor reaches the board
                         // (pre-flight ruling 10; `suspended_edit` drained what was buffered).
                         events = EventStream::new();
-                        let edited = Input::Edited { purpose, text };
-                        pending.extend(controller.handle(edited, Instant::now()));
+                        let input = Input::Edited { purpose, edited };
+                        pending.extend(controller.handle(input, Instant::now()));
                     }
                     Effect::Exit => return Ok(()),
                 }
@@ -206,24 +216,21 @@ struct StartSettings {
     state_dir: PathBuf,
 }
 
-/// Runs `$EDITOR` on `initial` with the TUI suspended, then restores it. `Ok(None)` when the
-/// editor could not run or exited with an error; `Err` when the terminal could not be taken
-/// back (the board then exits through the usual clean path).
+/// Runs `$EDITOR` on `initial` with the TUI suspended, then restores it. `Err` when the
+/// terminal could not be taken back (the board then exits through the usual clean path).
 ///
 /// The editor only ever starts from a key press, which the loop handles before it reads input
 /// again, so no reader waits on the terminal meanwhile (Decision 27). Afterwards whatever
-/// input is still buffered is dropped, never replayed on the board (pre-flight ruling 10),
-/// and so is a SIGINT from `Ctrl+C` in the editor's terminal.
+/// input is still buffered is dropped, never replayed on the board (pre-flight ruling 10).
 fn suspended_edit(
     terminal: &mut DefaultTerminal,
     initial: &str,
     dir: &Path,
-    signals: &mut Signals,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Edited> {
     let _ = execute!(std::io::stdout(), DisableFocusChange, Show);
     ratatui::restore();
     let command = crate::ui::editor::editor_command(|k| std::env::var(k).ok());
-    let result =
+    let edited =
         tokio::task::block_in_place(|| crate::ui::editor::edit_text(initial, &command, dir));
     // Not `ratatui::try_init`: it would install another panic hook over
     // `keep_terminal_on_worker_panics`, one that restores the terminal on any thread's panic.
@@ -234,15 +241,29 @@ fn suspended_edit(
     // The editor drew over the screen: the next draw repaints all of it.
     terminal.clear()?;
     drain_input();
-    while let Some(Some(())) = signals.int.recv().now_or_never() {}
-    match result {
-        Ok(text) => Ok(text),
-        Err(e) => {
-            // The error names the failure only, never the text or the file's contents.
-            tracing::warn!(error = %e, "could not run the editor");
-            Ok(None)
-        }
+    if let Edited::Error(reason) = &edited {
+        // The program and the OS error only, never the text or the file's contents.
+        tracing::warn!(%reason, "the editor did not run");
     }
+    Ok(edited)
+}
+
+/// After the editor: drops a SIGINT from `Ctrl+C` in its terminal, and says whether SIGTERM
+/// or SIGHUP arrived meanwhile (the board then exits without sending the edit).
+fn ended_while_editing(signals: &mut Signals) -> bool {
+    fired(&mut signals.int);
+    let term = fired(&mut signals.term);
+    let hup = fired(&mut signals.hup);
+    term || hup
+}
+
+/// Whether `signal` arrived since it was last received, taking every pending delivery.
+fn fired(signal: &mut tokio::signal::unix::Signal) -> bool {
+    let mut any = false;
+    while let Some(Some(())) = signal.recv().now_or_never() {
+        any = true;
+    }
+    any
 }
 
 /// Drops every input event already waiting: keys typed while the editor ran, or right after.
@@ -375,6 +396,43 @@ mod tests {
     use crate::model::{FieldId, ItemId, ProjectId};
     use crate::ops::Op;
     use crate::sync::SyncEvent;
+
+    /// A signal that arrived while the editor ran is seen afterwards, once. Tested with the
+    /// user signals in place of SIGTERM, SIGHUP and SIGINT, so the test process is safe.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stop_signal_during_the_editor_is_seen_and_an_interrupt_is_dropped() {
+        let mut signals = Signals {
+            term: signal(SignalKind::user_defined1()).unwrap(),
+            hup: signal(SignalKind::user_defined2()).unwrap(),
+            int: signal(SignalKind::alarm()).unwrap(),
+        };
+        assert!(!ended_while_editing(&mut signals));
+        let raise = |name: &str| {
+            let pid = std::process::id().to_string();
+            let ok = std::process::Command::new("kill")
+                .args(["-s", name, &pid])
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "kill -s {name}");
+        };
+        let settle = || tokio::time::sleep(Duration::from_millis(200));
+        raise("ALRM");
+        settle().await;
+        assert!(!ended_while_editing(&mut signals), "an interrupt only");
+        assert!(!fired(&mut signals.int), "and it was taken");
+        raise("USR2");
+        let mut seen = false;
+        for _ in 0..50 {
+            settle().await;
+            if ended_while_editing(&mut signals) {
+                seen = true;
+                break;
+            }
+        }
+        assert!(seen, "the hangup was seen");
+        assert!(!ended_while_editing(&mut signals), "once");
+    }
 
     #[test]
     fn only_a_panic_on_the_ui_thread_restores_the_terminal() {

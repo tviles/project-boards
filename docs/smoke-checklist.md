@@ -39,3 +39,4 @@ Setup: `cargo build --release && herdr plugin link .`, keybinding for `tviles.pr
 
 - [ ] In `$EDITOR` (opened with `c`), type `q`, `j`, `x`, `X`, `>` and arrow keys, then save and quit: back on the board nothing quit, moved, closed or changed filters (no keystroke typed in the editor reached the board), and the whole screen is redrawn.
 - [ ] With `VISUAL='code -w'`, `c` then `Ctrl+C` in the pane cancels the comment ("The editor exited with an error; nothing was sent") and the board stays open.
+- [ ] With the editor open from `c`, `kill <pane pid>` from another pane, then quit the editor: the board exits and no comment is sent.

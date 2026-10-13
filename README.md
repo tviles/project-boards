@@ -91,6 +91,8 @@ The token comes from `GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token`, in that ord
 - `herdr plugin log list --plugin tviles.project-boards` shows action output.
 - The pane logs to `project-boards.log` in its state directory (`~/.local/state/herdr/plugins/tviles.project-boards/`); set `RUST_LOG=debug` for more.
 - In overlay placement, see `docs/phase0-findings.md` finding 6 for how `Esc` behaves.
+- While `$EDITOR` is open the board waits for it. Quit the editor rather than suspending it with `Ctrl+Z`: the board is suspended with it, and a herdr pane has no shell to bring them back with `fg`.
+- An editor that opens a window and returns at once (`code`, `subl`) needs its waiting flag: `VISUAL='code -w'`.
 
 ## Privacy
 
