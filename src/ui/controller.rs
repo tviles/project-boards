@@ -1720,7 +1720,6 @@ mod tests {
     fn a_stale_lookup_answer_is_dropped() {
         let dir = tempfile::tempdir().unwrap();
         let (mut c, t0) = opened(dir.path());
-        let repo: RepoSlug = "acme/app".parse().unwrap();
         c.app.need_repos();
         let stale = c.generation().wrapping_add(1);
         let effects = c.handle(
@@ -1735,7 +1734,6 @@ mod tests {
         );
         assert!(effects.is_empty());
         assert!(matches!(c.app.repos, Some(crate::ui::app::Lookup::Loading)));
-        let _ = repo;
     }
 
     fn submit(c: &mut Controller, op: Op, now: Instant) -> Vec<Effect> {

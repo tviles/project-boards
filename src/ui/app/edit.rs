@@ -197,6 +197,20 @@ impl App {
 
     #[allow(dead_code)] // the editors that ask arrive in Tasks 30, 34 and 35
     pub(crate) fn start_search(&mut self, query: &str, scope: Vec<RepoSlug>) -> Vec<Command> {
+        let plan = crate::sync::search_plan(query, &scope);
+        if !plan.fits {
+            self.content_search = Some((
+                query.to_string(),
+                Lookup::Failed("search text too long".into()),
+            ));
+            return Vec::new();
+        }
+        if plan.repos_dropped > 0 {
+            self.status.flash = Some(format!(
+                "searching the first {} repositories",
+                scope.len() - plan.repos_dropped
+            ));
+        }
         self.content_search = Some((query.to_string(), Lookup::Loading));
         vec![Command::Search {
             query: query.to_string(),
@@ -234,6 +248,10 @@ impl App {
                     .insert(slug.clone(), Lookup::Failed(message));
             }
             SyncTask::Search(query) => {
+                // An answer to a search the user has since replaced is dropped.
+                if self.content_search.as_ref().is_none_or(|(q, _)| q != query) {
+                    return true;
+                }
                 self.content_search = Some((query.clone(), Lookup::Failed(message)));
             }
             _ => return false,
@@ -1121,6 +1139,67 @@ mod tests {
             a.candidate_repo(&issue).map(|r| r.to_string()).as_deref(),
             Some("tviles/t"),
             "its own repository"
+        );
+    }
+
+    #[test]
+    fn a_failed_search_that_was_replaced_is_ignored() {
+        let mut a = test_app();
+        a.start_search("one", vec![]);
+        a.start_search("two", vec![]);
+        a.on_sync(SyncEvent::Failed {
+            task: crate::sync::SyncTask::Search("one".into()),
+            error: GithubError::Network("offline".into()),
+        });
+        assert!(matches!(&a.content_search, Some((q, Lookup::Loading)) if q == "two"));
+        assert_eq!(a.status.error, None);
+        a.on_sync(SyncEvent::Failed {
+            task: crate::sync::SyncTask::Search("two".into()),
+            error: GithubError::Network("offline".into()),
+        });
+        assert!(matches!(&a.content_search, Some((_, Lookup::Failed(_)))));
+    }
+
+    #[test]
+    fn a_new_board_forgets_lookups_and_unanswered_jobs_can_be_retried() {
+        let mut a = test_app();
+        let repo: RepoSlug = "acme/app".parse().unwrap();
+        a.need_candidates(&repo);
+        a.need_repos();
+        a.need_repo_lookup(&repo);
+        a.start_search("q", vec![]);
+        a.reset_for_new_board();
+        assert!(a.candidates.is_empty() && a.repos.is_none() && a.repo_lookups.is_empty());
+        assert!(a.content_search.is_none());
+        // The runtime answers a job it could not run with a Failed; the entry is retryable.
+        a.need_candidates(&repo);
+        a.on_sync(SyncEvent::Failed {
+            task: crate::sync::SyncTask::Candidates(repo.clone()),
+            error: GithubError::NoToken,
+        });
+        assert_eq!(
+            a.need_candidates(&repo),
+            vec![Command::LoadCandidates(repo.clone())]
+        );
+        assert_eq!(a.mode, Mode::Normal, "no setup screen for a lookup");
+    }
+
+    #[test]
+    fn an_over_long_search_fails_early_and_a_long_scope_is_cut() {
+        let mut a = test_app();
+        assert!(a.start_search(&"x".repeat(300), vec![]).is_empty());
+        assert!(
+            matches!(&a.content_search, Some((_, Lookup::Failed(m))) if m.contains("too long"))
+        );
+        let scope: Vec<RepoSlug> = (0..40)
+            .map(|i| format!("acme/repository-{i:02}").parse().unwrap())
+            .collect();
+        assert_eq!(a.start_search("crash", scope).len(), 1);
+        assert!(
+            a.status
+                .flash
+                .as_deref()
+                .is_some_and(|f| f.starts_with("searching the first "))
         );
     }
 

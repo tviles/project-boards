@@ -252,9 +252,22 @@ impl Runner {
     }
 }
 
-/// The `OpDone` that answers a Mutate job nobody could run (no token yet).
+/// The event that answers a job nobody could run (no token yet): `OpDone` for an edit, which
+/// would otherwise stay "sending", and `Failed` for a lookup, which would otherwise stay
+/// "loading" for good.
 fn unanswered_edit(job: &SyncJob) -> Option<crate::sync::SyncEvent> {
+    use crate::sync::{SyncEvent, SyncTask};
+    let failed = |task| {
+        Some(SyncEvent::Failed {
+            task,
+            error: crate::github::GithubError::NoToken,
+        })
+    };
     match job {
+        SyncJob::Candidates(repo) => failed(SyncTask::Candidates(repo.clone())),
+        SyncJob::Repos => failed(SyncTask::Repos),
+        SyncJob::LookupRepo(slug) => failed(SyncTask::RepoLookup(slug.clone())),
+        SyncJob::Search { query, .. } => failed(SyncTask::Search(query.clone())),
         SyncJob::Mutate { id, .. } => Some(crate::sync::SyncEvent::OpDone {
             id: *id,
             result: Err(crate::github::GithubError::NoToken),
@@ -326,5 +339,12 @@ mod tests {
             })
         ));
         assert!(unanswered_edit(&SyncJob::Projects(None)).is_none());
+        assert!(matches!(
+            unanswered_edit(&SyncJob::Repos),
+            Some(crate::sync::SyncEvent::Failed {
+                task: crate::sync::SyncTask::Repos,
+                ..
+            })
+        ));
     }
 }

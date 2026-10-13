@@ -171,23 +171,58 @@ fn plain_term(word: &str) -> bool {
         && !word.starts_with('.')
 }
 
-/// `repo:owner/name` with a valid name: the one qualifier a query may carry.
+/// `repo:owner/name`, the names made of letters, digits, `.`, `_` and `-` only (owner at most
+/// 39 characters, name not empty): the one widening qualifier a query may carry.
 fn repo_token(word: &str) -> Option<RepoSlug> {
-    word.strip_prefix("repo:")?.parse().ok()
+    let (owner, name) = word.strip_prefix("repo:")?.split_once('/')?;
+    let plain = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    };
+    (plain(owner) && owner.len() <= 39 && plain(name))
+        .then(|| format!("{owner}/{name}").parse().ok())
+        .flatten()
 }
 
-/// The GitHub search for "add existing": open issues and pull requests.
+/// The narrowing qualifiers a user may type, as typed (case-insensitive).
+fn narrowing(word: &str) -> Option<&'static str> {
+    ["is:open", "is:closed", "is:issue", "is:pr"]
+        .into_iter()
+        .find(|q| word.eq_ignore_ascii_case(q))
+}
+
+/// The longest search query sent; GitHub rejects longer ones.
+pub const MAX_QUERY: usize = 256;
+
+/// A built search: the query, how many default-scope repositories did not fit, and whether
+/// it can be sent at all.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchPlan {
+    pub query: String,
+    pub repos_dropped: usize,
+    /// False when the user's text leaves no room for the scope (searching unscoped would
+    /// widen it silently) or exceeds the cap on its own.
+    pub fits: bool,
+}
+
+/// The GitHub search for "add existing": issues and pull requests, open unless the user typed
+/// `is:open` or `is:closed`.
 ///
 /// The user's words are text, never qualifiers: a word that is not plain is quoted (with `"`
-/// and `\` escaped), so `is:pr`, `org:x`, `-label:y` or `OR` typed by the user cannot change
-/// what is searched. Only an explicit `repo:owner/name` is kept, and it replaces the default
-/// `scope` (the repositories of the board), widening the search as the spec allows.
-pub fn search_query(query: &str, scope: &[RepoSlug]) -> String {
+/// and `\` escaped), so `org:x`, `-label:y` or `OR` cannot change what is searched. Exceptions:
+/// `is:open`, `is:closed`, `is:issue` and `is:pr` narrow the search, and an explicit
+/// `repo:owner/name` replaces the default `scope` (the board's repositories) as the spec allows.
+pub fn search_plan(query: &str, scope: &[RepoSlug]) -> SearchPlan {
     let mut parts: Vec<String> = Vec::new();
     let mut repos: Vec<String> = Vec::new();
+    let mut state_typed = false;
     for word in query.split_whitespace() {
         if let Some(slug) = repo_token(word) {
             repos.push(format!("repo:{slug}"));
+        } else if let Some(q) = narrowing(word) {
+            state_typed |= matches!(q, "is:open" | "is:closed");
+            parts.push(q.to_string());
         } else if plain_term(word) {
             parts.push(word.to_string());
         } else {
@@ -197,12 +232,32 @@ pub fn search_query(query: &str, scope: &[RepoSlug]) -> String {
             ));
         }
     }
+    parts.extend(repos.iter().cloned());
+    let tail = if state_typed { "" } else { " is:open" };
+    let mut line = parts.join(" ");
+    let mut fits = line.len() + tail.len() <= MAX_QUERY;
+    let mut dropped = 0;
     if repos.is_empty() {
-        repos = scope.iter().map(|r| format!("repo:{r}")).collect();
+        for (i, r) in scope.iter().enumerate() {
+            let next = format!("{line} repo:{r}");
+            if next.len() + tail.len() > MAX_QUERY {
+                dropped = scope.len() - i;
+                fits = fits && i > 0;
+                break;
+            }
+            line = next;
+        }
     }
-    parts.extend(repos);
-    parts.push("is:open".into());
-    parts.join(" ")
+    line.push_str(tail);
+    SearchPlan {
+        query: line.trim().to_string(),
+        repos_dropped: dropped,
+        fits,
+    }
+}
+
+pub fn search_query(query: &str, scope: &[RepoSlug]) -> String {
+    search_plan(query, scope).query
 }
 
 #[cfg(test)]
@@ -264,13 +319,71 @@ mod tests {
             "foo \"org:other\" repo:acme/app repo:acme/api is:open"
         );
         assert_eq!(
-            search_query("is:pr user:x label:bug", &s),
-            "\"is:pr\" \"user:x\" \"label:bug\" repo:acme/app repo:acme/api is:open"
+            search_query("user:x label:bug", &s),
+            "\"user:x\" \"label:bug\" repo:acme/app repo:acme/api is:open"
+        );
+        assert_eq!(search_query("crash org:x", &[]), "crash \"org:x\" is:open");
+    }
+
+    #[test]
+    fn only_narrowing_qualifiers_pass_through() {
+        assert_eq!(search_query("crash is:closed", &[]), "crash is:closed");
+        assert_eq!(search_query("crash IS:Open", &[]), "crash is:open");
+        assert_eq!(search_query("is:pr foo", &[]), "is:pr foo is:open");
+        assert_eq!(
+            search_query("is:issue is:closed", &[]),
+            "is:issue is:closed"
         );
         assert_eq!(
-            search_query("crash is:closed", &[]),
-            "crash \"is:closed\" is:open"
+            search_query("is:merged is:private", &[]),
+            "\"is:merged\" \"is:private\" is:open"
         );
+    }
+
+    #[test]
+    fn a_repo_token_must_be_a_plain_name() {
+        for bad in [
+            "repo:a/b\"",
+            "repo:a/b)",
+            "repo:a/b:is:pr",
+            "repo:/b",
+            "repo:a/",
+            "repo:a/b/c",
+        ] {
+            let q = search_query(bad, &[]);
+            assert!(
+                q.starts_with('"') && q.ends_with("\" is:open"),
+                "{bad} -> {q}"
+            );
+        }
+        let long_owner = format!("repo:{}/x", "a".repeat(40));
+        assert!(search_query(&long_owner, &[]).starts_with('"'));
+        assert_eq!(
+            search_query("repo:a-b.c/d_e", &[]),
+            "repo:a-b.c/d_e is:open"
+        );
+    }
+
+    #[test]
+    fn the_query_is_capped_by_dropping_scope_repositories() {
+        let scope: Vec<RepoSlug> = (0..40)
+            .map(|i| format!("acme/repository-{i:02}").parse().unwrap())
+            .collect();
+        let plan = search_plan("crash", &scope);
+        assert!(plan.query.len() <= MAX_QUERY && plan.fits);
+        assert!(plan.repos_dropped > 0 && plan.query.starts_with("crash repo:acme/repository-00"));
+        assert!(plan.query.ends_with(" is:open"));
+        let long = "x".repeat(300);
+        assert!(
+            !search_plan(&long, &scope).fits,
+            "the text alone is too long"
+        );
+        let wide = "w".repeat(250);
+        assert!(
+            !search_plan(&wide, &scope).fits,
+            "no room left for any scope"
+        );
+        assert!(search_plan("crash", &[]).fits);
         assert_eq!(
             search_query("-label:x OR y", &[]),
             "\"-label:x\" \"OR\" y is:open"

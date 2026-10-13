@@ -330,6 +330,10 @@ impl App {
         self.fail_all_pending(edit::NOT_SENT_RELOADED);
         self.pending_kinds.clear();
         self.error_sel = 0;
+        self.candidates.clear();
+        self.repos = None;
+        self.repo_lookups.clear();
+        self.content_search = None;
     }
 
     pub fn search_query(&self) -> &str {
