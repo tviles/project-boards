@@ -407,11 +407,12 @@ impl App {
             }
         }
         if self.current_view().is_some() {
-            let shown = self.extra_filter().is_some_and(|f| {
-                f.split_whitespace()
-                    .any(|w| w.eq_ignore_ascii_case("is:archived"))
-            });
-            let label = if shown {
+            let shown = self
+                .extra_filter()
+                .is_some_and(|f| edit::archived_token(f).is_some());
+            let label = if self.view_shows_archived() {
+                "Archived items are shown by this view"
+            } else if shown {
                 "Hide archived items"
             } else {
                 "Show archived items"
@@ -1594,7 +1595,10 @@ mod tests {
         let a = test_app();
         let hints = a.edit_hints().unwrap().join(" · ");
         // Asserted piece by piece: later tasks insert `a assignees`, `c comment`, `X close`, ...
-        assert!(hints.contains("< > move · J K reorder"), "{hints}");
+        assert!(
+            hints.contains("e field · < > move · X close · c comment · J K reorder · A archive"),
+            "{hints}"
+        );
         assert!(hints.contains("e field"), "{hints}");
         assert_eq!(a.actions_hint().as_deref(), Some("space actions"));
         let mut a = a;

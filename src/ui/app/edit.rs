@@ -52,6 +52,35 @@ pub enum ConfirmAction {
     Submit { kind: OpKind, op: Op },
 }
 
+/// The byte range of the `is:archived` word in `text`, if it is there as a word of its own.
+pub(crate) fn archived_token(text: &str) -> Option<(usize, usize)> {
+    const TOKEN: &str = "is:archived";
+    let mut from = 0;
+    while let Some(rel) = text[from..]
+        .char_indices()
+        .map(|(i, _)| from + i)
+        .find(|&i| {
+            text.get(i..i + TOKEN.len())
+                .is_some_and(|w| w.eq_ignore_ascii_case(TOKEN))
+        })
+    {
+        let end = rel + TOKEN.len();
+        let before = text[..rel]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace);
+        let after = text[end..].chars().next().is_none_or(char::is_whitespace);
+        if before && after {
+            return Some((rel, end));
+        }
+        from = rel + 1;
+        while !text.is_char_boundary(from) {
+            from += 1;
+        }
+    }
+    None
+}
+
 /// The error log's message for an edit dropped unsent because its board was loaded again.
 pub const NOT_SENT_RELOADED: &str = "not sent: the board was reloaded";
 
@@ -171,15 +200,14 @@ fn hint_word(action: Action, kind: OpKind) -> &'static str {
     }
 }
 
-/// The single-action keys the hints list before move and reorder.
-const HINTED: &[Action] = &[
-    Action::Assignees,
-    Action::Labels,
-    Action::EditField,
-    Action::CloseReopen,
-    Action::Comment,
-    Action::Archive,
-];
+/// The single-action keys the hints list before `< > move`, most used first.
+const HINTED: &[Action] = &[Action::Assignees, Action::Labels, Action::EditField];
+
+/// The single-action keys listed after `< > move`.
+const HINTED_AFTER_MOVE: &[Action] = &[Action::CloseReopen, Action::Comment];
+
+/// The key listed last, after `J K reorder`: the rarest edits drop first under E17.
+const HINTED_LAST: &[Action] = &[Action::Archive];
 
 /// A lookup an editor waits on.
 #[derive(Debug, Clone, PartialEq)]
@@ -373,8 +401,9 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// The edit keys the item allows, for the status line: single-key edits first (`e field`),
-    /// then `< > move · J K reorder`. `space actions` is separate (`actions_hint`): it never
+    /// The edit keys the item allows, for the status line, most useful first so the rarest
+    /// drop first under E17: `a assignees · t labels · e field · < > move · X close ·
+    /// c comment · J K reorder · A archive`. `space actions` is separate (`actions_hint`): it never
     /// drops. `None` with no item or nothing allowed.
     pub fn edit_hints(&self) -> Option<Vec<String>> {
         let item = self.action_item()?;
@@ -384,21 +413,26 @@ impl App {
         }
         let key = |a: Action| self.keymap.keys_for(a).first().map(|k| k.label());
         let mut parts = Vec::new();
-        for &action in HINTED {
-            if let (Some(kind), Some(k)) = (self.allowed_kind(action, item), key(action)) {
-                parts.push(format!("{k} {}", hint_word(action, kind)));
+        let single = |parts: &mut Vec<String>, actions: &[Action]| {
+            for &action in actions {
+                if let (Some(kind), Some(k)) = (self.allowed_kind(action, item), key(action)) {
+                    parts.push(format!("{k} {}", hint_word(action, kind)));
+                }
             }
-        }
+        };
+        single(&mut parts, HINTED);
         if self.check_here(OpKind::Move, item).is_ok()
             && let (Some(p), Some(n)) = (key(Action::MovePrevColumn), key(Action::MoveNextColumn))
         {
             parts.push(format!("{p} {n} move"));
         }
+        single(&mut parts, HINTED_AFTER_MOVE);
         if self.check_here(OpKind::Reorder, item).is_ok()
             && let (Some(d), Some(u)) = (key(Action::ReorderDown), key(Action::ReorderUp))
         {
             parts.push(format!("{d} {u} reorder"));
         }
+        single(&mut parts, HINTED_LAST);
         Some(parts)
     }
 
@@ -1344,16 +1378,39 @@ impl App {
         Vec::new()
     }
 
-    /// "Show archived items" in the action menu: toggles `is:archived` in the session filter.
+    /// Whether the view's own GitHub filter already shows archived items.
+    pub(crate) fn view_shows_archived(&self) -> bool {
+        self.current_view()
+            .is_some_and(|v| archived_token(&v.filter).is_some())
+    }
+
+    /// "Show archived items" in the action menu: toggles `is:archived` in the session filter,
+    /// leaving the rest of the user's filter text exactly as typed. A view whose own filter
+    /// already has it needs nothing added.
     pub(crate) fn toggle_archived(&mut self) -> Vec<Command> {
-        let current = self.extra_filter().unwrap_or_default().to_string();
-        let mut words: Vec<&str> = current.split_whitespace().collect();
-        let had = words.iter().any(|w| w.eq_ignore_ascii_case("is:archived"));
-        words.retain(|w| !w.eq_ignore_ascii_case("is:archived"));
-        if !had {
-            words.push("is:archived");
+        if self.view_shows_archived() {
+            self.status.flash = Some("This view already shows archived items".into());
+            return Vec::new();
         }
-        self.set_extra_filter(&words.join(" "))
+        let current = self.extra_filter().unwrap_or_default().to_string();
+        let next = match archived_token(&current) {
+            Some((start, end)) => {
+                let mut text = current.clone();
+                // The token and one adjacent space.
+                if start > 0 {
+                    text.replace_range(start - 1..end, "");
+                } else if text[end..].starts_with(char::is_whitespace) {
+                    let n = text[end..].chars().next().map_or(0, char::len_utf8);
+                    text.replace_range(start..end + n, "");
+                } else {
+                    text.replace_range(start..end, "");
+                }
+                text
+            }
+            None if current.trim().is_empty() => "is:archived".to_string(),
+            None => format!("{current} is:archived"),
+        };
+        self.set_extra_filter(&next)
     }
 
     /// `X`: reopen a closed item at once; close an open one after asking (a reason for an
@@ -3999,5 +4056,104 @@ mod tests {
             "{labels:?}"
         );
         assert!(labels.contains(&"Show archived items"), "{labels:?}");
+    }
+
+    #[test]
+    fn toggling_archived_twice_restores_the_filter_text_exactly() {
+        let mut a = test_app();
+        a.handle_key(key('f'));
+        for c in "title:\"a  b\"".chars() {
+            a.handle_key(key(c));
+        }
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(a.effective_filter(), "title:\"a  b\"");
+        a.toggle_archived();
+        assert_eq!(a.effective_filter(), "title:\"a  b\" is:archived");
+        a.toggle_archived();
+        assert_eq!(a.effective_filter(), "title:\"a  b\"");
+    }
+
+    #[test]
+    fn a_view_that_already_shows_archived_adds_nothing() {
+        let mut a = app_edited(|s| s.project.views[0].filter = "is:archived".into());
+        assert!(a.view_shows_archived());
+        assert!(a.toggle_archived().is_empty());
+        assert_eq!(a.effective_filter(), "is:archived", "no duplicate");
+        assert!(a.status.flash.as_deref().unwrap().contains("already shows"));
+        a.handle_key(key(' '));
+        let Some(Popup::Actions { picker, .. }) = &a.popup else {
+            panic!("menu")
+        };
+        assert!(
+            picker
+                .choices
+                .iter()
+                .any(|c| c.label == "Archived items are shown by this view")
+        );
+    }
+
+    #[test]
+    fn esc_cancels_the_remove_confirmation() {
+        let mut a = test_app();
+        a.confirm_remove();
+        assert!(a.handle_key(code(KeyCode::Esc)).is_empty());
+        assert!(a.confirm.is_none());
+        assert_eq!(a.pending_count(), 0);
+        assert!(a.item(&ItemId::new("a")).is_some());
+    }
+
+    #[test]
+    fn remove_follows_the_matrix_for_redacted_items() {
+        let mut a = app_edited(|s| {
+            s.items.get_mut(&ItemId::new("a")).unwrap().content =
+                crate::model::ItemContent::Redacted;
+        });
+        // Redacted items allow remove (only move, archive and remove work).
+        assert!(a.confirm_remove().is_empty());
+        assert!(a.confirm.is_some());
+        a.handle_key(key('n'));
+        let mut ro = app_edited(|s| s.project.viewer_can_update = false);
+        ro.confirm_remove();
+        assert!(ro.confirm.is_none());
+        assert_eq!(
+            ro.status.flash.as_deref(),
+            Some("This board is read-only for you")
+        );
+    }
+
+    #[test]
+    fn a_placeholder_item_cannot_be_removed_yet() {
+        let mut a = test_app();
+        a.submit_new(new_draft("local:1"), false);
+        assert_eq!(a.selected_item().unwrap().id, ItemId::new("local:1"));
+        assert!(a.confirm_remove().is_empty());
+        assert!(a.confirm.is_none());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Still being created on GitHub; try again in a moment")
+        );
+    }
+
+    #[test]
+    fn an_archived_items_menu_lists_only_what_still_applies() {
+        let mut a = test_app();
+        a.handle_key(code(KeyCode::Enter));
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.items.get_mut(&ItemId::new("a")).unwrap().archived = true;
+        a.store.apply(StoreUpdate::Replace(snap));
+        a.handle_key(key(' '));
+        let Some(Popup::Actions { picker, .. }) = &a.popup else {
+            panic!("menu")
+        };
+        let labels: Vec<&str> = picker.choices.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Unarchive",
+                "Remove from project",
+                "Open in the browser",
+                "Show archived items"
+            ]
+        );
     }
 }
