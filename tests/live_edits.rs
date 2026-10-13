@@ -2,7 +2,7 @@
 //! its own throwaway draft, edits it, checks the result with a direct node lookup (which the
 //! item index lag does not affect), and deletes the draft even when an assertion fails.
 //!   cargo test --features live --test live_edits -- --test-threads=1 --nocapture
-//!   PB_RECORD=1 cargo test --features live --test live_edits -- --test-threads=1
+//!   GH_TOKEN=$(gh auth token --user tviles) PB_RECORD=1 cargo test --features live --test live_edits -- --test-threads=1 --nocapture
 //! Each test prints the rate-limit points it used.
 #![cfg(feature = "live")]
 
@@ -16,43 +16,114 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
+/// One writer at a time, whatever `--test-threads` says.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Refuses to go on unless the token is the testbed owner's and the testbed is the project
+/// the tests were written for. Runs before anything is written or any recording is cleared.
+async fn preflight() {
+    let (board, id) = testbed();
+    let plain = Github::new(http());
+    let who = plain.viewer().await.expect("the token works").login;
+    assert_eq!(
+        who, board.owner,
+        "live edits must run as {0}: GH_TOKEN=$(gh auth token --user {0}) cargo test --features live --test live_edits -- --test-threads=1",
+        board.owner
+    );
+    let project = plain
+        .resolve_project(&board)
+        .await
+        .expect("the testbed resolves");
+    assert_eq!(
+        project.id, id,
+        "tests/testbed.toml names a different project than {}/{}",
+        board.owner, board.number
+    );
+}
+
+/// Deletes drafts titled `title` from the project; best effort, for a draft whose creation
+/// reply could not be decoded. The item index can lag, so a fresh draft may not show yet.
+async fn delete_drafts_titled(project: &ProjectId, title: &str) {
+    let gh = Github::new(http());
+    match gh
+        .fetch_items_page(project, "", project_boards::github::client::FULL_PAGE, None)
+        .await
+    {
+        Ok(page) => {
+            for item in page.nodes.iter().filter(|i| i.title() == title) {
+                match gh.delete_item(project, &item.id).await {
+                    Ok(()) => eprintln!("deleted the stray draft '{title}' ({})", item.id),
+                    Err(e) => eprintln!(
+                        "CLEANUP FAILED: delete the stray draft '{title}' ({}) by hand: {e}",
+                        item.id
+                    ),
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("CLEANUP FAILED: could not list the testbed to find the draft '{title}': {e}")
+        }
+    }
+}
+
 /// Runs `body` on a fresh throwaway draft, then deletes the draft whatever happened.
 async fn with_draft<F, Fut>(name: &str, body: F)
 where
     F: FnOnce(Arc<Github>, Project, Item) -> Fut,
     Fut: Future<Output = ()>,
 {
+    let _serial = SERIAL.lock().await;
+    preflight().await;
     let gh = Arc::new(github(name));
     let project = gh
         .resolve_project(&testbed().0)
         .await
         .expect("the testbed resolves");
+    assert_eq!(project.id, testbed().1);
     let before = gh.rate().remaining;
-    let draft = gh
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let title = format!("pb live: {name} {nanos}");
+    let draft = match gh
         .add_draft_issue(
             &project.id,
-            &format!("pb live: {name}"),
+            &title,
             "Throwaway item made by the live suite, which deletes it.",
         )
         .await
-        .expect("the throwaway draft is created");
+    {
+        Ok(d) => d,
+        Err(e) => {
+            delete_drafts_titled(&project.id, &title).await;
+            panic!("the throwaway draft '{title}' was not created cleanly: {e}");
+        }
+    };
     let outcome = AssertUnwindSafe(body(gh.clone(), project.clone(), draft.clone()))
         .catch_unwind()
         .await;
     // A separate client, so cleanup is never recorded and runs even if `gh` is in a bad state.
-    if let Err(e) = Github::new(http())
+    let cleanup = Github::new(http())
         .delete_item(&project.id, &draft.id)
-        .await
-    {
+        .await;
+    report_points(name, before, gh.rate().remaining);
+    if let Err(e) = &cleanup {
         eprintln!(
             "CLEANUP FAILED: delete the draft '{}' ({}) from the testbed by hand: {e}",
             draft.title(),
             draft.id
         );
     }
-    report_points(name, before, gh.rate().remaining);
     if let Err(panic) = outcome {
         std::panic::resume_unwind(panic);
+    }
+    if let Err(e) = cleanup {
+        panic!(
+            "cleanup failed: the draft '{}' ({}) is still on the testbed: {e}",
+            draft.title(),
+            draft.id
+        );
     }
 }
 
