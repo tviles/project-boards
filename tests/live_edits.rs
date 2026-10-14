@@ -1,6 +1,9 @@
 //! Live writes against the testbed in tests/testbed.toml, and nothing else. Each test makes
-//! its own throwaway draft, edits it, checks the result with a direct node lookup (which the
-//! item index lag does not affect), and deletes the draft even when an assertion fails.
+//! its own throwaway draft or issue (or, for one test, borrows the seeded "Sample pull
+//! request" and restores it), edits it, checks the result with a direct node lookup (which
+//! the item index lag does not affect), and cleans up even when an assertion fails; a failed
+//! cleanup fails the test and names what is left. Only the testbed's own data goes through the
+//! recording client: anything wider (the user's repositories) uses an unrecorded one.
 //!   cargo test --features live --test live_edits -- --test-threads=1 --nocapture
 //!   GH_TOKEN=$(gh auth token --user tviles) PB_RECORD=1 cargo test --features live --test live_edits -- --test-threads=1 --nocapture
 //! Each test prints the rate-limit points it used.
@@ -18,6 +21,39 @@ use std::sync::Arc;
 
 /// One writer at a time, whatever `--test-threads` says.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Set by a test that already deleted its draft's project item, so `with_draft` does not try
+/// again and report a false cleanup failure. Writers are serialised, so one flag is enough.
+static ITEM_DELETED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Deletes issues in the testbed repository whose title is exactly `title` (search, so it can
+/// lag a fresh issue); best effort for an issue whose id was never seen. Returns what could
+/// not be cleaned up, naming it, or an empty list when it found and deleted them or found none.
+async fn delete_issues_titled(title: &str) -> Vec<String> {
+    let gh = Github::new(http());
+    let query = format!("repo:{} is:issue in:title \"{title}\"", testbed_repo());
+    let hits = match gh.search_content(&query).await {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("CLEANUP FAILED: could not search the testbed for the issue '{title}': {e}");
+            return vec![format!("issue '{title}' (search failed)")];
+        }
+    };
+    let mut left = Vec::new();
+    for hit in hits.iter().filter(|h| h.title == title) {
+        match gh.delete_issue(&hit.id).await {
+            Ok(()) => eprintln!("deleted the stray issue '{title}' (#{})", hit.number),
+            Err(e) => {
+                eprintln!(
+                    "CLEANUP FAILED: delete issue #{} '{title}' by hand: {e}",
+                    hit.number
+                );
+                left.push(format!("issue #{} '{title}'", hit.number));
+            }
+        }
+    }
+    left
+}
 
 /// Refuses to go on unless the token is the testbed owner's and the testbed is the project
 /// the tests were written for. Runs before anything is written or any recording is cleared.
@@ -100,13 +136,18 @@ where
             panic!("the throwaway draft '{title}' was not created cleanly: {e}");
         }
     };
+    ITEM_DELETED.store(false, std::sync::atomic::Ordering::SeqCst);
     let outcome = AssertUnwindSafe(body(gh.clone(), project.clone(), draft.clone()))
         .catch_unwind()
         .await;
     // A separate client, so cleanup is never recorded and runs even if `gh` is in a bad state.
-    let cleanup = Github::new(http())
-        .delete_item(&project.id, &draft.id)
-        .await;
+    let cleanup = if ITEM_DELETED.load(std::sync::atomic::Ordering::SeqCst) {
+        Ok(())
+    } else {
+        Github::new(http())
+            .delete_item(&project.id, &draft.id)
+            .await
+    };
     report_points(name, before, gh.rate().remaining);
     if let Err(e) = &cleanup {
         eprintln!(
@@ -308,14 +349,29 @@ where
         .await
         .unwrap()
         .expect("the testbed repository is writable");
-    let issue = gh
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let title = format!("pb live: {name} {nanos}");
+    let issue = match gh
         .create_issue(
             &repo.id,
-            &format!("pb live: {name}"),
+            &title,
             "Throwaway issue made by the live suite, which deletes it.",
         )
         .await
-        .expect("the throwaway issue is created");
+    {
+        Ok(i) => i,
+        Err(e) => {
+            // The reply may have been lost after GitHub created the issue.
+            eprintln!("CLEANUP: creating '{title}' failed ({e}); looking for it to delete");
+            let left = delete_issues_titled(&title).await;
+            panic!(
+                "the throwaway issue '{title}' was not created cleanly: {e}; left over: {left:?}"
+            );
+        }
+    };
     let added = gh.add_item_by_id(&project.id, &issue).await;
     let outcome = match &added {
         Ok(item) => {
@@ -341,9 +397,9 @@ where
     }
     if let Err(e) = cleanup.delete_issue(&issue).await {
         eprintln!(
-            "CLEANUP FAILED: delete the issue 'pb live: {name}' from the testbed repository by hand: {e}"
+            "CLEANUP FAILED: delete the issue '{title}' from the testbed repository by hand: {e}"
         );
-        leftovers.push(format!("issue 'pb live: {name}'"));
+        leftovers.push(format!("issue '{title}'"));
     }
     report_points(name, before, gh.rate().remaining);
     if let Err(panic) = outcome {
@@ -377,7 +433,9 @@ async fn repository_lookups() {
         );
     }
     assert!(
-        gh.pushable_repos()
+        // Unrecorded: the user's repository list must never reach the fixtures.
+        Github::new(http())
+            .pushable_repos()
             .await
             .unwrap()
             .repos
@@ -506,41 +564,60 @@ async fn adding_existing_content_finds_it_by_number_and_returns_the_same_item() 
 
 #[tokio::test]
 async fn draft_title_body_assignees_and_conversion() {
-    with_draft("edits_draft", |gh, _p, draft| async move {
+    with_draft("edits_draft", |gh, p, draft| async move {
         let id = content(&draft);
         let c = gh.repo_candidates(&testbed_repo()).await.unwrap();
         let me = c.users.iter().find(|u| u.login == "tviles").unwrap();
-        gh.set_title(&id, "pb live: draft retitled").await.unwrap();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let title = format!("pb live: draft retitled {nanos}");
+        gh.set_title(&id, &title).await.unwrap();
         gh.set_body(&id, "Draft body").await.unwrap();
         gh.set_draft_assignees(id.node_id(), std::slice::from_ref(&me.id))
             .await
             .unwrap();
         let now = reload(&gh, &draft.id).await;
-        assert_eq!(
-            (now.title(), now.assignees()),
-            ("pb live: draft retitled", vec!["tviles"])
-        );
-        let converted = gh.convert_draft(&draft.id, &c.repo.id).await.unwrap();
-        let issue = converted
-            .content_fields
-            .content_id
-            .clone()
-            .expect("the new issue's id");
-        let checks = AssertUnwindSafe(async {
-            assert!(matches!(converted.content, ItemContent::Issue { .. }));
-            assert_eq!(converted.id, draft.id, "the same project item");
-        })
-        .catch_unwind()
-        .await;
-        // The draft item is now the issue's item; with_draft deletes the item, this deletes the issue.
-        if let Err(e) = Github::new(http()).delete_issue(&issue).await {
-            eprintln!(
-                "CLEANUP FAILED: delete the converted issue 'pb live: draft retitled' by hand: {e}"
-            );
+        assert_eq!((now.title(), now.assignees()), (title.as_str(), vec!["tviles"]));
+        // From here the draft may become an issue: clean up in order (item, then issue).
+        let converted = gh.convert_draft(&draft.id, &c.repo.id).await;
+        let (checks, issue) = match &converted {
+            Ok(item) => (
+                AssertUnwindSafe(async {
+                    assert!(matches!(item.content, ItemContent::Issue { .. }));
+                    assert_eq!(item.id, draft.id, "the same project item");
+                    assert!(item.content_fields.content_id.is_some(), "the new issue's id");
+                })
+                .catch_unwind()
+                .await,
+                item.content_fields.content_id.clone(),
+            ),
+            Err(e) => (
+                Err(Box::new(format!("convert_draft failed: {e}")) as Box<dyn std::any::Any + Send>),
+                None,
+            ),
+        };
+        let cleanup = Github::new(http());
+        let mut left = Vec::new();
+        match cleanup.delete_item(&p.id, &draft.id).await {
+            Ok(()) => ITEM_DELETED.store(true, std::sync::atomic::Ordering::SeqCst),
+            Err(e) => eprintln!("CLEANUP FAILED: remove item {} by hand: {e}", draft.id),
+        }
+        match issue {
+            Some(issue) => {
+                if let Err(e) = cleanup.delete_issue(&issue).await {
+                    eprintln!("CLEANUP FAILED: delete the converted issue '{title}' by hand: {e}");
+                    left.push(format!("issue '{title}'"));
+                }
+            }
+            // Converted on the server, or maybe not: find it by its unique title.
+            None => left.extend(delete_issues_titled(&title).await),
         }
         if let Err(panic) = checks {
             std::panic::resume_unwind(panic);
         }
+        assert!(left.is_empty(), "cleanup failed, still on the testbed: {}", left.join(", "));
     })
     .await;
 }
@@ -559,15 +636,31 @@ async fn pull_request_title_close_and_reopen() {
     let pr = page
         .nodes
         .iter()
-        .find(|i| matches!(i.content, ItemContent::PullRequest { .. }))
-        .expect("the seeded pull request")
+        .find(|i| i.title() == "Sample pull request")
+        .expect(
+            "no 'Sample pull request' on the testbed: an earlier run may have left it retitled; \
+             restore its title by hand (and reopen it)",
+        )
         .clone();
+    assert!(
+        matches!(
+            pr.content,
+            ItemContent::PullRequest {
+                state: ContentState::Open,
+                ..
+            }
+        ),
+        "the 'Sample pull request' is not an open pull request: reopen it by hand before running this test"
+    );
     let id = content(&pr);
     let original = pr.title().to_string();
+    let closed_by_us = std::sync::atomic::AtomicBool::new(false);
     let outcome = AssertUnwindSafe(async {
         gh.set_title(&id, &format!("{original} (live)"))
             .await
             .unwrap();
+        // Set before the call: a close whose reply is lost may still have happened.
+        closed_by_us.store(true, std::sync::atomic::Ordering::SeqCst);
         gh.close(&id, None).await.unwrap();
         let closed = reload(&gh, &pr.id).await;
         assert!(matches!(
@@ -583,7 +676,9 @@ async fn pull_request_title_close_and_reopen() {
     .await;
     let restore = Github::new(http());
     let mut failed = Vec::new();
-    if let Err(e) = restore.reopen(&id).await {
+    if closed_by_us.load(std::sync::atomic::Ordering::SeqCst)
+        && let Err(e) = restore.reopen(&id).await
+    {
         eprintln!("RESTORE FAILED: reopen the sample pull request by hand: {e}");
         failed.push("reopen");
     }
