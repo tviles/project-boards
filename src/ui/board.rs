@@ -288,9 +288,15 @@ fn card_reference(
     theme: &Theme,
 ) -> (&'static str, Style, Option<String>, Option<String>) {
     let grey = theme.option(OptionColor::Gray).patch(theme.dim());
+    let placeholder = item.is_placeholder();
     let short = |r: &ContentRef| {
         let name = r.repo.split_once('/').map_or(r.repo.as_str(), |(_, n)| n);
-        (Some(sanitize(name)), Some(format!("#{}", r.number)))
+        let number = if placeholder {
+            "new".to_string()
+        } else {
+            format!("#{}", r.number)
+        };
+        (Some(sanitize(name)), Some(number))
     };
     // GitHub greys issues closed as not planned or as duplicates.
     let not_planned = matches!(
@@ -1610,6 +1616,24 @@ mod tests {
         let dot = glyph(draft);
         assert_eq!(dot.fg, Some(Color::Gray));
         assert!(dot.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn a_placeholder_card_header_says_new_dim_not_zero() {
+        let mut item = items()[0].clone();
+        item.id = ItemId::new("local:1");
+        if let ItemContent::Issue { reference, .. } = &mut item.content {
+            reference.number = 0;
+        }
+        let lines = card_text(&item, 34, &Theme::plain());
+        assert!(lines[1].starts_with("│● t new"), "{lines:?}");
+        assert!(!lines[1].contains("#0"), "{lines:?}");
+        assert!(!lines[2].contains("#0"), "{lines:?}");
+        // The reference is drawn dim, "new" included.
+        let (_, _, _, number) = card_reference(&item, &Theme::plain());
+        assert_eq!(number.as_deref(), Some("new"));
+        // A real item still shows its number.
+        assert!(card_text(&items()[0], 34, &Theme::plain())[1].starts_with("│● t #1"));
     }
 
     #[test]

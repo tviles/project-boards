@@ -134,6 +134,7 @@ pub fn cell_text(item: &Item, field: &Field) -> String {
     if field.kind == FieldKind::Title {
         return match item.number() {
             Some(n) => format!("#{n} {}", item.title()),
+            None if item.is_placeholder() => format!("new {}", item.title()),
             None => item.title().to_string(),
         };
     }
@@ -318,6 +319,21 @@ mod tests {
 
     fn refs(items: &[Item]) -> Vec<&Item> {
         items.iter().collect()
+    }
+
+    #[test]
+    fn a_placeholder_row_shows_new_where_the_number_goes() {
+        let p = project();
+        let title = p.title_field().unwrap();
+        let mut item = items()[0].clone();
+        assert_eq!(cell_text(&item, title), format!("#1 {}", item.title()));
+        item.id = crate::model::ItemId::new("local:1");
+        if let crate::model::ItemContent::Issue { reference, .. } = &mut item.content {
+            reference.number = 0;
+        }
+        assert_eq!(cell_text(&item, title), format!("new {}", item.title()));
+        let draft = &items()[3];
+        assert_eq!(cell_text(draft, title), draft.title());
     }
 
     #[test]

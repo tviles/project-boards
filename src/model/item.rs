@@ -260,6 +260,21 @@ impl Item {
         self.reference().map(|r| r.number).filter(|n| *n > 0)
     }
 
+    /// A new item GitHub has not created yet (id `local:N`).
+    pub fn is_placeholder(&self) -> bool {
+        crate::model::caps::is_placeholder(&self.id)
+    }
+
+    /// What names the item in headings: `#12`, `new` while GitHub is still creating it, or
+    /// `Draft`.
+    pub fn ref_label(&self) -> String {
+        match self.number() {
+            Some(n) => format!("#{n}"),
+            None if self.is_placeholder() => "new".into(),
+            None => "Draft".into(),
+        }
+    }
+
     pub fn url(&self) -> Option<&str> {
         self.reference().map(|r| r.url.as_str())
     }
@@ -466,6 +481,21 @@ pub(crate) mod tests {
         );
         assert_eq!(item.assignees(), ["tviles"]);
         assert_eq!(item.label_names(), ["bug"]);
+    }
+
+    #[test]
+    fn ref_label_is_number_new_or_draft() {
+        let mut item = issue("I", 5, "x");
+        assert_eq!(item.ref_label(), "#5");
+        item.id = ItemId::new("local:2");
+        assert!(item.is_placeholder());
+        assert_eq!(item.ref_label(), "#5");
+        let mut fresh = issue("local:3", 0, "x");
+        fresh.id = ItemId::new("local:3");
+        assert_eq!(fresh.ref_label(), "new");
+        fresh.content = ItemContent::Draft { title: "d".into() };
+        fresh.id = ItemId::new("PVTI_1");
+        assert_eq!(fresh.ref_label(), "Draft");
     }
 
     #[test]
