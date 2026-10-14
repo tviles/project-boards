@@ -284,3 +284,319 @@ async fn a_refused_edit_carries_githubs_message() {
     })
     .await;
 }
+
+/// Runs `body` on a fresh throwaway issue in the testbed repository, added to the testbed
+/// project; afterwards removes the item and deletes the issue, whatever happened. Once the
+/// issue exists everything, adding it to the project included, runs inside the guard, so a
+/// failed add still deletes the issue (pre-flight ruling 22).
+async fn with_issue<F, Fut>(name: &str, body: F)
+where
+    F: FnOnce(Arc<Github>, Project, Item) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let _serial = SERIAL.lock().await;
+    preflight().await;
+    let gh = Arc::new(github(name));
+    let project = gh
+        .resolve_project(&testbed().0)
+        .await
+        .expect("the testbed resolves");
+    assert_eq!(project.id, testbed().1);
+    let before = gh.rate().remaining;
+    let repo = gh
+        .lookup_repo(&testbed_repo())
+        .await
+        .unwrap()
+        .expect("the testbed repository is writable");
+    let issue = gh
+        .create_issue(
+            &repo.id,
+            &format!("pb live: {name}"),
+            "Throwaway issue made by the live suite, which deletes it.",
+        )
+        .await
+        .expect("the throwaway issue is created");
+    let added = gh.add_item_by_id(&project.id, &issue).await;
+    let outcome = match &added {
+        Ok(item) => {
+            AssertUnwindSafe(body(gh.clone(), project.clone(), item.clone()))
+                .catch_unwind()
+                .await
+        }
+        Err(e) => Err(Box::new(format!(
+            "adding the throwaway issue to the project failed: {e}"
+        )) as Box<dyn std::any::Any + Send>),
+    };
+    // A separate client, so cleanup is never recorded and runs even if `gh` is in a bad state.
+    let cleanup = Github::new(http());
+    let mut leftovers = Vec::new();
+    if let Ok(item) = &added
+        && let Err(e) = cleanup.delete_item(&project.id, &item.id).await
+    {
+        eprintln!(
+            "CLEANUP FAILED: remove item {} from the testbed project by hand: {e}",
+            item.id
+        );
+        leftovers.push(format!("project item {}", item.id));
+    }
+    if let Err(e) = cleanup.delete_issue(&issue).await {
+        eprintln!(
+            "CLEANUP FAILED: delete the issue 'pb live: {name}' from the testbed repository by hand: {e}"
+        );
+        leftovers.push(format!("issue 'pb live: {name}'"));
+    }
+    report_points(name, before, gh.rate().remaining);
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+    assert!(
+        leftovers.is_empty(),
+        "cleanup failed, still on the testbed: {}",
+        leftovers.join(", ")
+    );
+}
+
+fn content(item: &Item) -> ContentId {
+    item.content_id().expect("content id")
+}
+
+#[tokio::test]
+async fn repository_lookups() {
+    let _serial = SERIAL.lock().await;
+    preflight().await;
+    let gh = github("edits_lookups");
+    let c = gh.repo_candidates(&testbed_repo()).await.unwrap();
+    assert!(c.users.iter().any(|u| u.login == "tviles"));
+    for name in ["bug", "docs", "good first issue"] {
+        assert!(c.labels.iter().any(|l| l.name == name), "label {name}");
+    }
+    for title in ["v1", "v2"] {
+        assert!(
+            c.milestones.iter().any(|m| m.title == title),
+            "milestone {title}"
+        );
+    }
+    assert!(
+        gh.pushable_repos()
+            .await
+            .unwrap()
+            .repos
+            .iter()
+            .any(|r| r.slug == testbed_repo())
+    );
+    assert!(gh.lookup_repo(&testbed_repo()).await.unwrap().is_some());
+    assert!(
+        gh.lookup_repo(&"tviles/no-such-repo-pb".parse().unwrap())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn assignees_labels_and_milestone_on_an_issue() {
+    with_issue("edits_people", |gh, _p, item| async move {
+        let c = gh.repo_candidates(&testbed_repo()).await.unwrap();
+        let id = content(&item);
+        let me = c.users.iter().find(|u| u.login == "tviles").unwrap();
+        let label = |n: &str| c.labels.iter().find(|l| l.name == n).unwrap().id.clone();
+        gh.add_assignees(id.node_id(), std::slice::from_ref(&me.id))
+            .await
+            .unwrap();
+        gh.add_labels(id.node_id(), &[label("bug"), label("good first issue")])
+            .await
+            .unwrap();
+        gh.remove_labels(id.node_id(), &[label("bug")])
+            .await
+            .unwrap();
+        let v1 = c.milestones.iter().find(|m| m.title == "v1").unwrap();
+        gh.set_milestone(&id, Some(&v1.id)).await.unwrap();
+        let now = reload(&gh, &item.id).await;
+        assert_eq!(now.assignees(), ["tviles"]);
+        assert_eq!(now.label_names(), ["good first issue"]);
+        assert_eq!(
+            now.content_fields
+                .milestone
+                .as_ref()
+                .map(|m| m.title.as_str()),
+            Some("v1")
+        );
+        gh.remove_assignees(id.node_id(), std::slice::from_ref(&me.id))
+            .await
+            .unwrap();
+        gh.set_milestone(&id, None).await.unwrap();
+        let now = reload(&gh, &item.id).await;
+        assert!(now.assignees().is_empty());
+        assert_eq!(now.content_fields.milestone, None);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn title_body_comment_close_and_reopen_an_issue() {
+    with_issue("edits_issue", |gh, _p, item| async move {
+        let id = content(&item);
+        gh.set_title(&id, "pb live: retitled").await.unwrap();
+        gh.set_body(&id, "New body").await.unwrap();
+        gh.add_comment(id.node_id(), "A live comment")
+            .await
+            .unwrap();
+        let detail = gh.fetch_item_detail(&item.id, None).await.unwrap();
+        assert_eq!(detail.body, "New body");
+        assert!(detail.comments.iter().any(|c| c.body == "A live comment"));
+        assert_eq!(reload(&gh, &item.id).await.title(), "pb live: retitled");
+        gh.close(&id, Some(CloseReason::NotPlanned)).await.unwrap();
+        let closed = reload(&gh, &item.id).await;
+        assert!(matches!(
+            closed.content,
+            ItemContent::Issue {
+                state: ContentState::Closed,
+                ..
+            }
+        ));
+        assert_eq!(
+            closed.content_fields.state_reason,
+            Some(StateReason::NotPlanned)
+        );
+        gh.reopen(&id).await.unwrap();
+        assert!(matches!(
+            reload(&gh, &item.id).await.content,
+            ItemContent::Issue {
+                state: ContentState::Open,
+                ..
+            }
+        ));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn archive_and_unarchive() {
+    with_issue("edits_archive", |gh, p, item| async move {
+        gh.archive_item(&p.id, &item.id).await.unwrap();
+        assert!(reload(&gh, &item.id).await.archived);
+        gh.unarchive_item(&p.id, &item.id).await.unwrap();
+        assert!(!reload(&gh, &item.id).await.archived);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn adding_existing_content_finds_it_by_number_and_returns_the_same_item() {
+    with_issue("edits_existing", |gh, p, item| async move {
+        let number = item.number().expect("an issue number");
+        let hit = gh
+            .content_by_number(&testbed_repo(), number)
+            .await
+            .unwrap()
+            .expect("found by number");
+        assert_eq!(Some(hit.id.clone()), item.content_fields.content_id);
+        let again = gh.add_item_by_id(&p.id, &hit.id).await.unwrap();
+        assert_eq!(
+            again.id, item.id,
+            "adding content already on the board returns its item"
+        );
+        // The search index lags writes; only check that searching works.
+        gh.search_content(&format!("repo:{} is:open", testbed_repo()))
+            .await
+            .unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn draft_title_body_assignees_and_conversion() {
+    with_draft("edits_draft", |gh, _p, draft| async move {
+        let id = content(&draft);
+        let c = gh.repo_candidates(&testbed_repo()).await.unwrap();
+        let me = c.users.iter().find(|u| u.login == "tviles").unwrap();
+        gh.set_title(&id, "pb live: draft retitled").await.unwrap();
+        gh.set_body(&id, "Draft body").await.unwrap();
+        gh.set_draft_assignees(id.node_id(), std::slice::from_ref(&me.id))
+            .await
+            .unwrap();
+        let now = reload(&gh, &draft.id).await;
+        assert_eq!(
+            (now.title(), now.assignees()),
+            ("pb live: draft retitled", vec!["tviles"])
+        );
+        let converted = gh.convert_draft(&draft.id, &c.repo.id).await.unwrap();
+        let issue = converted
+            .content_fields
+            .content_id
+            .clone()
+            .expect("the new issue's id");
+        let checks = AssertUnwindSafe(async {
+            assert!(matches!(converted.content, ItemContent::Issue { .. }));
+            assert_eq!(converted.id, draft.id, "the same project item");
+        })
+        .catch_unwind()
+        .await;
+        // The draft item is now the issue's item; with_draft deletes the item, this deletes the issue.
+        if let Err(e) = Github::new(http()).delete_issue(&issue).await {
+            eprintln!(
+                "CLEANUP FAILED: delete the converted issue 'pb live: draft retitled' by hand: {e}"
+            );
+        }
+        if let Err(panic) = checks {
+            std::panic::resume_unwind(panic);
+        }
+    })
+    .await;
+}
+
+/// Uses the seeded "Sample pull request", and puts it back as it was even on failure.
+#[tokio::test]
+async fn pull_request_title_close_and_reopen() {
+    let _serial = SERIAL.lock().await;
+    preflight().await;
+    let gh = github("edits_pull");
+    let p = gh.resolve_project(&testbed().0).await.unwrap();
+    let page = gh
+        .fetch_items_page(&p.id, "", project_boards::github::client::FULL_PAGE, None)
+        .await
+        .unwrap();
+    let pr = page
+        .nodes
+        .iter()
+        .find(|i| matches!(i.content, ItemContent::PullRequest { .. }))
+        .expect("the seeded pull request")
+        .clone();
+    let id = content(&pr);
+    let original = pr.title().to_string();
+    let outcome = AssertUnwindSafe(async {
+        gh.set_title(&id, &format!("{original} (live)"))
+            .await
+            .unwrap();
+        gh.close(&id, None).await.unwrap();
+        let closed = reload(&gh, &pr.id).await;
+        assert!(matches!(
+            closed.content,
+            ItemContent::PullRequest {
+                state: ContentState::Closed,
+                ..
+            }
+        ));
+        assert_eq!(closed.title(), format!("{original} (live)"));
+    })
+    .catch_unwind()
+    .await;
+    let restore = Github::new(http());
+    let mut failed = Vec::new();
+    if let Err(e) = restore.reopen(&id).await {
+        eprintln!("RESTORE FAILED: reopen the sample pull request by hand: {e}");
+        failed.push("reopen");
+    }
+    if let Err(e) = restore.set_title(&id, &original).await {
+        eprintln!("RESTORE FAILED: retitle the sample pull request to '{original}' by hand: {e}");
+        failed.push("retitle");
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+    assert!(
+        failed.is_empty(),
+        "the sample pull request was not restored: {}",
+        failed.join(", ")
+    );
+}

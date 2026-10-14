@@ -21,7 +21,9 @@ gh repo view "$REPO" >/dev/null 2>&1 || gh repo create "$REPO" --public --add-re
 gh label create bug --repo "$REPO" --color d73a4a --force
 gh label create enhancement --repo "$REPO" --color a2eeef --force
 gh label create docs --repo "$REPO" --color 0075ca --force
+gh label create "good first issue" --repo "$REPO" --color 7057ff --force
 gh api "repos/$REPO/milestones" -f title=v1 >/dev/null 2>&1 || true
+gh api "repos/$REPO/milestones" -f title=v2 >/dev/null 2>&1 || true
 
 BODY=$'## Steps\n\n1. Open the board\n2. Press `L`\n\n- [x] done item\n- [ ] open item\n\n```rust\nfn main() {}\n```\n\n<details><summary>More</summary>hidden</details>\n\nSee #1 and https://example.com.'
 issue() { # title labels [extra gh args...]  -> prints the URL of the lowest-numbered issue with that title, creating it if none
