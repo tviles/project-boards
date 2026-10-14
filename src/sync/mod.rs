@@ -204,6 +204,9 @@ pub struct SearchPlan {
     /// False when the user's text leaves no room for the scope (searching unscoped would
     /// widen it silently) or exceeds the cap on its own.
     pub fits: bool,
+    /// A repository limits the search: the default scope or a `repo:` token. Without one the
+    /// search would cover all of GitHub, so it is not sent.
+    pub scoped: bool,
 }
 
 /// The GitHub search for "add existing": issues and pull requests, open unless the user typed
@@ -253,6 +256,7 @@ pub fn search_plan(query: &str, scope: &[RepoSlug]) -> SearchPlan {
         query: line.trim().to_string(),
         repos_dropped: dropped,
         fits,
+        scoped: !repos.is_empty() || !scope.is_empty(),
     }
 }
 
@@ -295,6 +299,17 @@ mod tests {
         assert_eq!(
             search_query("", &scope()),
             "repo:acme/app repo:acme/api is:open"
+        );
+    }
+
+    #[test]
+    fn a_search_is_scoped_by_the_default_scope_or_a_repo_token() {
+        assert!(search_plan("crash", &scope()).scoped);
+        assert!(search_plan("crash repo:octo/dots", &[]).scoped);
+        assert!(!search_plan("crash", &[]).scoped);
+        assert!(
+            !search_plan("crash repo:bad", &[]).scoped,
+            "not a repository name"
         );
     }
 

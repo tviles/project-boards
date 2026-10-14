@@ -143,6 +143,9 @@ fn edits_content(kind: OpKind) -> bool {
     )
 }
 
+/// "Add existing" with nothing to scope its search to (ruling E22).
+pub const NO_REPOS_TO_SEARCH: &str = "No repositories to search — type repo:owner/name";
+
 /// The editor came back at once with nothing changed: it probably opened a window and did
 /// not wait for it.
 pub const RETURNED_AT_ONCE: &str =
@@ -291,13 +294,21 @@ impl App {
         vec![Command::LookupRepo(slug.clone())]
     }
 
+    /// Searches for "add existing", unless the search can't be sent: the text is too long,
+    /// or nothing scopes it (no default scope, no `repo:` token, not a pasted URL), which
+    /// would search all of GitHub. Then the popover shows why.
     pub(crate) fn start_search(&mut self, query: &str, scope: Vec<RepoSlug>) -> Vec<Command> {
         let plan = crate::sync::search_plan(query, &scope);
-        if !plan.fits {
-            self.content_search = Some((
-                query.to_string(),
-                Lookup::Failed("search text too long".into()),
-            ));
+        let refused = if !plan.fits {
+            Some("search text too long")
+        } else if !plan.scoped && crate::model::parse_content_url(query).is_none() {
+            Some(NO_REPOS_TO_SEARCH)
+        } else {
+            None
+        };
+        if let Some(why) = refused {
+            self.content_search = Some((query.to_string(), Lookup::Failed(why.into())));
+            self.refresh_popup();
             return Vec::new();
         }
         if plan.repos_dropped > 0 {
@@ -1747,8 +1758,9 @@ mod tests {
     #[test]
     fn a_failed_search_that_was_replaced_is_ignored() {
         let mut a = test_app();
-        a.start_search("one", vec![]);
-        a.start_search("two", vec![]);
+        let scope: Vec<RepoSlug> = vec!["acme/app".parse().unwrap()];
+        a.start_search("one", scope.clone());
+        a.start_search("two", scope);
         a.on_sync(SyncEvent::Failed {
             task: crate::sync::SyncTask::Search("one".into()),
             error: GithubError::Network("offline".into()),
@@ -1769,7 +1781,7 @@ mod tests {
         a.need_candidates(&repo);
         a.need_repos();
         a.need_repo_lookup(&repo);
-        a.start_search("q", vec![]);
+        a.start_search("q", vec!["acme/app".parse().unwrap()]);
         a.reset_for_new_board();
         assert!(a.candidates.is_empty() && a.repos.is_none() && a.repo_lookups.is_empty());
         assert!(a.content_search.is_none());
@@ -1808,8 +1820,9 @@ mod tests {
     #[test]
     fn only_the_latest_search_answer_is_kept() {
         let mut a = test_app();
-        a.start_search("one", vec![]);
-        a.start_search("two", vec![]);
+        let scope: Vec<RepoSlug> = vec!["acme/app".parse().unwrap()];
+        a.start_search("one", scope.clone());
+        a.start_search("two", scope);
         a.on_sync(SyncEvent::SearchResults {
             query: "one".into(),
             hits: vec![],

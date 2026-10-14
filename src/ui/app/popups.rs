@@ -3099,9 +3099,51 @@ mod tests {
         assert_eq!(a.pending_count(), 0);
     }
 
+    /// Controller ruling E22: with no pane repository, no linked repository and no `repo:`
+    /// token there is nothing to scope the search to; it would search all of GitHub.
+    #[test]
+    fn with_no_repository_to_search_nothing_is_searched() {
+        let mut a = test_app();
+        assert!(a.search_scope().is_empty());
+        a.handle_key(key('n'));
+        choose(&mut a, "existing");
+        type_text(&mut a, "crash");
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        let Some(Popup::Search { error, loading, .. }) = &a.popup else {
+            panic!("search")
+        };
+        assert_eq!(
+            error.as_deref(),
+            Some(crate::ui::app::edit::NO_REPOS_TO_SEARCH)
+        );
+        assert!(!*loading);
+        // A repo: token names one.
+        type_text(&mut a, " repo:acme/app");
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::Search {
+                query: "crash repo:acme/app".into(),
+                scope: vec![]
+            }]
+        );
+        // A pasted URL is looked up directly.
+        let mut b = test_app();
+        b.handle_key(key('n'));
+        choose(&mut b, "existing");
+        type_text(&mut b, "acme/app#12");
+        assert_eq!(
+            b.handle_key(code(KeyCode::Enter)),
+            vec![Command::Search {
+                query: "acme/app#12".into(),
+                scope: vec![]
+            }]
+        );
+    }
+
     #[test]
     fn a_failed_or_stale_search_does_not_replace_the_results() {
         let mut a = test_app();
+        a.pane_repo = Some(repo());
         a.handle_key(key('n'));
         choose(&mut a, "existing");
         type_text(&mut a, "crash");
@@ -3137,6 +3179,7 @@ mod tests {
     }
 
     fn search_popup(a: &mut App, text: &str) {
+        a.pane_repo = Some(repo());
         a.handle_key(key('n'));
         choose(a, "existing");
         type_text(a, text);
