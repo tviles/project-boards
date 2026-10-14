@@ -710,7 +710,6 @@ impl App {
         Some(cmds)
     }
 
-    /// The item `kind` would act on, when `check_here` allows it; otherwise shows why.
     /// `C`: pick the repository, then convert.
     pub(crate) fn convert(&mut self) -> Vec<Command> {
         let Some(item) = self.guarded(OpKind::Convert) else {
@@ -719,6 +718,7 @@ impl App {
         self.open_repo_picker(RepoPurpose::Convert { item: item.id })
     }
 
+    /// The item `kind` would act on, when `check_here` allows it; otherwise shows why.
     fn guarded(&mut self, kind: OpKind) -> Option<Item> {
         let Some(item) = self.action_item().cloned() else {
             self.status.flash = Some("Select an item first".into());
