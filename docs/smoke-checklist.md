@@ -40,3 +40,15 @@ Setup: `cargo build --release && herdr plugin link .`, keybinding for `tviles.pr
 - [ ] In `$EDITOR` (opened with `c`), type `q`, `j`, `x`, `X`, `>` and arrow keys, then save and quit: back on the board nothing quit, moved, closed or changed filters (no keystroke typed in the editor reached the board), and the whole screen is redrawn.
 - [ ] With `VISUAL='code -w'`, `c` then `Ctrl+C` in the pane cancels the comment ("The editor exited with an error; nothing was sent") and the board stays open.
 - [ ] With the editor open from `c`, `kill <pane pid>` from another pane, then quit the editor: the board exits and no comment is sent.
+- [ ] `a` on an issue lists testbed assignees with yours checked; toggling and Enter changes it on github.com; `Esc` closes it (or goes back to the field menu when opened from `e`).
+- [ ] `t`, type `good`, Space, Enter adds "good first issue"; on a draft `t` says "Drafts have no labels — convert to issue first (`C`)".
+- [ ] `e` → Milestone sets v2 and "No milestone" clears it.
+- [ ] `Space` → Edit title opens `$EDITOR` with the title; saving retitles; saving it unchanged says "Title unchanged".
+- [ ] `c` adds a comment that shows in the detail; saving an empty file says "Empty comment; nothing was sent".
+- [ ] `X` on an issue offers completed / not planned; on the sample pull request it asks y/n; `X` again reopens.
+- [ ] `A` archives (the item dims, ⊘); `Space` → Show archived items lists it; `A` unarchives.
+- [ ] `Space` → Remove from project asks first; the issue stays in the repository.
+- [ ] On "Board", `n` in "In Progress" → New draft creates a draft in that column and lane, selected and highlighted.
+- [ ] `n` → New issue offers this pane's repository first; the issue appears on github.com in the project; `Esc` in the repository picker returns to the New item menu.
+- [ ] `n` → Add existing finds an issue by text and by pasted URL; one already on the board is selected instead.
+- [ ] `C` on a draft converts it to an issue in the chosen repository.
