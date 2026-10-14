@@ -120,6 +120,9 @@ fn maybe_done(op: &Op) -> &'static str {
     }
 }
 
+/// An edit, or the open detail, whose item has left the board.
+pub const NO_LONGER_ON_BOARD: &str = "That item is no longer on the board";
+
 /// The editor came back at once with nothing changed: it probably opened a window and did
 /// not wait for it.
 pub const RETURNED_AT_ONCE: &str =
@@ -579,7 +582,7 @@ impl App {
             .and_then(|s| s.items.get(op.item()))
             .cloned()
         else {
-            self.status.flash = Some("That item is no longer on the board".into());
+            self.status.flash = Some(NO_LONGER_ON_BOARD.into());
             return Vec::new();
         };
         if let Err(denial) = check(kind, &item, &self.edit_context()) {
@@ -590,7 +593,25 @@ impl App {
         let id = self.store.begin(op);
         self.pending_kinds.insert(id, kind);
         self.restore_selection();
+        // Removing the item the detail shows.
+        self.close_gone_detail();
         vec![Command::Send(id)]
+    }
+
+    /// Closes a detail whose item has left the board (removed, a new item that failed, or
+    /// dropped by a poll) and returns to the board, rather than showing a blank detail. The
+    /// status line says why; when nothing on it does yet, `NO_LONGER_ON_BOARD`.
+    pub(super) fn close_gone_detail(&mut self) {
+        if self.detail.is_none() || self.detail_item().is_some() {
+            return;
+        }
+        self.detail = None;
+        if self.mode == Mode::Detail {
+            self.mode = Mode::Normal;
+        }
+        if self.status.flash.is_none() && self.status.error.is_none() {
+            self.status.flash = Some(NO_LONGER_ON_BOARD.into());
+        }
     }
 
     /// Adds a new item (`Op::Create`): the placeholder shows at once, selected and
@@ -911,7 +932,7 @@ impl App {
         op: impl FnOnce(ItemId, ContentId) -> Op,
     ) -> Vec<Command> {
         let Some(item) = self.item(&id) else {
-            return self.say("That item is no longer on the board");
+            return self.say(NO_LONGER_ON_BOARD);
         };
         let Some(content) = item.content_id() else {
             return self.say(&self.denial_text(Denial::NeedsRefresh));
@@ -1281,6 +1302,8 @@ impl App {
         let extra = self.errors.len().saturating_sub(MAX_ERRORS);
         self.errors.drain(..extra);
         self.error_sel = self.error_sel.min(self.errors.len() - 1);
+        // A new item that failed while its placeholder's detail was open.
+        self.close_gone_detail();
         true
     }
 
@@ -4192,6 +4215,79 @@ mod tests {
             "Remove the draft 'Draft idea' from the project? The draft is deleted. (y/n)"
         );
         assert!(a.handle_key(key('n')).is_empty());
+    }
+
+    /// Controller ruling E20: a detail whose item left the board closes instead of going
+    /// blank.
+    #[test]
+    fn removing_the_open_item_closes_its_detail() {
+        let mut a = test_app();
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(a.mode, Mode::Detail);
+        a.handle_key(key(' '));
+        assert_eq!(a.mode, Mode::Popup);
+        let Some(Popup::Actions { picker, .. }) = a.popup.as_mut() else {
+            panic!("menu")
+        };
+        let remove = picker
+            .choices
+            .iter()
+            .position(|c| c.label == "Remove from project")
+            .expect("Remove is offered");
+        picker.selected = remove;
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(a.mode, Mode::Confirm);
+        assert_eq!(a.handle_key(key('y')), vec![Command::Send(1)]);
+        assert!(a.detail.is_none());
+        assert_eq!(a.mode, Mode::Normal);
+        assert_eq!(a.status.flash.as_deref(), Some(NO_LONGER_ON_BOARD));
+    }
+
+    #[test]
+    fn a_failed_new_item_closes_its_placeholders_detail() {
+        let mut a = test_app();
+        a.submit_new(new_draft("local:1"), false);
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(a.detail.as_ref().unwrap().item.as_str(), "local:1");
+        fail(&mut a, 1, "boom");
+        assert!(a.detail.is_none());
+        assert_eq!(a.mode, Mode::Normal);
+        assert!(
+            a.status.error.as_deref().unwrap().contains("boom"),
+            "the failure says why"
+        );
+        assert_eq!(a.status.flash, None);
+    }
+
+    #[test]
+    fn a_poll_that_drops_the_open_item_closes_its_detail() {
+        let mut a = test_app();
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(a.detail.as_ref().unwrap().item.as_str(), "a");
+        let rest: Vec<_> = crate::ui::fixtures::items()
+            .into_iter()
+            .filter(|i| i.id.as_str() != "a")
+            .collect();
+        a.on_sync(SyncEvent::ItemsComplete {
+            items: rest,
+            fetched_at: "2026-10-14T10:00:00Z".into(),
+            total: 5,
+            truncated: false,
+        });
+        assert!(a.detail.is_none());
+        assert_eq!(a.mode, Mode::Normal);
+        assert_eq!(a.status.flash.as_deref(), Some(NO_LONGER_ON_BOARD));
+        // A poll that keeps the open item leaves the detail alone.
+        let mut b = test_app();
+        b.handle_key(code(KeyCode::Enter));
+        b.on_sync(SyncEvent::ItemsComplete {
+            items: crate::ui::fixtures::items(),
+            fetched_at: "2026-10-14T10:00:00Z".into(),
+            total: 6,
+            truncated: false,
+        });
+        assert_eq!(b.mode, Mode::Detail);
+        assert_eq!(b.status.flash, None);
     }
 
     #[test]

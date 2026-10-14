@@ -1070,6 +1070,8 @@ impl App {
             }
             SyncEvent::ViewIds { .. } | SyncEvent::Hydrated(_) | SyncEvent::RepoProjects(_) => {}
         }
+        // A poll may have dropped the item the detail shows.
+        self.close_gone_detail();
         self.restore_selection();
         cmds
     }

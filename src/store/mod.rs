@@ -497,6 +497,36 @@ mod tests {
         assert!(!is_issue(&s), "after the window the poll wins");
     }
 
+    /// Ruling E11 (deferred T36 test): the converted issue kept for the window only replaces
+    /// the item while polls list it; a poll that removed it wins.
+    #[test]
+    fn a_converted_item_does_not_bring_back_one_a_poll_removed() {
+        let (mut s, _) = layered();
+        let draft = ItemId::new("d");
+        let mut converted = issue("d", 7, "Converted");
+        converted.values = s.confirmed().unwrap().items[&draft].values.clone();
+        let id = s.begin(Op::Convert {
+            item: draft.clone(),
+            repo: crate::model::RepoRef {
+                id: "R_1".into(),
+                slug: "acme/app".parse().unwrap(),
+            },
+        });
+        s.settle_ok(id, Confirmed::Item(converted));
+        assert!(s.snapshot().unwrap().items.contains_key(&draft));
+        let rest: Vec<_> = crate::ui::fixtures::items()
+            .into_iter()
+            .filter(|i| i.id != draft)
+            .collect();
+        s.apply(StoreUpdate::ReplaceItems(rest));
+        assert!(!s.confirmed().unwrap().items.contains_key(&draft));
+        s.apply(StoreUpdate::UpsertItems(vec![stale_a()]));
+        assert!(
+            !s.snapshot().unwrap().items.contains_key(&draft),
+            "a later poll inside the window does not resurrect it"
+        );
+    }
+
     #[test]
     fn the_snapshot_equals_the_confirmed_board_when_nothing_is_pending() {
         let (mut s, _) = layered();
