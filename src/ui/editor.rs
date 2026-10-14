@@ -141,8 +141,12 @@ fn session_pid(name: &str) -> Option<u32> {
 }
 
 /// Whether a process with this pid runs (`kill -0`, no shell). When that can't be told, it is
-/// taken to run, so nothing of a live session is removed.
+/// taken to run, so nothing of a live session is removed. 0 and anything above `i32::MAX` are
+/// no process: `kill` would read them as a process group or wrap them to -1 ("every process").
 pub fn pid_alive(pid: u32) -> bool {
+    if pid == 0 || i32::try_from(pid).is_err() {
+        return false;
+    }
     std::process::Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
@@ -307,6 +311,10 @@ mod tests {
     #[test]
     fn this_process_is_alive_and_an_impossible_pid_is_not() {
         assert!(pid_alive(std::process::id()));
+        // Above every system's pid limit, but a valid pid_t.
+        assert!(!pid_alive(i32::MAX as u32));
+        // Not pids at all: `kill` would take 0 as the process group and wrap u32::MAX to -1.
+        assert!(!pid_alive(0));
         assert!(!pid_alive(u32::MAX));
     }
 
