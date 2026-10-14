@@ -463,6 +463,9 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
                     truncate_to_width(flash, area.width as usize),
                     app.theme.accent(),
                 )
+            } else if matches!(app.popup, Some(Popup::Text { .. })) {
+                // Board keys type text here, and the form draws its own hint in its border.
+                Line::from("")
             } else if app.mode == Mode::ErrorLog {
                 Line::styled(error_log_hints(app, area.width as usize), app.theme.dim())
             } else if let Some(e) = &app.status.error {
@@ -1135,6 +1138,28 @@ mod tests {
         ] {
             assert!(screen.contains(want), "missing {want:?} in\n{screen}");
         }
+    }
+
+    #[test]
+    fn the_status_line_hides_board_keys_while_the_text_form_is_open() {
+        let mut a = app();
+        let marks = ItemMarks::default();
+        let status = |a: &App| {
+            render_to_string(200, 3, |f| draw_status(f, f.area(), a, &marks))
+                .lines()
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        assert!(status(&a).contains("q quit"), "{}", status(&a));
+        a.handle_key(key('c'));
+        assert!(matches!(a.popup, Some(Popup::Text { .. })));
+        let line = status(&a);
+        for board_key in ["q quit", "/ search", "f filter", "L layout"] {
+            assert!(!line.contains(board_key), "{line}");
+        }
+        a.handle_key(code(KeyCode::Esc));
+        assert!(status(&a).contains("q quit"), "{}", status(&a));
     }
 
     #[test]
