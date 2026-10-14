@@ -123,6 +123,26 @@ fn maybe_done(op: &Op) -> &'static str {
 /// An edit, or the open detail, whose item has left the board.
 pub const NO_LONGER_ON_BOARD: &str = "That item is no longer on the board";
 
+/// Why a draft's content edits, and a second convert, wait while it converts (ruling E21).
+pub const CONVERTING: &str = "Converting to an issue…";
+
+/// An operation on the item's issue, pull request or draft (built with its content id), or
+/// a convert: these wait for a pending convert. Project-field edits do not.
+fn edits_content(kind: OpKind) -> bool {
+    matches!(
+        kind,
+        OpKind::Title
+            | OpKind::Body
+            | OpKind::Assignees
+            | OpKind::Labels
+            | OpKind::Milestone
+            | OpKind::Comment
+            | OpKind::Close
+            | OpKind::Reopen
+            | OpKind::Convert
+    )
+}
+
 /// The editor came back at once with nothing changed: it probably opened a window and did
 /// not wait for it.
 pub const RETURNED_AT_ONCE: &str =
@@ -947,10 +967,14 @@ impl App {
     }
 
     /// `check`, plus what the current view rules out: moving needs a column field, and
-    /// reordering needs an unsorted view (GitHub's rule). Every edit key, the action menu and
+    /// reordering needs an unsorted view (GitHub's rule); and while the item is converting
+    /// to an issue, its content waits (`CONVERTING`). Every edit key, the action menu and
     /// the hints ask this, so the UI never offers what it would then refuse. The reason is
     /// the one-line message to show.
     pub(crate) fn check_here(&self, kind: OpKind, item: &Item) -> Result<(), String> {
+        if edits_content(kind) && self.converting(&item.id) {
+            return Err(CONVERTING.into());
+        }
         check(kind, item, &self.edit_context()).map_err(|d| self.denial_text(d))?;
         match kind {
             OpKind::Move if self.column_field().is_none() => {
@@ -970,6 +994,14 @@ impl App {
             },
             _ => Ok(()),
         }
+    }
+
+    /// A `Convert` of `item` is still sending: here it is a draft until GitHub answers.
+    fn converting(&self, item: &ItemId) -> bool {
+        self.store
+            .pending()
+            .iter()
+            .any(|p| matches!(&p.op, Op::Convert { item: i, .. } if i == item))
     }
 
     /// Moves the item to the neighbouring column among those the board shows (a column the
@@ -4215,6 +4247,65 @@ mod tests {
             "Remove the draft 'Draft idea' from the project? The draft is deleted. (y/n)"
         );
         assert!(a.handle_key(key('n')).is_empty());
+    }
+
+    /// Controller ruling E21: while a draft is converting it is still a draft here, so an
+    /// edit of its content would be built with the draft's id. Project-field edits go ahead.
+    #[test]
+    fn content_edits_wait_for_a_pending_convert() {
+        let mut a = test_app();
+        let draft = ItemId::new("d");
+        assert_eq!(
+            a.submit(
+                OpKind::Convert,
+                Op::Convert {
+                    item: draft.clone(),
+                    repo: RepoRef {
+                        id: "R_1".into(),
+                        slug: "tviles/t".parse().unwrap(),
+                    },
+                },
+            ),
+            vec![Command::Send(1)]
+        );
+        a.open_detail(draft.clone());
+        for k in ['t', 'c', 'a', 'C'] {
+            assert!(a.handle_key(key(k)).is_empty(), "{k}");
+            assert_eq!(
+                a.status.flash.as_deref(),
+                Some(CONVERTING),
+                "{k} waits for the convert"
+            );
+            assert_eq!(a.mode, Mode::Detail, "{k} opens nothing");
+        }
+        let item = a.item(&draft).unwrap().clone();
+        for kind in [OpKind::Title, OpKind::Body, OpKind::Milestone] {
+            assert_eq!(
+                a.check_here(kind, &item),
+                Err(CONVERTING.into()),
+                "{kind:?}"
+            );
+        }
+        for kind in [
+            OpKind::Move,
+            OpKind::SetField,
+            OpKind::Reorder,
+            OpKind::Archive,
+        ] {
+            assert_eq!(a.check_here(kind, &item), Ok(()), "{kind:?}");
+        }
+        assert_eq!(
+            a.handle_key(key('<')),
+            vec![Command::Send(2)],
+            "a move goes"
+        );
+        // Once the convert settles, content edits are offered again.
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Err(GithubError::Graphql(vec![])),
+        });
+        let item = a.item(&draft).unwrap().clone();
+        assert_eq!(a.check_here(OpKind::Title, &item), Ok(()));
     }
 
     /// Controller ruling E20: a detail whose item left the board closes instead of going

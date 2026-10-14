@@ -3211,6 +3211,12 @@ mod tests {
         for _ in 0..3 {
             a.handle_key(key('j'));
         }
+        a.handle_key(key('t'));
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Drafts have no labels — convert to issue first (`C`)"),
+            "the spec's reason, with its key"
+        );
         assert_eq!(a.handle_key(key('C')), vec![Command::LoadRepos]);
         a.on_sync(SyncEvent::Repos(PushableRepos {
             repos: vec![repo_ref("tviles/t")],
@@ -3220,11 +3226,11 @@ mod tests {
         assert!(
             matches!(&a.store.pending()[0].op, Op::Convert { item, repo } if item.as_str() == "d" && repo.slug == repo_ref("tviles/t").slug)
         );
+        // Ruling E21: while the convert is sending, labels wait for it.
         a.handle_key(key('t'));
         assert_eq!(
             a.status.flash.as_deref(),
-            Some("Drafts have no labels — convert to issue first (`C`)"),
-            "the spec's reason, with its key"
+            Some(crate::ui::app::edit::CONVERTING)
         );
     }
 
