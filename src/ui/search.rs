@@ -1,11 +1,13 @@
 use crate::model::Item;
 
 /// Quick search: every whitespace-separated word must appear (case-insensitively) in the
-/// title, `#number`, an assignee (`@login` or `login`) or a label.
+/// title, `#number` (`new` for an item still being created), an assignee (`@login` or
+/// `login`) or a label.
 pub fn matches(item: &Item, query: &str) -> bool {
     let mut haystack = item.title().to_lowercase();
-    if let Some(n) = item.number() {
-        haystack.push_str(&format!(" #{n}"));
+    if item.number().is_some() || item.is_placeholder() {
+        haystack.push(' ');
+        haystack.push_str(&item.ref_label().to_lowercase());
     }
     for a in item.assignees() {
         haystack.push_str(&format!(" @{}", a.to_lowercase()));
@@ -34,5 +36,17 @@ mod tests {
         assert!(!matches(&all[0], "crash enhancement"));
         assert!(matches(&all[2], "🚀"));
         assert!(matches(&all[3], ""), "empty query matches everything");
+    }
+
+    #[test]
+    fn an_item_still_being_created_matches_new() {
+        let mut item = items()[1].clone();
+        assert!(!matches(&item, "new"));
+        item.id = crate::model::ItemId::new("local:1");
+        if let crate::model::ItemContent::Issue { reference, .. } = &mut item.content {
+            reference.number = 0;
+        }
+        assert!(matches(&item, "new"));
+        assert!(!matches(&item, "#0"));
     }
 }
