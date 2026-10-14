@@ -34,8 +34,9 @@ pub struct FailedEdit {
     /// GitHub's own message.
     pub message: String,
     pub at: Instant,
-    /// A new item that may exist on GitHub after all (the answer was lost): `R` refuses,
-    /// because a retry could create it twice.
+    /// A new item or a comment that may exist on GitHub after all (the answer was lost, or
+    /// the board was reloaded while it was sending): `R` refuses, because a retry could
+    /// create it twice (`not_safe_to_resend`).
     pub may_exist: bool,
 }
 
@@ -84,8 +85,8 @@ pub(crate) fn archived_token(text: &str) -> Option<(usize, usize)> {
 /// The error log's message for an edit dropped unsent because its board was loaded again.
 pub const NOT_SENT_RELOADED: &str = "not sent: the board was reloaded";
 
-/// The same for a new draft or issue: it may have been sending, and so may exist on GitHub
-/// already.
+/// The same for a new draft or issue, or a comment: it may have been sending, and so may
+/// exist on GitHub already.
 pub const MAYBE_SENT_RELOADED: &str =
     "the board was reloaded while it was sending; check the board before retrying";
 
@@ -94,16 +95,29 @@ pub const MAYBE_SENT_RELOADED: &str =
 /// deliberately if it is not there.
 pub const MAYBE_CREATED: &str = "may have been created; check GitHub before retrying";
 
-/// A `Create` whose retry could make a second item: a draft or a new issue. Adding an
-/// existing issue twice returns the same item, so that one is safe to retry.
-fn creates_content(op: &Op) -> bool {
+/// A comment whose answer was lost: it may have been posted. `R` refuses such an entry with
+/// this text (controller ruling E19).
+pub const MAYBE_POSTED: &str = "may have been posted; check the issue before retrying";
+
+/// An op whose retry could make a second copy on GitHub when its answer was lost: a new
+/// draft, a new issue, or a comment. Adding an existing issue twice returns the same item,
+/// and every other edit sets a value, so those are safe to send again.
+fn not_safe_to_resend(op: &Op) -> bool {
     matches!(
         op,
         Op::Create {
             new: NewItem::Draft { .. } | NewItem::Issue { .. },
             ..
-        }
+        } | Op::Comment { .. }
     )
+}
+
+/// What the log says, and `R` refuses with, for `op` whose answer was lost.
+fn maybe_done(op: &Op) -> &'static str {
+    match op {
+        Op::Comment { .. } => MAYBE_POSTED,
+        _ => MAYBE_CREATED,
+    }
 }
 
 /// The editor came back at once with nothing changed: it probably opened a window and did
@@ -1154,13 +1168,16 @@ impl App {
                     .unwrap_or_default()
             }
             Err(error) => {
-                // The answer was lost, not refused: the draft or issue may exist.
-                let may_exist = pending.as_ref().is_some_and(creates_content)
-                    && matches!(error, GithubError::Network(_) | GithubError::Decode(_));
-                let message = if may_exist {
-                    format!("{MAYBE_CREATED} ({})", error_message(&error))
-                } else {
-                    error_message(&error)
+                // The answer was lost, not refused (a caught panic reports as `Network`): the
+                // draft, issue or comment may exist.
+                let lost = pending.as_ref().filter(|op| {
+                    not_safe_to_resend(op)
+                        && matches!(error, GithubError::Network(_) | GithubError::Decode(_))
+                });
+                let may_exist = lost.is_some();
+                let message = match lost {
+                    Some(op) => format!("{} ({})", maybe_done(op), error_message(&error)),
+                    None => error_message(&error),
                 };
                 if self.fail_pending(id, kind, message, None, may_exist) {
                     self.record_refused_scopes(&error);
@@ -1268,14 +1285,15 @@ impl App {
     }
 
     /// Every edit still pending goes to the error log as not sent (its board is being
-    /// replaced, so it never will be). A new draft or issue says to check first instead, and
-    /// `R` refuses it: it may have been sending, and its result is dropped with the old board.
+    /// replaced, so it never will be). A new draft or issue, or a comment, says to check
+    /// first instead, and `R` refuses it: it may have been sending, and its result is dropped
+    /// with the old board.
     pub(super) fn fail_all_pending(&mut self, message: &str) {
         let ids: Vec<(OpId, bool)> = self
             .store
             .pending()
             .iter()
-            .map(|p| (p.id, creates_content(&p.op)))
+            .map(|p| (p.id, not_safe_to_resend(&p.op)))
             .collect();
         for (id, may_exist) in ids {
             let kind = self.pending_kinds.remove(&id);
@@ -1335,15 +1353,15 @@ impl App {
 
     /// Sends the selected failed edit again as a fresh op, after the capability matrix has
     /// had its say (the item may have become read-only, archived or gone). The log stays
-    /// open. When the matrix refuses, the entry stays and the reason shows. A new item that
-    /// may exist after all (`FailedEdit::may_exist`) is never sent again: the entry stays and
-    /// `MAYBE_CREATED` shows.
+    /// open. When the matrix refuses, the entry stays and the reason shows. A new item or a
+    /// comment that may exist after all (`FailedEdit::may_exist`) is never sent again: the
+    /// entry stays and `MAYBE_CREATED` or `MAYBE_POSTED` shows.
     fn retry_selected(&mut self) -> Vec<Command> {
         let Some(index) = self.errors.len().checked_sub(1 + self.error_sel) else {
             return Vec::new();
         };
         if self.errors[index].may_exist {
-            self.status.flash = Some(MAYBE_CREATED.into());
+            self.status.flash = Some(maybe_done(&self.errors[index].op).into());
             return Vec::new();
         }
         let failed = self.errors.remove(index);
@@ -3422,6 +3440,72 @@ mod tests {
                 assert_eq!(a.pending_count(), 0);
             }
         }
+    }
+
+    /// Controller ruling E19: a comment whose answer was lost may have been posted; `R`
+    /// would post it twice.
+    #[test]
+    fn a_comment_whose_answer_was_lost_may_be_posted_and_r_refuses() {
+        for error in [
+            GithubError::Network("reset".into()),
+            GithubError::Decode("addComment returned no comment".into()),
+        ] {
+            let mut a = test_app();
+            assert_eq!(
+                a.on_edited(
+                    EditPurpose::Comment(ItemId::new("a")),
+                    Some("LGTM\n".into())
+                ),
+                vec![Command::Send(1)]
+            );
+            let shown = error_message(&error);
+            a.on_sync(SyncEvent::OpDone {
+                id: 1,
+                result: Err(error),
+            });
+            assert_eq!(a.errors.len(), 1);
+            assert_eq!(a.errors[0].message, format!("{MAYBE_POSTED} ({shown})"));
+            assert!(a.errors[0].may_exist);
+            a.handle_key(key('E'));
+            assert!(a.handle_key(key('R')).is_empty(), "never posted again");
+            assert_eq!(a.status.flash.as_deref(), Some(MAYBE_POSTED));
+            assert_eq!(a.errors.len(), 1, "the entry stays");
+            assert_eq!(a.pending_count(), 0);
+        }
+        // A comment GitHub refused was not posted: `R` sends it again.
+        let mut b = test_app();
+        b.on_edited(
+            EditPurpose::Comment(ItemId::new("a")),
+            Some("LGTM\n".into()),
+        );
+        fail(&mut b, 1, "Issue is locked");
+        assert!(!b.errors[0].may_exist);
+        b.handle_key(key('E'));
+        assert_eq!(b.handle_key(key('R')), vec![Command::Send(2)]);
+    }
+
+    #[test]
+    fn a_comment_pending_when_the_board_reloads_may_be_posted_and_is_not_retried() {
+        let mut a = test_app();
+        a.submit(OpKind::Move, set_status("b", "o_done", "Done"));
+        a.on_edited(
+            EditPurpose::Comment(ItemId::new("a")),
+            Some("LGTM\n".into()),
+        );
+        a.reset_for_new_board();
+        let logged: Vec<(&str, bool)> = a
+            .errors
+            .iter()
+            .map(|e| (e.message.as_str(), e.may_exist))
+            .collect();
+        assert_eq!(
+            logged,
+            [(NOT_SENT_RELOADED, false), (MAYBE_SENT_RELOADED, true)]
+        );
+        a.handle_key(key('E'));
+        assert!(a.handle_key(key('R')).is_empty());
+        assert_eq!(a.status.flash.as_deref(), Some(MAYBE_POSTED));
+        assert_eq!(a.errors.len(), 2);
     }
 
     #[test]
