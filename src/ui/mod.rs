@@ -18,6 +18,7 @@ pub mod runtime;
 pub mod search;
 pub mod table;
 pub mod text;
+pub mod textform;
 pub mod theme;
 
 #[cfg(test)]
