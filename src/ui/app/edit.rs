@@ -929,6 +929,9 @@ impl App {
             refill(form, edited);
             return Vec::new();
         }
+        // Defensive: the runtime handles an editor's result before any other input, so the
+        // form it was opened from is always still open. If it somehow is not, the result
+        // goes through the shared submit path as it did before the form existed.
         match edited {
             Edited::Saved { text, quick } => self.on_text(purpose, text, quick),
             Edited::Failed => self.say(EDITOR_FAILED),
@@ -3991,10 +3994,19 @@ mod tests {
     #[test]
     fn an_edit_for_an_item_that_left_the_board_sends_nothing() {
         let mut a = test_app();
+        let comment = EditPurpose::Comment(ItemId::new("a"));
+        // The comment key opens the form for that item; closing it leaves a stray editor
+        // result with no form to go back into.
+        a.comment();
+        assert!(
+            matches!(&a.popup, Some(Popup::Text { purpose, .. }) if *purpose == comment),
+            "the comment key opens the form for item a"
+        );
+        a.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(a.popup.is_none());
         let mut snap = a.snapshot().unwrap().clone();
         snap.items.remove(&ItemId::new("a"));
         a.store.apply(crate::store::StoreUpdate::Replace(snap));
-        let comment = EditPurpose::Comment(ItemId::new("a"));
         assert!(a.on_edited(comment, Some("LGTM".into())).is_empty());
         assert_eq!(
             a.status.flash.as_deref(),
