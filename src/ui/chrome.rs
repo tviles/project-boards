@@ -140,6 +140,38 @@ fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
     let theme = &app.theme;
     match popup {
         Popup::NewKind { picker, .. } => render_list_picker(frame, area, picker, theme),
+        Popup::Search {
+            input,
+            searched,
+            hits,
+            selected,
+            loading,
+            error,
+            ..
+        } => {
+            let status = match (error, loading, searched) {
+                (Some(e), _, _) => e.clone(),
+                (None, true, _) => "Searching…".to_string(),
+                (None, false, Some(q)) if hits.is_empty() && q == input.trim() => {
+                    "Nothing found".to_string()
+                }
+                _ => "Enter searches (repo:owner/name widens it; a pasted URL works) · Enter again adds"
+                    .to_string(),
+            };
+            let rows: Vec<(String, String)> = hits
+                .iter()
+                .map(|h| {
+                    let kind = if h.pull { "PR" } else { "issue" };
+                    let detail = if app.on_board(h).is_some() {
+                        format!("{kind} · already on the board")
+                    } else {
+                        kind.to_string()
+                    };
+                    (format!("{}#{} {}", h.repo, h.number, h.title), detail)
+                })
+                .collect();
+            crate::ui::popup::render_search(frame, area, input, &status, &rows, *selected, theme)
+        }
         Popup::Repo { picker, .. } => render_list_picker(frame, area, picker, theme),
         Popup::Actions { picker, .. } => render_list_picker(frame, area, picker, theme),
         Popup::Fields { picker, .. } => render_list_picker(frame, area, picker, theme),

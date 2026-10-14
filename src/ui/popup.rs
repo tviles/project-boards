@@ -318,6 +318,50 @@ pub fn render_line_popup(
     boxed(frame, rect, title, lines);
 }
 
+/// The "add existing" popover: the query, a status line, and the hits as (label, detail).
+pub fn render_search(
+    frame: &mut Frame,
+    area: Rect,
+    input: &str,
+    status: &str,
+    rows: &[(String, String)],
+    selected: usize,
+    theme: &Theme,
+) {
+    let rect = centered(
+        area,
+        area.width.saturating_sub(4).min(80),
+        rows.len().clamp(1, 12) as u16 + 4,
+    );
+    let inner = rect.width.saturating_sub(2) as usize;
+    let mut lines = vec![
+        Line::styled(
+            format!("> {}", tail_to_width(input, inner.saturating_sub(2))),
+            theme.accent(),
+        ),
+        Line::styled(truncate_to_width(status, inner), theme.dim()),
+    ];
+    // Keep the highlighted row on screen when there are more hits than rows.
+    let first = selected.saturating_sub(11);
+    for (i, (label, detail)) in rows.iter().enumerate().skip(first).take(12) {
+        let style = if i == selected {
+            theme.selected()
+        } else {
+            ratatui::style::Style::default()
+        };
+        let label_w = inner.saturating_sub(display_width(detail) + 1);
+        lines.push(Line::from(vec![
+            Span::styled(
+                pad_to_width(&truncate_to_width(label, label_w), label_w),
+                style,
+            ),
+            Span::styled(" ", style),
+            Span::styled(detail.clone(), style.patch(theme.dim())),
+        ]));
+    }
+    boxed(frame, rect, "Add an existing issue or pull request", lines);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

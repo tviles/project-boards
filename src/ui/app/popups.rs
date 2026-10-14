@@ -6,7 +6,7 @@ use crate::model::{
     FieldValue, Iteration, OptionId, format_iso_date, parse_date_input, parse_iso_date,
     parse_number_input,
 };
-use crate::ops::Op;
+use crate::ops::{NewItem, Op};
 use crate::ui::multiselect::{MultiOption, MultiOutcome, MultiSelect};
 use crate::ui::popup::{Choice, LineOutcome, ListOutcome, ListPicker, edit_line};
 
@@ -50,6 +50,7 @@ pub enum MenuEntry {
 pub enum NewKind {
     Issue,
     Draft,
+    Existing,
 }
 
 /// What a chosen repository is for.
@@ -64,6 +65,17 @@ pub enum Popup {
     NewKind {
         presets: Vec<(FieldId, FieldValue)>,
         picker: ListPicker<NewKind>,
+    },
+    /// `n`, "add existing": a search (or a pasted URL) whose hits can be added. `searched` is
+    /// the query the hits answer; Enter searches when the input differs from it, else adds.
+    Search {
+        presets: Vec<(FieldId, FieldValue)>,
+        input: String,
+        searched: Option<String>,
+        hits: Vec<ContentHit>,
+        selected: usize,
+        loading: bool,
+        error: Option<String>,
     },
     /// Which repository a new issue goes to. `wanted` is a typed `owner/name` being looked up.
     Repo {
@@ -429,12 +441,63 @@ impl App {
         Vec::new()
     }
 
+    /// Where "add existing" searches by default: the pane's repository and the project's
+    /// linked ones (spec section 6, "Adding and creating items"). `repo:` in the query widens it.
+    pub(crate) fn search_scope(&self) -> Vec<RepoSlug> {
+        let mut scope: Vec<RepoSlug> = self.pane_repo.iter().cloned().collect();
+        if let Some(p) = self.project() {
+            for r in &p.linked_repos {
+                if !scope.contains(&r.slug) {
+                    scope.push(r.slug.clone());
+                }
+            }
+        }
+        scope
+    }
+
+    /// The board item that is this issue or pull request, if it is on the board.
+    pub(crate) fn on_board(&self, hit: &ContentHit) -> Option<ItemId> {
+        self.snapshot()?
+            .items
+            .values()
+            .find(|i| {
+                i.reference().is_some_and(|r| {
+                    r.repo.eq_ignore_ascii_case(&hit.repo) && r.number == hit.number
+                })
+            })
+            .map(|i| i.id.clone())
+    }
+
+    /// Adds the hit, or selects it when it is on the board already.
+    fn add_existing(
+        &mut self,
+        hit: ContentHit,
+        presets: Vec<(FieldId, FieldValue)>,
+    ) -> Vec<Command> {
+        if let Some(id) = self.on_board(&hit) {
+            self.status.flash = Some(format!("#{} is already on the board", hit.number));
+            self.selected_id = Some(id);
+            self.restore_selection();
+            return Vec::new();
+        }
+        let temp = self.next_temp();
+        self.submit_new(
+            Op::Create {
+                temp,
+                new: NewItem::Existing { hit },
+                presets,
+            },
+            false,
+        )
+    }
+
     fn open_new_kind(&mut self, presets: Vec<(FieldId, FieldValue)>) {
         let picker = ListPicker::new(
             "New item",
             vec![
                 Choice::new("New issue", NewKind::Issue),
                 Choice::new("New draft", NewKind::Draft),
+                Choice::new("Add an existing issue or pull request", NewKind::Existing),
             ],
         );
         self.open_popup(Popup::NewKind { presets, picker });
@@ -907,6 +970,18 @@ impl App {
                         NewKind::Draft => {
                             self.open_editor(EditPurpose::NewDraft { presets }, String::new())
                         }
+                        NewKind::Existing => {
+                            self.open_popup(Popup::Search {
+                                presets,
+                                input: String::new(),
+                                searched: None,
+                                hits: Vec::new(),
+                                selected: 0,
+                                loading: false,
+                                error: None,
+                            });
+                            Vec::new()
+                        }
                         NewKind::Issue => match check_new(true, &self.edit_context()) {
                             Ok(()) => self.open_repo_picker(RepoPurpose::NewIssue { presets }),
                             Err(denial) => {
@@ -966,6 +1041,45 @@ impl App {
                     ListOutcome::None | ListOutcome::Key(_) => {}
                 }
             }
+            Popup::Search {
+                presets,
+                input,
+                searched,
+                hits,
+                selected,
+                loading,
+                error,
+            } => match key.code {
+                KeyCode::Esc => {
+                    // One level back: the kind picker, same presets.
+                    let presets = presets.clone();
+                    self.open_new_kind(presets);
+                    return Vec::new();
+                }
+                KeyCode::Up => *selected = selected.saturating_sub(1),
+                KeyCode::Down => *selected = (*selected + 1).min(hits.len().saturating_sub(1)),
+                KeyCode::Enter => {
+                    let query = input.trim().to_string();
+                    if query.is_empty() {
+                    } else if searched.as_deref() != Some(query.as_str()) {
+                        *searched = Some(query.clone());
+                        *loading = true;
+                        *error = None;
+                        hits.clear();
+                        *selected = 0;
+                        self.popup = Some(popup);
+                        let scope = self.search_scope();
+                        return self.start_search(&query, scope);
+                    } else if let Some(hit) = hits.get(*selected).cloned() {
+                        let presets = presets.clone();
+                        self.close_popup();
+                        return self.add_existing(hit, presets);
+                    }
+                }
+                _ => {
+                    edit_line(input, &key);
+                }
+            },
             Popup::Actions { picker, .. } => match picker.handle(&key) {
                 ListOutcome::Chosen(MenuEntry::Key(action)) => {
                     self.close_popup();
@@ -2899,5 +3013,109 @@ mod tests {
         a.handle_key(code(KeyCode::Enter));
         assert!(a.selected_item().is_none());
         assert_eq!(a.new_hint().as_deref(), Some("n new"));
+    }
+
+    use crate::model::ContentHit;
+
+    fn hit(repo: &str, number: u32, title: &str) -> ContentHit {
+        ContentHit {
+            id: format!("I_{number}"),
+            pull: false,
+            repo: repo.into(),
+            number,
+            title: title.into(),
+            open: true,
+        }
+    }
+
+    #[test]
+    fn add_existing_searches_the_pane_and_linked_repositories() {
+        let mut a = test_app();
+        a.pane_repo = Some(repo());
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.project.linked_repos = vec![repo_ref("acme/api"), repo_ref("tviles/t")];
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        a.handle_key(key('n'));
+        choose(&mut a, "existing");
+        type_text(&mut a, "crash");
+        let scope: Vec<RepoSlug> = vec![repo(), "acme/api".parse().unwrap()];
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::Search {
+                query: "crash".into(),
+                scope
+            }]
+        );
+        a.on_sync(SyncEvent::SearchResults {
+            query: "crash".into(),
+            hits: vec![hit("acme/api", 9, "Crash in api")],
+        });
+        let Some(Popup::Search { hits, .. }) = &a.popup else {
+            panic!("search")
+        };
+        assert_eq!(hits.len(), 1);
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        let placeholder = a.item(&ItemId::new("local:1")).unwrap();
+        assert_eq!(
+            (placeholder.number(), placeholder.title()),
+            (Some(9), "Crash in api")
+        );
+    }
+
+    #[test]
+    fn an_item_already_on_the_board_is_selected_instead_of_added() {
+        let mut a = test_app();
+        a.handle_key(key('n'));
+        choose(&mut a, "existing");
+        type_text(&mut a, "https://github.com/tviles/t/issues/3");
+        a.handle_key(code(KeyCode::Enter));
+        a.on_sync(SyncEvent::SearchResults {
+            query: "https://github.com/tviles/t/issues/3".into(),
+            hits: vec![hit("tviles/t", 3, "Emoji")],
+        });
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("#3 is already on the board")
+        );
+        assert_eq!(a.selected_item().unwrap().id.as_str(), "c");
+        assert_eq!(a.pending_count(), 0);
+    }
+
+    #[test]
+    fn a_failed_or_stale_search_does_not_replace_the_results() {
+        let mut a = test_app();
+        a.handle_key(key('n'));
+        choose(&mut a, "existing");
+        type_text(&mut a, "crash");
+        a.handle_key(code(KeyCode::Enter));
+        a.on_sync(SyncEvent::SearchResults {
+            query: "older".into(),
+            hits: vec![hit("tviles/t", 1, "x")],
+        });
+        let Some(Popup::Search { hits, loading, .. }) = &a.popup else {
+            panic!("search")
+        };
+        assert!(
+            hits.is_empty() && *loading,
+            "an answer to another query is ignored"
+        );
+        a.on_sync(SyncEvent::Failed {
+            task: crate::sync::SyncTask::Search("crash".into()),
+            error: crate::github::GithubError::Network("offline".into()),
+        });
+        let Some(Popup::Search { error, loading, .. }) = &a.popup else {
+            panic!("search")
+        };
+        assert!(error.as_deref().unwrap().contains("offline") && !*loading);
+    }
+
+    #[test]
+    fn esc_in_the_search_goes_back_to_the_kind_picker() {
+        let mut a = test_app();
+        a.handle_key(key('n'));
+        choose(&mut a, "existing");
+        a.handle_key(code(KeyCode::Esc));
+        assert!(matches!(a.popup, Some(Popup::NewKind { .. })));
     }
 }

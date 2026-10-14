@@ -253,7 +253,6 @@ impl App {
         vec![Command::LookupRepo(slug.clone())]
     }
 
-    #[allow(dead_code)] // the editors that ask arrive in Tasks 30, 34 and 35
     pub(crate) fn start_search(&mut self, query: &str, scope: Vec<RepoSlug>) -> Vec<Command> {
         let plan = crate::sync::search_plan(query, &scope);
         if !plan.fits {
@@ -324,6 +323,25 @@ impl App {
             return;
         };
         match &mut popup {
+            Popup::Search {
+                searched: Some(q),
+                hits,
+                loading,
+                error,
+                selected,
+                ..
+            } => match &self.content_search {
+                Some((query, Lookup::Ready(found))) if query == q => {
+                    *hits = found.clone();
+                    *loading = false;
+                    *selected = 0;
+                }
+                Some((query, Lookup::Failed(e))) if query == q => {
+                    *error = Some(e.clone());
+                    *loading = false;
+                }
+                _ => {}
+            },
             Popup::Assignees {
                 item, repo, select, ..
             } if select.loading => fill_checklist(
