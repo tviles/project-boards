@@ -71,7 +71,7 @@ Titles, bodies, comments and new items open in `$VISUAL` or `$EDITOR` (`vi` if n
 
 `X` closes an open item: an issue asks for a reason (Completed or Not planned), a pull request asks `y/n`; on a closed item it reopens at once. `A` archives or unarchives (an archived item dims and is marked ⊘ until you leave the view or press `r`). `Space` then Show archived items adds `is:archived` to the session filter, which `x` clears. Remove from project is only in the `Space` menu and always asks first; the issue stays in its repository, but a draft is deleted.
 
-`n` asks what to add. On a board the new item lands in the selected column and the selected card's lane; in a table it takes no values. New draft opens the editor. New issue first asks for the repository: the pane's repository, then the project's linked repositories, then any `owner/name` you type and press `Enter` on, then repositories you can push to ("showing the first 500 repositories; type owner/name for another"). Add an existing issue or pull request takes a search (`Enter` searches, then `Enter` adds the highlighted hit) limited to open items (unless you type `is:closed`) in the pane's and linked repositories; `is:open`, `is:closed`, `is:issue` and `is:pr` are understood, any other word is plain text, and `repo:owner/name` searches that repository instead. Pasting an issue or pull request URL (`https://github.com/owner/name/issues/12`) or `owner/name#12` adds that item directly; one already on the board is selected instead. `Esc` goes back one level (search or repository, then the kind menu, then the board). `C` asks for a repository and turns a draft into an issue there.
+`n` asks what to add. On a board the new item lands in the selected column and the selected card's lane; in a table it takes no values. New draft opens the editor. New issue first asks for the repository: the pane's repository, then the project's linked repositories, then any `owner/name` you type and press `Enter` on, then repositories you can push to ("showing the first 500 repositories; type owner/name for another"). Add an existing issue or pull request takes a search (`Enter` searches, then `Enter` adds the highlighted hit) limited to open items (unless you type `is:closed`) in the pane's and linked repositories (with neither, type `repo:owner/name`); `is:open`, `is:closed`, `is:issue` and `is:pr` are understood, any other word is plain text, and `repo:owner/name` searches that repository instead. Pasting an issue or pull request URL (`https://github.com/owner/name/issues/12`) or `owner/name#12` adds that item directly; one already on the board is selected instead. `Esc` goes back one level (search or repository, then the kind menu, then the board). `C` asks for a repository and turns a draft into an issue there.
 
 If GitHub never answers a request that creates something, the error log says it "may have been created; check GitHub before retrying", and `R` refuses it: look on github.com first, then add it again if it is missing.
 
@@ -89,7 +89,7 @@ Apart from the fixed `Ctrl+C` quit, no default key uses Ctrl, so herdr's prefix 
     full_refresh_mins = 10
     max_items = 2000
     placement = "tab"                  # tab | overlay | split | zoomed
-    gh_user = "my-login"               # gh account for `gh auth token --user`; default: active account
+    gh_user = "my-login"               # gh account for `gh auth token --user`, used when GH_TOKEN and GITHUB_TOKEN are not set; default: active account
 
     [keys]
     next_view = "]"                    # action = key

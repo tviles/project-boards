@@ -48,7 +48,7 @@ Setup: `cargo build --release && herdr plugin link .`, keybinding for `tviles.pr
 - [ ] `X` on an issue offers completed / not planned; on the sample pull request it asks y/n; `X` again reopens.
 - [ ] `A` archives (the item dims, ⊘); `Space` → Show archived items lists it; `A` unarchives.
 - [ ] `Space` → Remove from project asks first; the issue stays in the repository.
-- [ ] On "Board", `n` in "In Progress" → New draft creates a draft in that column and lane, selected and highlighted.
+- [ ] On "Board", `n` in "In Progress" → New draft creates a draft in that column and lane, selected.
 - [ ] `n` → New issue offers this pane's repository first; the issue appears on github.com in the project; `Esc` in the repository picker returns to the New item menu.
 - [ ] `n` → Add existing finds an issue by text and by pasted URL; one already on the board is selected instead.
 - [ ] `C` on a draft converts it to an issue in the chosen repository.

@@ -238,9 +238,9 @@ Every operation is offered only when the capability matrix (section 4) allows it
 ### Adding and creating items
 
 - **Repository picker** for a new issue: the focused pane's repository first, then the project's linked repositories, then any repository the user can push to, searched as they type.
-- **Add existing** searches open issues and pull requests in the linked repositories and the pane's repository by default. Typing `repo:owner/name` widens the search.
+- **Add existing** searches open issues and pull requests in the linked repositories and the pane's repository by default. Typing `repo:owner/name` widens the search. With neither a pane repository nor a linked one, nothing is searched until `repo:owner/name` is typed (a pasted issue or pull request URL still works).
 - **Where a new item lands:** pressing `n` in a board column or swimlane pre-sets that column's and swimlane's field values (for example Status = In Progress). In table layout, the item lands with no field values, at the bottom.
-- The new item is selected and briefly highlighted.
+- The new item is selected.
 
 ### Bulk edits
 
@@ -313,9 +313,8 @@ Removing an item from the project, closing an issue or pull request, saving a vi
 
 - Single-select options use their GitHub colours (GRAY, BLUE, GREEN, YELLOW, ORANGE, RED, PINK, PURPLE) mapped to the terminal's 16 ANSI colours, so the user's terminal theme applies.
 - Colour is never the only signal: option names are always shown.
-- `NO_COLOR` switches to plain text.
 - Labels are pills in their GitHub colour: exact on terminals with `COLORTERM=truecolor`, otherwise the nearest of 256, with black or white text, whichever reads better. Field values on cards are pills on a subtle background.
-- `NO_COLOR` shows label and field names as plain text.
+- `NO_COLOR` switches to plain text: label and field names show without colour.
 
 ## 7. Error handling and edge cases
 
@@ -390,7 +389,7 @@ idle_after_secs = 300             # idle fallback when focus events are unavaila
 full_refresh_mins = 10
 max_items = 2000
 placement = "tab"                 # tab | overlay | split | zoomed
-gh_user = "my-login"              # gh account whose token to use (gh auth token --user); default: the active account
+gh_user = "my-login"              # gh account whose token to use (gh auth token --user), used when GH_TOKEN and GITHUB_TOKEN are not set; default: the active account
 
 [keys]
 # overrides, for example:
