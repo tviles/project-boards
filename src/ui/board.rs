@@ -291,7 +291,8 @@ fn card_reference(
     let placeholder = item.is_placeholder();
     let short = |r: &ContentRef| {
         let name = r.repo.split_once('/').map_or(r.repo.as_str(), |(_, n)| n);
-        let number = if placeholder {
+        // An existing issue being added has its number already; only a new one has none.
+        let number = if placeholder && r.number == 0 {
             "new".to_string()
         } else {
             format!("#{}", r.number)
@@ -1634,6 +1635,10 @@ mod tests {
         assert_eq!(number.as_deref(), Some("new"));
         // A real item still shows its number.
         assert!(card_text(&items()[0], 34, &Theme::plain())[1].starts_with("│● t #1"));
+        // So does an existing issue still being added (its placeholder knows the number).
+        let mut adding = items()[0].clone();
+        adding.id = ItemId::new("local:2");
+        assert!(card_text(&adding, 34, &Theme::plain())[1].starts_with("│● t #1"));
     }
 
     #[test]
