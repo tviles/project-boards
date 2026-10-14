@@ -1,0 +1,54 @@
+{
+  "data": {
+    "nodes": [
+      {
+        "__typename": "ProjectV2Item",
+        "content": {
+          "__typename": "DraftIssue",
+          "assignees": {
+            "nodes": [
+              {
+                "id": "MDQ6VXNlcjM4NDc3MjE=",
+                "login": "tviles"
+              }
+            ]
+          },
+          "id": "DI_lAHOADq2Kc4Bl819zgLX31k",
+          "title": "pb live: draft retitled 1791989357875698000"
+        },
+        "fieldValues": {
+          "nodes": [
+            {
+              "__typename": "ProjectV2ItemFieldUserValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr3A"
+              }
+            },
+            {
+              "__typename": "ProjectV2ItemFieldTextValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+              },
+              "text": "pb live: draft retitled 1791989357875698000"
+            },
+            {
+              "__typename": "ProjectV2ItemFieldSingleSelectValue",
+              "field": {
+                "__typename": "ProjectV2SingleSelectField",
+                "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+              },
+              "name": "Todo",
+              "optionId": "f75ad846"
+            }
+          ]
+        },
+        "id": "PVTI_lAHOADq2Kc4Bl819zhAvGfM",
+        "isArchived": false,
+        "type": "DRAFT_ISSUE",
+        "updatedAt": "2026-10-14T14:49:19Z"
+      }
+    ]
+  }
+}

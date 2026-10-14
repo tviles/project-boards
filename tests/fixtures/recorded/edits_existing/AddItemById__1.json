@@ -1,0 +1,65 @@
+{
+  "data": {
+    "addProjectV2ItemById": {
+      "item": {
+        "content": {
+          "__typename": "Issue",
+          "assignees": {
+            "nodes": []
+          },
+          "closedAt": null,
+          "closedByPullRequestsReferences": {
+            "nodes": []
+          },
+          "createdAt": "2026-10-14T14:48:42Z",
+          "id": "I_kwDOU8uH6c8AAAABXK-5OA",
+          "issueType": null,
+          "labels": {
+            "nodes": []
+          },
+          "milestone": null,
+          "number": 24,
+          "parent": null,
+          "repository": {
+            "nameWithOwner": "tviles/project-boards-testbed"
+          },
+          "state": "OPEN",
+          "stateReason": null,
+          "subIssuesSummary": {
+            "completed": 0,
+            "total": 0
+          },
+          "title": "pb live: edits_existing 1791989322116885000",
+          "updatedAt": "2026-10-14T14:48:42Z",
+          "url": "https://github.com/tviles/project-boards-testbed/issues/24"
+        },
+        "fieldValues": {
+          "nodes": [
+            {
+              "__typename": "ProjectV2ItemFieldRepositoryValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+              },
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              }
+            },
+            {
+              "__typename": "ProjectV2ItemFieldTextValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+              },
+              "text": "pb live: edits_existing 1791989322116885000"
+            }
+          ]
+        },
+        "id": "PVTI_lAHOADq2Kc4Bl819zhAvF5w",
+        "isArchived": false,
+        "type": "ISSUE",
+        "updatedAt": "2026-10-14T14:48:43Z"
+      }
+    }
+  }
+}

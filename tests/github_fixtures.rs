@@ -267,3 +267,157 @@ async fn recorded_refused_edit_run_added_a_titled_draft() {
     let draft = Github::new(t).add_draft_issue(&id, "x", "y").await.unwrap();
     assert!(draft.title().starts_with("pb live: edits_refused"));
 }
+
+#[tokio::test]
+async fn recorded_candidates_and_items_carry_their_ids() {
+    let t = Arc::new(FixtureTransport::new());
+    t.push_file(
+        "RepoCandidates",
+        format!("{REC}/edits_lookups/RepoCandidates__1.json"),
+    );
+    t.push_file("ItemsPage", format!("{REC}/items/ItemsPage__1.json"));
+    let gh = Github::new(t);
+    let c = gh
+        .repo_candidates(&"tviles/project-boards-testbed".parse().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        c.labels
+            .iter()
+            .any(|l| l.name == "good first issue" && !l.id.is_empty())
+    );
+    assert!(c.milestones.iter().any(|m| m.title == "v2"));
+    assert!(c.users.iter().any(|u| u.login == "tviles"));
+    let (_, id) = testbed();
+    let page = gh.fetch_items_page(&id, "", FULL_PAGE, None).await.unwrap();
+    assert!(
+        page.nodes
+            .iter()
+            .all(|i| matches!(i.content, ItemContent::Redacted) || i.content_id().is_some())
+    );
+    let issue1 = page.nodes.iter().find(|i| i.number() == Some(1)).unwrap();
+    assert_eq!(issue1.content_fields.label_ids.len(), 1);
+    assert_eq!(
+        issue1
+            .content_fields
+            .milestone
+            .as_ref()
+            .map(|m| m.title.as_str()),
+        Some("v1")
+    );
+}
+
+async fn hydrate(dir: &str, n: u32) -> Item {
+    let t = Arc::new(FixtureTransport::new());
+    t.push_file(
+        "HydrateItems",
+        format!("{REC}/{dir}/HydrateItems__{n}.json"),
+    );
+    Github::new(t)
+        .hydrate_items(&[ItemId::new("any")])
+        .await
+        .unwrap()
+        .remove(0)
+}
+
+#[tokio::test]
+async fn recorded_issue_people_decode() {
+    let set = hydrate("edits_people", 1).await;
+    assert_eq!(set.assignees(), ["tviles"]);
+    assert_eq!(set.label_names(), ["good first issue"]);
+    assert_eq!(
+        set.content_fields
+            .milestone
+            .as_ref()
+            .map(|m| m.title.as_str()),
+        Some("v1")
+    );
+    assert!(set.content_id().is_some());
+    let cleared = hydrate("edits_people", 2).await;
+    assert!(cleared.assignees().is_empty());
+    assert_eq!(cleared.content_fields.milestone, None);
+}
+
+#[tokio::test]
+async fn recorded_issue_state_and_detail_decode() {
+    let retitled = hydrate("edits_issue", 1).await;
+    assert_eq!(retitled.title(), "pb live: retitled");
+    let closed = hydrate("edits_issue", 2).await;
+    assert!(matches!(
+        closed.content,
+        ItemContent::Issue {
+            state: ContentState::Closed,
+            ..
+        }
+    ));
+    assert_eq!(
+        closed.content_fields.state_reason,
+        Some(StateReason::NotPlanned)
+    );
+    let reopened = hydrate("edits_issue", 3).await;
+    assert!(matches!(
+        reopened.content,
+        ItemContent::Issue {
+            state: ContentState::Open,
+            ..
+        }
+    ));
+    let t = Arc::new(FixtureTransport::new());
+    t.push_file(
+        "ItemDetail",
+        format!("{REC}/edits_issue/ItemDetail__1.json"),
+    );
+    let detail = Github::new(t)
+        .fetch_item_detail(&ItemId::new("any"), None)
+        .await
+        .unwrap();
+    assert_eq!(detail.body, "New body");
+    assert!(detail.comments.iter().any(|c| c.body == "A live comment"));
+}
+
+#[tokio::test]
+async fn recorded_archive_and_existing_content_decode() {
+    assert!(hydrate("edits_archive", 1).await.archived);
+    assert!(!hydrate("edits_archive", 2).await.archived);
+    let t = Arc::new(FixtureTransport::new());
+    t.push_file(
+        "ContentByNumber",
+        format!("{REC}/edits_existing/ContentByNumber__1.json"),
+    );
+    t.push_file(
+        "SearchContent",
+        format!("{REC}/edits_existing/SearchContent__1.json"),
+    );
+    let gh = Github::new(t);
+    let slug: RepoSlug = "tviles/project-boards-testbed".parse().unwrap();
+    let hit = gh
+        .content_by_number(&slug, 1)
+        .await
+        .unwrap()
+        .expect("found by number");
+    assert!(!hit.id.is_empty() && !hit.pull);
+    let found = gh.search_content("repo:x is:open").await.unwrap();
+    assert!(!found.is_empty());
+    assert!(
+        found
+            .iter()
+            .all(|h| h.repo == "tviles/project-boards-testbed")
+    );
+}
+
+#[tokio::test]
+async fn recorded_draft_conversion_decodes_as_the_same_item_now_an_issue() {
+    let t = Arc::new(FixtureTransport::new());
+    t.push_file(
+        "ConvertDraft",
+        format!("{REC}/edits_draft/ConvertDraft__1.json"),
+    );
+    let item = Github::new(t)
+        .convert_draft(&ItemId::new("any"), "repo")
+        .await
+        .unwrap();
+    assert!(matches!(item.content, ItemContent::Issue { .. }));
+    assert!(item.content_id().is_some());
+    assert!(item.title().starts_with("pb live: draft retitled"));
+    assert_eq!(item.assignees(), ["tviles"]);
+}

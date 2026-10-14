@@ -8,37 +8,44 @@
           "assignees": {
             "nodes": [
               {
+                "id": "MDQ6VXNlcjM4NDc3MjE=",
                 "login": "tviles"
               }
             ]
           },
-          "closedAt": null,
+          "closedAt": "2026-10-13T18:29:22Z",
           "closedByPullRequestsReferences": {
             "nodes": []
           },
           "createdAt": "2026-10-05T13:51:55Z",
+          "id": "I_kwDOU8uH6c8AAAABVIjy-A",
           "issueType": null,
           "labels": {
             "nodes": [
               {
                 "color": "d73a4a",
+                "id": "LA_kwDOU8uH6c8AAAAC7Cx_Ag",
                 "name": "bug"
               }
             ]
+          },
+          "milestone": {
+            "id": "MI_kwDOU8uH6c4BF6RX",
+            "title": "v1"
           },
           "number": 1,
           "parent": null,
           "repository": {
             "nameWithOwner": "tviles/project-boards-testbed"
           },
-          "state": "OPEN",
-          "stateReason": null,
+          "state": "CLOSED",
+          "stateReason": "COMPLETED",
           "subIssuesSummary": {
             "completed": 0,
             "total": 0
           },
           "title": "Crash when board has no Status field",
-          "updatedAt": "2026-10-05T13:52:15Z",
+          "updatedAt": "2026-10-13T18:29:23Z",
           "url": "https://github.com/tviles/project-boards-testbed/issues/1"
         },
         "fieldValues": {
@@ -113,7 +120,7 @@
             },
             {
               "__typename": "ProjectV2ItemFieldDateValue",
-              "date": "2026-10-20",
+              "date": "2026-10-28",
               "field": {
                 "__typename": "ProjectV2Field",
                 "id": "PVTF_lAHOADq2Kc4Bl819zhknr6A"
@@ -159,7 +166,7 @@
         "id": "PVTI_lAHOADq2Kc4Bl819zg-7fig",
         "isArchived": false,
         "type": "ISSUE",
-        "updatedAt": "2026-10-10T04:28:19Z"
+        "updatedAt": "2026-10-14T14:46:00Z"
       }
     ]
   }

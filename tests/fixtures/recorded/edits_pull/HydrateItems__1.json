@@ -1,0 +1,78 @@
+{
+  "data": {
+    "nodes": [
+      {
+        "__typename": "ProjectV2Item",
+        "content": {
+          "__typename": "PullRequest",
+          "assignees": {
+            "nodes": []
+          },
+          "closedAt": "2026-10-14T14:49:31Z",
+          "createdAt": "2026-10-05T13:52:20Z",
+          "id": "PR_kwDOU8uH6c8AAAABGuGMDg",
+          "isDraft": false,
+          "labels": {
+            "nodes": []
+          },
+          "milestone": null,
+          "number": 12,
+          "repository": {
+            "nameWithOwner": "tviles/project-boards-testbed"
+          },
+          "reviewRequests": {
+            "nodes": []
+          },
+          "state": "CLOSED",
+          "title": "Sample pull request (live)",
+          "updatedAt": "2026-10-14T14:49:31Z",
+          "url": "https://github.com/tviles/project-boards-testbed/pull/12"
+        },
+        "fieldValues": {
+          "nodes": [
+            {
+              "__typename": "ProjectV2ItemFieldRepositoryValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+              },
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              }
+            },
+            {
+              "__typename": "ProjectV2ItemFieldTextValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+              },
+              "text": "Sample pull request (live)"
+            },
+            {
+              "__typename": "ProjectV2ItemFieldSingleSelectValue",
+              "field": {
+                "__typename": "ProjectV2SingleSelectField",
+                "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+              },
+              "name": "In Progress",
+              "optionId": "47fc9ee4"
+            },
+            {
+              "__typename": "ProjectV2ItemFieldSingleSelectValue",
+              "field": {
+                "__typename": "ProjectV2SingleSelectField",
+                "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k"
+              },
+              "name": "P2",
+              "optionId": "7aafde11"
+            }
+          ]
+        },
+        "id": "PVTI_lAHOADq2Kc4Bl819zg-7fsU",
+        "isArchived": false,
+        "type": "PULL_REQUEST",
+        "updatedAt": "2026-10-14T14:49:32Z"
+      }
+    ]
+  }
+}

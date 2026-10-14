@@ -201,6 +201,16 @@
           "__typename": "User",
           "login": "tviles"
         },
+        "repositories": {
+          "nodes": [
+            {
+              "hasIssuesEnabled": true,
+              "id": "R_kgDOU8uH6Q",
+              "nameWithOwner": "tviles/project-boards-testbed",
+              "viewerPermission": "ADMIN"
+            }
+          ]
+        },
         "title": "project-boards testbed",
         "url": "https://github.com/users/tviles/projects/4",
         "viewerCanUpdate": true,

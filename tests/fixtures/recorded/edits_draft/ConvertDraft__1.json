@@ -1,0 +1,86 @@
+{
+  "data": {
+    "convertProjectV2DraftIssueItemToIssue": {
+      "item": {
+        "content": {
+          "__typename": "Issue",
+          "assignees": {
+            "nodes": [
+              {
+                "id": "MDQ6VXNlcjM4NDc3MjE=",
+                "login": "tviles"
+              }
+            ]
+          },
+          "closedAt": null,
+          "closedByPullRequestsReferences": {
+            "nodes": []
+          },
+          "createdAt": "2026-10-14T14:49:21Z",
+          "id": "I_kwDOU8uH6c8AAAABXK_jyA",
+          "issueType": null,
+          "labels": {
+            "nodes": []
+          },
+          "milestone": null,
+          "number": 27,
+          "parent": null,
+          "repository": {
+            "nameWithOwner": "tviles/project-boards-testbed"
+          },
+          "state": "OPEN",
+          "stateReason": null,
+          "subIssuesSummary": {
+            "completed": 0,
+            "total": 0
+          },
+          "title": "pb live: draft retitled 1791989357875698000",
+          "updatedAt": "2026-10-14T14:49:21Z",
+          "url": "https://github.com/tviles/project-boards-testbed/issues/27"
+        },
+        "fieldValues": {
+          "nodes": [
+            {
+              "__typename": "ProjectV2ItemFieldUserValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr3A"
+              }
+            },
+            {
+              "__typename": "ProjectV2ItemFieldRepositoryValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+              },
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              }
+            },
+            {
+              "__typename": "ProjectV2ItemFieldTextValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+              },
+              "text": "pb live: draft retitled 1791989357875698000"
+            },
+            {
+              "__typename": "ProjectV2ItemFieldSingleSelectValue",
+              "field": {
+                "__typename": "ProjectV2SingleSelectField",
+                "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+              },
+              "name": "Todo",
+              "optionId": "f75ad846"
+            }
+          ]
+        },
+        "id": "PVTI_lAHOADq2Kc4Bl819zhAvGfM",
+        "isArchived": false,
+        "type": "ISSUE",
+        "updatedAt": "2026-10-14T14:49:22Z"
+      }
+    }
+  }
+}

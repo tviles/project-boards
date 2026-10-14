@@ -1,0 +1,1211 @@
+{
+  "data": {
+    "node": {
+      "__typename": "ProjectV2",
+      "items": {
+        "nodes": [
+          {
+            "content": {
+              "__typename": "Issue",
+              "assignees": {
+                "nodes": []
+              },
+              "closedAt": null,
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "isDraft": false,
+                    "number": 12,
+                    "state": "OPEN"
+                  }
+                ]
+              },
+              "createdAt": "2026-10-05T13:51:58Z",
+              "id": "I_kwDOU8uH6c8AAAABVIj1GA",
+              "issueType": null,
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "a2eeef",
+                    "id": "LA_kwDOU8uH6c8AAAAC7Cx_ag",
+                    "name": "enhancement"
+                  }
+                ]
+              },
+              "milestone": {
+                "id": "MI_kwDOU8uH6c4BF6RX",
+                "title": "v1"
+              },
+              "number": 2,
+              "parent": null,
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              },
+              "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
+              "title": "Support iteration columns",
+              "updatedAt": "2026-10-05T13:51:58Z",
+              "url": "https://github.com/tviles/project-boards-testbed/issues/2"
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldRepositoryValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+                  },
+                  "repository": {
+                    "nameWithOwner": "tviles/project-boards-testbed"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldLabelValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldMilestoneValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3Q"
+                  },
+                  "milestone": {
+                    "title": "v1"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldPullRequestValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3M"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldTextValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  "text": "Support iteration columns"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  "name": "Todo",
+                  "optionId": "f75ad846"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k"
+                  },
+                  "name": "P1",
+                  "optionId": "c8562a4b"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldIterationValue",
+                  "field": {
+                    "__typename": "ProjectV2IterationField",
+                    "id": "PVTIF_lAHOADq2Kc4Bl819zhknr7A"
+                  },
+                  "iterationId": "eab468ee",
+                  "startDate": "2026-10-20",
+                  "title": "Sprint 2"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldMultiSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2MultiSelectField",
+                    "id": "PVTMSF_lAHOADq2Kc4Bl819zhknr7E"
+                  },
+                  "options": [
+                    {
+                      "id": "4dba8577",
+                      "name": "api"
+                    }
+                  ]
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldNumberValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr58"
+                  },
+                  "number": 2.0
+                }
+              ]
+            },
+            "id": "PVTI_lAHOADq2Kc4Bl819zg-7fjg",
+            "isArchived": false,
+            "type": "ISSUE",
+            "updatedAt": "2026-10-13T18:31:37Z"
+          },
+          {
+            "content": {
+              "__typename": "Issue",
+              "assignees": {
+                "nodes": [
+                  {
+                    "id": "MDQ6VXNlcjM4NDc3MjE=",
+                    "login": "tviles"
+                  }
+                ]
+              },
+              "closedAt": "2026-10-13T18:29:22Z",
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "createdAt": "2026-10-05T13:51:55Z",
+              "id": "I_kwDOU8uH6c8AAAABVIjy-A",
+              "issueType": null,
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "d73a4a",
+                    "id": "LA_kwDOU8uH6c8AAAAC7Cx_Ag",
+                    "name": "bug"
+                  }
+                ]
+              },
+              "milestone": {
+                "id": "MI_kwDOU8uH6c4BF6RX",
+                "title": "v1"
+              },
+              "number": 1,
+              "parent": null,
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              },
+              "state": "CLOSED",
+              "stateReason": "COMPLETED",
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
+              "title": "Crash when board has no Status field",
+              "updatedAt": "2026-10-13T18:29:23Z",
+              "url": "https://github.com/tviles/project-boards-testbed/issues/1"
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldUserValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3A"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldRepositoryValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+                  },
+                  "repository": {
+                    "nameWithOwner": "tviles/project-boards-testbed"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldLabelValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldMilestoneValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3Q"
+                  },
+                  "milestone": {
+                    "title": "v1"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldTextValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  "text": "Crash when board has no Status field"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  "name": "Todo",
+                  "optionId": "f75ad846"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k"
+                  },
+                  "name": "P0",
+                  "optionId": "86d2debf"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldNumberValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr58"
+                  },
+                  "number": 3.0
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldDateValue",
+                  "date": "2026-10-28",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr6A"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldTextValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr68"
+                  },
+                  "text": "Needs a repro"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldIterationValue",
+                  "field": {
+                    "__typename": "ProjectV2IterationField",
+                    "id": "PVTIF_lAHOADq2Kc4Bl819zhknr7A"
+                  },
+                  "iterationId": "ab9993d6",
+                  "startDate": "2026-10-06",
+                  "title": "Sprint 1"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldMultiSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2MultiSelectField",
+                    "id": "PVTMSF_lAHOADq2Kc4Bl819zhknr7E"
+                  },
+                  "options": [
+                    {
+                      "id": "4dba8577",
+                      "name": "api"
+                    },
+                    {
+                      "id": "6eaf9169",
+                      "name": "ui"
+                    }
+                  ]
+                }
+              ]
+            },
+            "id": "PVTI_lAHOADq2Kc4Bl819zg-7fig",
+            "isArchived": false,
+            "type": "ISSUE",
+            "updatedAt": "2026-10-14T14:46:00Z"
+          },
+          {
+            "content": {
+              "__typename": "Issue",
+              "assignees": {
+                "nodes": []
+              },
+              "closedAt": null,
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "createdAt": "2026-10-05T13:51:59Z",
+              "id": "I_kwDOU8uH6c8AAAABVIj2ig",
+              "issueType": null,
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "0075ca",
+                    "id": "LA_kwDOU8uH6c8AAAAC7Cx_6g",
+                    "name": "docs"
+                  }
+                ]
+              },
+              "milestone": null,
+              "number": 3,
+              "parent": null,
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              },
+              "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
+              "title": "Document fine-grained tokens",
+              "updatedAt": "2026-10-05T13:51:59Z",
+              "url": "https://github.com/tviles/project-boards-testbed/issues/3"
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldRepositoryValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+                  },
+                  "repository": {
+                    "nameWithOwner": "tviles/project-boards-testbed"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldLabelValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldTextValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  "text": "Document fine-grained tokens"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  "name": "In Progress",
+                  "optionId": "47fc9ee4"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k"
+                  },
+                  "name": "P2",
+                  "optionId": "7aafde11"
+                }
+              ]
+            },
+            "id": "PVTI_lAHOADq2Kc4Bl819zg-7fkw",
+            "isArchived": false,
+            "type": "ISSUE",
+            "updatedAt": "2026-10-06T16:11:55Z"
+          },
+          {
+            "content": {
+              "__typename": "Issue",
+              "assignees": {
+                "nodes": [
+                  {
+                    "id": "MDQ6VXNlcjM4NDc3MjE=",
+                    "login": "tviles"
+                  }
+                ]
+              },
+              "closedAt": null,
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "createdAt": "2026-10-05T13:52:01Z",
+              "id": "I_kwDOU8uH6c8AAAABVIj4pg",
+              "issueType": null,
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "a2eeef",
+                    "id": "LA_kwDOU8uH6c8AAAAC7Cx_ag",
+                    "name": "enhancement"
+                  }
+                ]
+              },
+              "milestone": null,
+              "number": 4,
+              "parent": null,
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              },
+              "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
+              "title": "Emoji title 🚀 with 中文 characters that is long enough to truncate",
+              "updatedAt": "2026-10-05T13:52:01Z",
+              "url": "https://github.com/tviles/project-boards-testbed/issues/4"
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldUserValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3A"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldRepositoryValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+                  },
+                  "repository": {
+                    "nameWithOwner": "tviles/project-boards-testbed"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldLabelValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldTextValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  "text": "Emoji title 🚀 with 中文 characters that is long enough to truncate"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  "name": "In Progress",
+                  "optionId": "47fc9ee4"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k"
+                  },
+                  "name": "P0",
+                  "optionId": "86d2debf"
+                }
+              ]
+            },
+            "id": "PVTI_lAHOADq2Kc4Bl819zg-7flo",
+            "isArchived": false,
+            "type": "ISSUE",
+            "updatedAt": "2026-10-06T16:11:57Z"
+          },
+          {
+            "content": {
+              "__typename": "Issue",
+              "assignees": {
+                "nodes": []
+              },
+              "closedAt": "2026-10-06T16:11:59Z",
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "createdAt": "2026-10-05T13:52:02Z",
+              "id": "I_kwDOU8uH6c8AAAABVIj6jQ",
+              "issueType": null,
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "a2eeef",
+                    "id": "LA_kwDOU8uH6c8AAAAC7Cx_ag",
+                    "name": "enhancement"
+                  }
+                ]
+              },
+              "milestone": null,
+              "number": 5,
+              "parent": null,
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              },
+              "state": "CLOSED",
+              "stateReason": "COMPLETED",
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
+              "title": "Filler issue 5",
+              "updatedAt": "2026-10-06T16:11:59Z",
+              "url": "https://github.com/tviles/project-boards-testbed/issues/5"
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldRepositoryValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+                  },
+                  "repository": {
+                    "nameWithOwner": "tviles/project-boards-testbed"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldLabelValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldTextValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  "text": "Filler issue 5"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  "name": "Done",
+                  "optionId": "98236657"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k"
+                  },
+                  "name": "P1",
+                  "optionId": "c8562a4b"
+                }
+              ]
+            },
+            "id": "PVTI_lAHOADq2Kc4Bl819zg-7fmw",
+            "isArchived": false,
+            "type": "ISSUE",
+            "updatedAt": "2026-10-06T16:12:00Z"
+          },
+          {
+            "content": {
+              "__typename": "Issue",
+              "assignees": {
+                "nodes": []
+              },
+              "closedAt": null,
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "createdAt": "2026-10-05T13:52:04Z",
+              "id": "I_kwDOU8uH6c8AAAABVIj7zw",
+              "issueType": null,
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "a2eeef",
+                    "id": "LA_kwDOU8uH6c8AAAAC7Cx_ag",
+                    "name": "enhancement"
+                  }
+                ]
+              },
+              "milestone": null,
+              "number": 6,
+              "parent": null,
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              },
+              "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
+              "title": "Filler issue 6",
+              "updatedAt": "2026-10-05T13:52:04Z",
+              "url": "https://github.com/tviles/project-boards-testbed/issues/6"
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldRepositoryValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+                  },
+                  "repository": {
+                    "nameWithOwner": "tviles/project-boards-testbed"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldLabelValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldTextValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  "text": "Filler issue 6"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  "name": "Todo",
+                  "optionId": "f75ad846"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k"
+                  },
+                  "name": "P2",
+                  "optionId": "7aafde11"
+                }
+              ]
+            },
+            "id": "PVTI_lAHOADq2Kc4Bl819zg-7fn4",
+            "isArchived": false,
+            "type": "ISSUE",
+            "updatedAt": "2026-10-06T16:12:01Z"
+          },
+          {
+            "content": {
+              "__typename": "Issue",
+              "assignees": {
+                "nodes": []
+              },
+              "closedAt": null,
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "createdAt": "2026-10-05T13:52:05Z",
+              "id": "I_kwDOU8uH6c8AAAABVIj84w",
+              "issueType": null,
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "a2eeef",
+                    "id": "LA_kwDOU8uH6c8AAAAC7Cx_ag",
+                    "name": "enhancement"
+                  }
+                ]
+              },
+              "milestone": null,
+              "number": 7,
+              "parent": null,
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              },
+              "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
+              "title": "Filler issue 7",
+              "updatedAt": "2026-10-05T13:52:05Z",
+              "url": "https://github.com/tviles/project-boards-testbed/issues/7"
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldRepositoryValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+                  },
+                  "repository": {
+                    "nameWithOwner": "tviles/project-boards-testbed"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldLabelValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldTextValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  "text": "Filler issue 7"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  "name": "Todo",
+                  "optionId": "f75ad846"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k"
+                  },
+                  "name": "P0",
+                  "optionId": "86d2debf"
+                }
+              ]
+            },
+            "id": "PVTI_lAHOADq2Kc4Bl819zg-7fog",
+            "isArchived": false,
+            "type": "ISSUE",
+            "updatedAt": "2026-10-06T16:12:03Z"
+          },
+          {
+            "content": {
+              "__typename": "Issue",
+              "assignees": {
+                "nodes": []
+              },
+              "closedAt": null,
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "createdAt": "2026-10-05T13:52:06Z",
+              "id": "I_kwDOU8uH6c8AAAABVIj-5w",
+              "issueType": null,
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "a2eeef",
+                    "id": "LA_kwDOU8uH6c8AAAAC7Cx_ag",
+                    "name": "enhancement"
+                  }
+                ]
+              },
+              "milestone": null,
+              "number": 8,
+              "parent": null,
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              },
+              "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
+              "title": "Filler issue 8",
+              "updatedAt": "2026-10-05T13:52:06Z",
+              "url": "https://github.com/tviles/project-boards-testbed/issues/8"
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldRepositoryValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+                  },
+                  "repository": {
+                    "nameWithOwner": "tviles/project-boards-testbed"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldLabelValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldTextValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  "text": "Filler issue 8"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  "name": "In Progress",
+                  "optionId": "47fc9ee4"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k"
+                  },
+                  "name": "P1",
+                  "optionId": "c8562a4b"
+                }
+              ]
+            },
+            "id": "PVTI_lAHOADq2Kc4Bl819zg-7fpI",
+            "isArchived": false,
+            "type": "ISSUE",
+            "updatedAt": "2026-10-06T16:12:06Z"
+          },
+          {
+            "content": {
+              "__typename": "Issue",
+              "assignees": {
+                "nodes": []
+              },
+              "closedAt": null,
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "createdAt": "2026-10-05T13:52:08Z",
+              "id": "I_kwDOU8uH6c8AAAABVIkAuw",
+              "issueType": null,
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "a2eeef",
+                    "id": "LA_kwDOU8uH6c8AAAAC7Cx_ag",
+                    "name": "enhancement"
+                  }
+                ]
+              },
+              "milestone": null,
+              "number": 9,
+              "parent": null,
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              },
+              "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
+              "title": "Filler issue 9",
+              "updatedAt": "2026-10-05T13:52:08Z",
+              "url": "https://github.com/tviles/project-boards-testbed/issues/9"
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldRepositoryValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+                  },
+                  "repository": {
+                    "nameWithOwner": "tviles/project-boards-testbed"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldLabelValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldTextValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  "text": "Filler issue 9"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  "name": "Todo",
+                  "optionId": "f75ad846"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k"
+                  },
+                  "name": "P2",
+                  "optionId": "7aafde11"
+                }
+              ]
+            },
+            "id": "PVTI_lAHOADq2Kc4Bl819zg-7fp0",
+            "isArchived": false,
+            "type": "ISSUE",
+            "updatedAt": "2026-10-06T16:12:08Z"
+          },
+          {
+            "content": {
+              "__typename": "Issue",
+              "assignees": {
+                "nodes": []
+              },
+              "closedAt": null,
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              },
+              "createdAt": "2026-10-05T13:52:10Z",
+              "id": "I_kwDOU8uH6c8AAAABVIkB-g",
+              "issueType": null,
+              "labels": {
+                "nodes": [
+                  {
+                    "color": "a2eeef",
+                    "id": "LA_kwDOU8uH6c8AAAAC7Cx_ag",
+                    "name": "enhancement"
+                  }
+                ]
+              },
+              "milestone": null,
+              "number": 10,
+              "parent": null,
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              },
+              "state": "OPEN",
+              "stateReason": null,
+              "subIssuesSummary": {
+                "completed": 0,
+                "total": 0
+              },
+              "title": "Filler issue 10",
+              "updatedAt": "2026-10-05T13:52:10Z",
+              "url": "https://github.com/tviles/project-boards-testbed/issues/10"
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldRepositoryValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+                  },
+                  "repository": {
+                    "nameWithOwner": "tviles/project-boards-testbed"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldLabelValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldTextValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  "text": "Filler issue 10"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  "name": "Todo",
+                  "optionId": "f75ad846"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k"
+                  },
+                  "name": "P0",
+                  "optionId": "86d2debf"
+                }
+              ]
+            },
+            "id": "PVTI_lAHOADq2Kc4Bl819zg-7frE",
+            "isArchived": false,
+            "type": "ISSUE",
+            "updatedAt": "2026-10-06T16:12:10Z"
+          },
+          {
+            "content": {
+              "__typename": "PullRequest",
+              "assignees": {
+                "nodes": []
+              },
+              "closedAt": null,
+              "createdAt": "2026-10-05T13:52:20Z",
+              "id": "PR_kwDOU8uH6c8AAAABGuGMDg",
+              "isDraft": false,
+              "labels": {
+                "nodes": []
+              },
+              "milestone": null,
+              "number": 12,
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              },
+              "reviewRequests": {
+                "nodes": []
+              },
+              "state": "OPEN",
+              "title": "Sample pull request",
+              "updatedAt": "2026-10-05T13:52:20Z",
+              "url": "https://github.com/tviles/project-boards-testbed/pull/12"
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldRepositoryValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+                  },
+                  "repository": {
+                    "nameWithOwner": "tviles/project-boards-testbed"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldTextValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  "text": "Sample pull request"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  "name": "In Progress",
+                  "optionId": "47fc9ee4"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k"
+                  },
+                  "name": "P2",
+                  "optionId": "7aafde11"
+                }
+              ]
+            },
+            "id": "PVTI_lAHOADq2Kc4Bl819zg-7fsU",
+            "isArchived": false,
+            "type": "PULL_REQUEST",
+            "updatedAt": "2026-10-06T16:12:14Z"
+          },
+          {
+            "content": {
+              "__typename": "DraftIssue",
+              "assignees": {
+                "nodes": []
+              },
+              "id": "DI_lAHOADq2Kc4Bl819zgLS4Ww",
+              "title": "Draft idea"
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldTextValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  "text": "Draft idea"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  "name": "Todo",
+                  "optionId": "f75ad846"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr5k"
+                  },
+                  "name": "P0",
+                  "optionId": "86d2debf"
+                }
+              ]
+            },
+            "id": "PVTI_lAHOADq2Kc4Bl819zg-7fto",
+            "isArchived": false,
+            "type": "DRAFT_ISSUE",
+            "updatedAt": "2026-10-06T16:12:16Z"
+          },
+          {
+            "content": {
+              "__typename": "DraftIssue",
+              "assignees": {
+                "nodes": []
+              },
+              "id": "DI_lAHOADq2Kc4Bl819zgLS4W4",
+              "title": "Another draft"
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldTextValue",
+                  "field": {
+                    "__typename": "ProjectV2Field",
+                    "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+                  },
+                  "text": "Another draft"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+                  },
+                  "name": "Todo",
+                  "optionId": "f75ad846"
+                }
+              ]
+            },
+            "id": "PVTI_lAHOADq2Kc4Bl819zg-7fu4",
+            "isArchived": false,
+            "type": "DRAFT_ISSUE",
+            "updatedAt": "2026-10-06T16:11:50Z"
+          }
+        ],
+        "pageInfo": {
+          "endCursor": "Y3Vyc29yOnYyOpK5MDAwMDAwMDAuMDcxNDI4NTcxNDI4NTcxNM4Pu37u",
+          "hasNextPage": false
+        },
+        "totalCount": 13
+      }
+    }
+  }
+}

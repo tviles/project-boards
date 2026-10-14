@@ -1,0 +1,88 @@
+{
+  "data": {
+    "nodes": [
+      {
+        "__typename": "ProjectV2Item",
+        "content": {
+          "__typename": "Issue",
+          "assignees": {
+            "nodes": []
+          },
+          "closedAt": null,
+          "closedByPullRequestsReferences": {
+            "nodes": []
+          },
+          "createdAt": "2026-10-14T14:49:00Z",
+          "id": "I_kwDOU8uH6c8AAAABXK_Mhg",
+          "issueType": null,
+          "labels": {
+            "nodes": [
+              {
+                "color": "7057ff",
+                "id": "LA_kwDOU8uH6c8AAAAC9DJG0w",
+                "name": "good first issue"
+              }
+            ]
+          },
+          "milestone": null,
+          "number": 26,
+          "parent": null,
+          "repository": {
+            "nameWithOwner": "tviles/project-boards-testbed"
+          },
+          "state": "OPEN",
+          "stateReason": null,
+          "subIssuesSummary": {
+            "completed": 0,
+            "total": 0
+          },
+          "title": "pb live: edits_people 1791989340516718000",
+          "updatedAt": "2026-10-14T14:49:10Z",
+          "url": "https://github.com/tviles/project-boards-testbed/issues/26"
+        },
+        "fieldValues": {
+          "nodes": [
+            {
+              "__typename": "ProjectV2ItemFieldRepositoryValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+              },
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              }
+            },
+            {
+              "__typename": "ProjectV2ItemFieldLabelValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr3I"
+              }
+            },
+            {
+              "__typename": "ProjectV2ItemFieldTextValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+              },
+              "text": "pb live: edits_people 1791989340516718000"
+            },
+            {
+              "__typename": "ProjectV2ItemFieldSingleSelectValue",
+              "field": {
+                "__typename": "ProjectV2SingleSelectField",
+                "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+              },
+              "name": "Todo",
+              "optionId": "f75ad846"
+            }
+          ]
+        },
+        "id": "PVTI_lAHOADq2Kc4Bl819zhAvGO4",
+        "isArchived": false,
+        "type": "ISSUE",
+        "updatedAt": "2026-10-14T14:49:11Z"
+      }
+    ]
+  }
+}

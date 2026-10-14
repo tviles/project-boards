@@ -1,0 +1,32 @@
+{
+  "data": {
+    "addProjectV2DraftIssue": {
+      "projectItem": {
+        "content": {
+          "__typename": "DraftIssue",
+          "assignees": {
+            "nodes": []
+          },
+          "id": "DI_lAHOADq2Kc4Bl819zgLX31k",
+          "title": "pb live: edits_draft 1791989356288834000"
+        },
+        "fieldValues": {
+          "nodes": [
+            {
+              "__typename": "ProjectV2ItemFieldTextValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+              },
+              "text": "pb live: edits_draft 1791989356288834000"
+            }
+          ]
+        },
+        "id": "PVTI_lAHOADq2Kc4Bl819zhAvGfM",
+        "isArchived": false,
+        "type": "DRAFT_ISSUE",
+        "updatedAt": "2026-10-14T14:49:17Z"
+      }
+    }
+  }
+}
