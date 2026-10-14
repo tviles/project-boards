@@ -158,14 +158,6 @@ pub const NOT_UTF8: &str = "The editor saved text that isn't UTF-8; nothing was 
 /// The editor exited with an error.
 pub const EDITOR_FAILED: &str = "The editor exited with an error; nothing was sent";
 
-/// How a text form's heading names the item: `#12`, or `Draft` (decision C7).
-fn form_ref(item: &Item) -> String {
-    match item.number() {
-        Some(n) => format!("#{n}"),
-        None => "Draft".into(),
-    }
-}
-
 /// Puts what the editor returned into the form it was opened from, with a line saying what
 /// went wrong, if anything. A failed editor leaves the form's text as it was.
 fn refill(form: &mut TextForm, edited: Edited) {
@@ -854,7 +846,7 @@ impl App {
         let Some(item) = self.guarded(OpKind::Title) else {
             return Vec::new();
         };
-        let heading = format!("Edit title of {}", form_ref(&item));
+        let heading = format!("Edit title of {}", item.ref_label());
         let form = TextForm::new(FormKind::Title, heading, item.title(), "");
         self.open_text_form(EditPurpose::Title(item.id), form)
     }
@@ -867,7 +859,7 @@ impl App {
             return Vec::new();
         };
         if let Some(body) = self.loaded_body(&item.id) {
-            let heading = format!("Edit body of {}", form_ref(&item));
+            let heading = format!("Edit body of {}", item.ref_label());
             let form = TextForm::new(FormKind::Body, heading, "", &lf(&body));
             return self.open_text_form(EditPurpose::Body(item.id), form);
         }
@@ -889,7 +881,7 @@ impl App {
         let Some(item) = self.guarded(OpKind::Comment) else {
             return Vec::new();
         };
-        let heading = format!("Comment on {}", form_ref(&item));
+        let heading = format!("Comment on {}", item.ref_label());
         let form = TextForm::new(FormKind::Comment, heading, "", "");
         self.open_text_form(EditPurpose::Comment(item.id), form)
     }

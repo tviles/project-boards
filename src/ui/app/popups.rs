@@ -283,10 +283,7 @@ fn submitted_text(form: &TextForm) -> String {
 /// already on screen (the highlighted card or the open detail), and repeating it read like a
 /// message ("Edit · Crash when …").
 fn item_ref(item: &crate::model::Item) -> String {
-    match item.number() {
-        Some(n) => format!("#{n}"),
-        None => "draft".into(),
-    }
+    item.ref_label().to_lowercase()
 }
 
 /// Shown in a popover whose item left the board while its candidates loaded.
