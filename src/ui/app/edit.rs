@@ -330,7 +330,7 @@ impl App {
                 error,
                 selected,
                 ..
-            } => match &self.content_search {
+            } if *loading => match &self.content_search {
                 Some((query, Lookup::Ready(found))) if query == q => {
                     *hits = found.clone();
                     *loading = false;

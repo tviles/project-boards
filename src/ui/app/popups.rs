@@ -475,7 +475,10 @@ impl App {
         presets: Vec<(FieldId, FieldValue)>,
     ) -> Vec<Command> {
         if let Some(id) = self.on_board(&hit) {
-            self.status.flash = Some(format!("#{} is already on the board", hit.number));
+            self.status.flash = Some(format!(
+                "{}#{} is already on the board",
+                hit.repo, hit.number
+            ));
             self.selected_id = Some(id);
             self.restore_selection();
             return Vec::new();
@@ -1060,8 +1063,12 @@ impl App {
                 KeyCode::Down => *selected = (*selected + 1).min(hits.len().saturating_sub(1)),
                 KeyCode::Enter => {
                     let query = input.trim().to_string();
-                    if query.is_empty() {
-                    } else if searched.as_deref() != Some(query.as_str()) {
+                    let answered = searched.as_deref() == Some(query.as_str())
+                        && error.is_none()
+                        && !hits.is_empty();
+                    if query.is_empty() || (*loading && searched.as_deref() == Some(query.as_str()))
+                    {
+                    } else if !answered {
                         *searched = Some(query.clone());
                         *loading = true;
                         *error = None;
@@ -1078,6 +1085,7 @@ impl App {
                 }
                 _ => {
                     edit_line(input, &key);
+                    *error = None;
                 }
             },
             Popup::Actions { picker, .. } => match picker.handle(&key) {
@@ -3076,7 +3084,7 @@ mod tests {
         assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
         assert_eq!(
             a.status.flash.as_deref(),
-            Some("#3 is already on the board")
+            Some("tviles/t#3 is already on the board")
         );
         assert_eq!(a.selected_item().unwrap().id.as_str(), "c");
         assert_eq!(a.pending_count(), 0);
@@ -3117,5 +3125,74 @@ mod tests {
         choose(&mut a, "existing");
         a.handle_key(code(KeyCode::Esc));
         assert!(matches!(a.popup, Some(Popup::NewKind { .. })));
+    }
+
+    fn search_popup(a: &mut App, text: &str) {
+        a.handle_key(key('n'));
+        choose(a, "existing");
+        type_text(a, text);
+        a.handle_key(code(KeyCode::Enter));
+    }
+
+    #[test]
+    fn enter_retries_a_failed_search_and_one_that_found_nothing() {
+        let mut a = test_app();
+        search_popup(&mut a, "crash");
+        a.on_sync(SyncEvent::Failed {
+            task: crate::sync::SyncTask::Search("crash".into()),
+            error: crate::github::GithubError::Network("offline".into()),
+        });
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert!(
+            matches!(cmds.as_slice(), [Command::Search { .. }]),
+            "retry after failure"
+        );
+        a.on_sync(SyncEvent::SearchResults {
+            query: "crash".into(),
+            hits: vec![],
+        });
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert!(
+            matches!(cmds.as_slice(), [Command::Search { .. }]),
+            "retry after nothing found"
+        );
+        assert_eq!(a.pending_count(), 0);
+    }
+
+    #[test]
+    fn selection_survives_an_unrelated_lookup_and_editing_clears_the_error() {
+        let mut a = test_app();
+        search_popup(&mut a, "crash");
+        a.on_sync(SyncEvent::SearchResults {
+            query: "crash".into(),
+            hits: vec![hit("tviles/t", 8, "a"), hit("tviles/t", 9, "b")],
+        });
+        a.handle_key(code(KeyCode::Down));
+        a.on_sync(SyncEvent::RepoFound {
+            slug: "acme/other".parse().unwrap(),
+            repo: None,
+        });
+        let Some(Popup::Search { selected, .. }) = &a.popup else {
+            panic!("search")
+        };
+        assert_eq!(*selected, 1);
+        a.handle_key(key('x'));
+        a.handle_key(code(KeyCode::Enter));
+        a.on_sync(SyncEvent::Failed {
+            task: crate::sync::SyncTask::Search("crashx".into()),
+            error: crate::github::GithubError::Network("offline".into()),
+        });
+        a.handle_key(key('y'));
+        let Some(Popup::Search { error, .. }) = &a.popup else {
+            panic!("search")
+        };
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn only_the_hit_in_the_right_repository_counts_as_on_the_board() {
+        let a = test_app();
+        assert!(a.on_board(&hit("tviles/t", 3, "x")).is_some());
+        assert!(a.on_board(&hit("acme/other", 3, "x")).is_none());
     }
 }

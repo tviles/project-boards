@@ -604,4 +604,23 @@ mod tests {
             insta::assert_snapshot!(format!("list_picker_{w}"), screen);
         }
     }
+
+    #[test]
+    fn the_search_list_scrolls_with_the_selection_and_truncates_long_rows() {
+        let rows: Vec<(String, String)> = (0..20)
+            .map(|i| {
+                (
+                    format!("r/x#{i} {}", "long title ".repeat(12)),
+                    "issue".into(),
+                )
+            })
+            .collect();
+        let theme = Theme::plain();
+        let out = render_to_string(60, 20, |f| {
+            render_search(f, f.area(), "q", "status", &rows, 15, &theme)
+        });
+        assert!(out.contains("r/x#15 "), "the selected row is shown:\n{out}");
+        assert!(!out.contains("r/x#0 "), "rows above the window scroll away");
+        assert!(out.lines().all(|l| display_width(l) <= 60), "{out}");
+    }
 }
