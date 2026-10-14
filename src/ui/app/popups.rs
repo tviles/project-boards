@@ -425,6 +425,11 @@ impl App {
             return Vec::new();
         }
         let presets = self.new_item_presets();
+        self.open_new_kind(presets);
+        Vec::new()
+    }
+
+    fn open_new_kind(&mut self, presets: Vec<(FieldId, FieldValue)>) {
         let picker = ListPicker::new(
             "New item",
             vec![
@@ -433,7 +438,6 @@ impl App {
             ],
         );
         self.open_popup(Popup::NewKind { presets, picker });
-        Vec::new()
     }
 
     /// Repositories to pick from, in Decision 23's order and deterministic: the pane's
@@ -453,7 +457,7 @@ impl App {
             push(repo, "this pane's repository");
         }
         if let Some(project) = self.project() {
-            for repo in &project.linked_repos {
+            for repo in &project.issue_repos {
                 push(repo, "linked");
             }
         }
@@ -926,10 +930,22 @@ impl App {
                 // A typed owner/name that is not listed is looked up; once found it is listed
                 // and Enter picks it (the editor only ever starts from a key press).
                 if key.code == KeyCode::Enter
-                    && picker.current().is_none()
                     && let Ok(slug) = picker.input.trim().parse::<RepoSlug>()
                 {
+                    // Typed in full, `owner/name` means that repository, not whatever the
+                    // fuzzy filter happens to highlight.
+                    let same = |s: &RepoSlug| s.to_string().eq_ignore_ascii_case(&slug.to_string());
+                    if let Some(found) = picker.choices.iter().find(|c| same(&c.value.slug)) {
+                        let repo = found.value.clone();
+                        let purpose = purpose.clone();
+                        self.close_popup();
+                        return self.repo_chosen(purpose, repo);
+                    }
                     *wanted = Some(slug.clone());
+                    // A repository that was not found may exist now: ask again.
+                    if matches!(self.repo_lookups.get(&slug), Some(Lookup::Ready(None))) {
+                        self.repo_lookups.remove(&slug);
+                    }
                     self.popup = Some(popup);
                     let cmds = self.need_repo_lookup(&slug);
                     self.refresh_popup();
@@ -942,7 +958,9 @@ impl App {
                         return self.repo_chosen(purpose, repo);
                     }
                     ListOutcome::Cancel => {
-                        self.close_popup();
+                        // One level back: the issue-or-draft question, same presets.
+                        let RepoPurpose::NewIssue { presets } = purpose.clone();
+                        self.open_new_kind(presets);
                         return Vec::new();
                     }
                     ListOutcome::None | ListOutcome::Key(_) => {}
@@ -2574,7 +2592,12 @@ mod tests {
         let mut a = test_app();
         a.pane_repo = Some(repo());
         let mut snap = a.snapshot().unwrap().clone();
-        snap.project.linked_repos = vec![repo_ref("acme/api"), repo_ref("tviles/t")];
+        snap.project.linked_repos = vec![
+            repo_ref("acme/api"),
+            repo_ref("tviles/t"),
+            repo_ref("acme/ro"),
+        ];
+        snap.project.issue_repos = vec![repo_ref("acme/api"), repo_ref("tviles/t")];
         a.store.apply(crate::store::StoreUpdate::Replace(snap));
         for slug in ["zeta/z", "octo/dots", "tviles/t"] {
             let slug: RepoSlug = slug.parse().unwrap();
@@ -2603,27 +2626,6 @@ mod tests {
             ]
         );
         assert!(!loading);
-    }
-
-    #[test]
-    fn a_truncated_repository_list_says_so() {
-        let mut a = test_app();
-        a.handle_key(key('n'));
-        choose(&mut a, "issue");
-        a.on_sync(SyncEvent::Repos(PushableRepos {
-            repos: vec![repo_ref("acme/app")],
-            truncated: true,
-        }));
-        let Some(Popup::Repo { picker, .. }) = &a.popup else {
-            panic!("repository picker")
-        };
-        assert!(
-            picker
-                .error
-                .as_deref()
-                .unwrap()
-                .starts_with("showing the first 500 repositories")
-        );
     }
 
     #[test]
@@ -2679,5 +2681,223 @@ mod tests {
                 .unwrap()
                 .starts_with("Added 'Idea', but a field was not set")
         );
+    }
+
+    fn drafted(a: &mut App) -> Vec<(FieldId, FieldValue)> {
+        a.handle_key(key('n'));
+        match choose(a, "draft").first() {
+            Some(Command::Edit {
+                purpose: EditPurpose::NewDraft { presets },
+                ..
+            }) => presets.clone(),
+            other => panic!("expected the editor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn esc_in_the_repository_picker_goes_back_one_level() {
+        let mut a = test_app();
+        a.select_view(&crate::model::ViewId::new("V_board"));
+        a.handle_key(code(KeyCode::Home));
+        a.handle_key(key('l'));
+        a.handle_key(key('n'));
+        let before = a.popup.clone();
+        choose(&mut a, "issue");
+        assert!(matches!(a.popup, Some(Popup::Repo { .. })));
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!(a.popup, before, "the same question, the same presets");
+        assert_eq!(a.mode, Mode::Popup);
+        a.handle_key(code(KeyCode::Esc));
+        assert!(a.popup.is_none());
+        assert_eq!(a.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn a_typed_name_looks_up_unless_a_listed_repository_matches_it_exactly() {
+        let mut a = test_app();
+        a.handle_key(key('n'));
+        choose(&mut a, "issue");
+        a.on_sync(SyncEvent::Repos(PushableRepos {
+            repos: vec![repo_ref("octo/website"), repo_ref("Octo/Dots")],
+            truncated: false,
+        }));
+        type_text(&mut a, "octo/web");
+        let web: RepoSlug = "octo/web".parse().unwrap();
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::LookupRepo(web)],
+            "octo/website is only a fuzzy match"
+        );
+        assert!(matches!(a.popup, Some(Popup::Repo { .. })));
+        for _ in 0.."octo/web".len() {
+            a.handle_key(code(KeyCode::Backspace));
+        }
+        type_text(&mut a, "octo/dots");
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert!(
+            matches!(&cmds[..], [Command::Edit { purpose: EditPurpose::NewIssue { repo, .. }, .. }] if repo.id == "R_Octo/Dots"),
+            "an exact match, in any case, is taken directly: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn a_repository_that_was_not_found_is_asked_for_again() {
+        let mut a = test_app();
+        a.handle_key(key('n'));
+        choose(&mut a, "issue");
+        a.on_sync(SyncEvent::Repos(PushableRepos {
+            repos: vec![],
+            truncated: false,
+        }));
+        type_text(&mut a, "octo/dots");
+        let octo: RepoSlug = "octo/dots".parse().unwrap();
+        let ask = vec![Command::LookupRepo(octo.clone())];
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), ask);
+        a.on_sync(SyncEvent::RepoFound {
+            slug: octo.clone(),
+            repo: None,
+        });
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), ask, "Enter retries");
+    }
+
+    #[test]
+    fn linked_repositories_without_write_access_or_issues_are_not_offered() {
+        let mut a = test_app();
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.project.linked_repos = vec![repo_ref("acme/ro"), repo_ref("acme/ok")];
+        snap.project.issue_repos = vec![repo_ref("acme/ok")];
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        let (choices, _) = a.repo_choices();
+        let labels: Vec<&str> = choices.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["acme/ok"]);
+    }
+
+    #[test]
+    fn the_truncated_note_is_dim_not_an_error() {
+        let mut a = test_app();
+        a.handle_key(key('n'));
+        choose(&mut a, "issue");
+        a.on_sync(SyncEvent::Repos(PushableRepos {
+            repos: vec![repo_ref("acme/app")],
+            truncated: true,
+        }));
+        let Some(Popup::Repo { picker, .. }) = &a.popup else {
+            panic!("repository picker")
+        };
+        assert!(picker.error.is_none());
+        assert!(
+            picker
+                .note
+                .as_deref()
+                .unwrap()
+                .starts_with("showing the first 500")
+        );
+    }
+
+    #[test]
+    fn a_table_gives_no_presets() {
+        let mut a = test_app();
+        assert!(drafted(&mut a).is_empty());
+    }
+
+    #[test]
+    fn the_no_value_column_gives_no_column_preset() {
+        let mut a = test_app();
+        a.select_view(&crate::model::ViewId::new("V_board"));
+        a.board_sel.column = a.board_columns().len() - 1;
+        let last = a.board_columns().pop().unwrap();
+        assert!(last.bucket.key.is_none(), "No Status");
+        let presets = drafted(&mut a);
+        assert!(
+            presets.iter().all(|(f, _)| f.as_str() != "F_status"),
+            "{presets:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_column_still_presets_its_value() {
+        let mut a = test_app();
+        a.select_view(&crate::model::ViewId::new("V_board"));
+        let cols = a.board_columns();
+        let empty = cols
+            .iter()
+            .position(|c| c.items().is_empty() && c.bucket.key.is_some())
+            .or_else(|| cols.iter().position(|c| c.bucket.key.is_some()))
+            .unwrap();
+        drop(cols);
+        a.board_sel.column = empty;
+        a.board_sel.index = 0;
+        let presets = drafted(&mut a);
+        assert_eq!(presets[0].0.as_str(), "F_status");
+    }
+
+    #[test]
+    fn an_iteration_column_presets_its_iteration() {
+        let mut a = test_app();
+        let mut snap = a.snapshot().unwrap().clone();
+        for v in &mut snap.project.views {
+            if v.id.as_str() == "V_board" {
+                v.vertical_group_by = vec![FieldId::new("F_sprint")];
+            }
+        }
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        a.select_view(&crate::model::ViewId::new("V_board"));
+        a.board_sel.column = 0;
+        let presets = drafted(&mut a);
+        assert_eq!(presets[0].0.as_str(), "F_sprint");
+        assert!(
+            matches!(presets[0].1, FieldValue::Iteration { .. }),
+            "{presets:?}"
+        );
+    }
+
+    #[test]
+    fn a_merged_column_presets_its_canonical_option() {
+        let mut a = test_app();
+        let mut snap = a.snapshot().unwrap().clone();
+        for f in &mut snap.project.fields {
+            if let FieldKind::SingleSelect { options } = &mut f.kind
+                && f.id.as_str() == "F_status"
+            {
+                let mut dup = options[0].clone();
+                dup.id = OptionId::new("o_todo_twin");
+                options.push(dup);
+            }
+        }
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        a.select_view(&crate::model::ViewId::new("V_board"));
+        let cols = a.board_columns();
+        let todo = cols.iter().position(|c| c.bucket.title == "Todo").unwrap();
+        let key = cols[todo].bucket.key.clone().unwrap();
+        drop(cols);
+        assert_eq!(
+            cols_len_of_todo(&a),
+            1,
+            "the two Todo options are one column"
+        );
+        a.board_sel.column = todo;
+        let presets = drafted(&mut a);
+        let FieldValue::SingleSelect { option_id, .. } = &presets[0].1 else {
+            panic!("{presets:?}")
+        };
+        assert_eq!(option_id.0, key);
+    }
+
+    fn cols_len_of_todo(a: &App) -> usize {
+        a.board_columns()
+            .iter()
+            .filter(|c| c.bucket.title == "Todo")
+            .count()
+    }
+
+    #[test]
+    fn n_shows_in_the_hints_only_without_a_selected_item() {
+        let mut a = test_app();
+        assert_eq!(a.new_hint(), None, "an item is selected");
+        a.handle_key(key('f'));
+        type_text(&mut a, "no-such-thing-anywhere");
+        a.handle_key(code(KeyCode::Enter));
+        assert!(a.selected_item().is_none());
+        assert_eq!(a.new_hint().as_deref(), Some("n new"));
     }
 }

@@ -369,12 +369,14 @@ impl App {
                     Some((_, Some(Lookup::Failed(e)))) => Some(e.clone()),
                     _ => match &self.repos {
                         Some(Lookup::Failed(e)) => Some(e.clone()),
-                        Some(Lookup::Ready(list)) if list.truncated => Some(
-                            "showing the first 500 repositories; type owner/name for another"
-                                .into(),
-                        ),
                         _ => None,
                     },
+                };
+                picker.note = match &self.repos {
+                    Some(Lookup::Ready(list)) if list.truncated => Some(
+                        "showing the first 500 repositories; type owner/name for another".into(),
+                    ),
+                    _ => None,
                 };
             }
             _ => {}
@@ -461,6 +463,16 @@ impl App {
         }
         let k = self.keymap.keys_for(Action::ActionMenu).first()?.label();
         Some(format!("{k} actions"))
+    }
+
+    /// `n new`, offered in the status line only when no item is selected (an empty view, where
+    /// no edit hint shows); with an item, `n` stays out of the hints.
+    pub fn new_hint(&self) -> Option<String> {
+        if self.action_item().is_some() || check_new(false, &self.edit_context()).is_err() {
+            return None;
+        }
+        let k = self.keymap.keys_for(Action::New).first()?.label();
+        Some(format!("{k} new"))
     }
 
     pub fn edit_context(&self) -> EditContext {
@@ -4201,6 +4213,35 @@ mod tests {
                 "New item",
                 "Show archived items"
             ]
+        );
+    }
+
+    #[test]
+    fn a_new_item_the_filter_would_hide_stays_visible() {
+        let mut a = test_app();
+        let bugs = crate::model::ViewId::new("V_bugs");
+        a.select_view(&bugs);
+        a.on_sync(SyncEvent::ViewIds {
+            view: bugs.clone(),
+            filter: "label:bug".into(),
+            list: list(&["a"]),
+        });
+        a.on_edited(
+            EditPurpose::NewDraft { presets: vec![] },
+            Some("Idea".into()),
+        );
+        a.on_sync(SyncEvent::ViewIds {
+            view: bugs,
+            filter: "label:bug".into(),
+            list: list(&["a"]),
+        });
+        assert_eq!(a.selected_item().unwrap().id.as_str(), "local:1");
+        assert!(
+            a.view_items()
+                .unwrap()
+                .iter()
+                .any(|i| i.id.as_str() == "local:1"),
+            "a draft has no label:bug, yet it stays"
         );
     }
 }

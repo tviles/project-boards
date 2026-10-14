@@ -114,6 +114,7 @@ pub(crate) mod tests {
             fields: vec![],
             views: vec![],
             linked_repos: vec![],
+            issue_repos: vec![],
         }
     }
 

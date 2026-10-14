@@ -149,6 +149,7 @@ pub fn project() -> Project {
             view("V_bugs", "Bugs", Layout::Table, "label:bug", &[], &[], &[]),
         ],
         linked_repos: vec![],
+        issue_repos: vec![],
     }
 }
 

@@ -132,6 +132,7 @@ pub fn project_from_wire(v: &Value, board: &BoardRef) -> Result<Project, GithubE
         .into_iter()
         .map(|view| view_from_wire(view, &fields))
         .collect();
+    let linked = nodes(v, "repositories");
     Ok(Project {
         id: ProjectId::new(id),
         board: board.clone(),
@@ -145,15 +146,19 @@ pub fn project_from_wire(v: &Value, board: &BoardRef) -> Result<Project, GithubE
         viewer_can_update: v["viewerCanUpdate"].as_bool().unwrap_or(false),
         fields,
         views,
-        linked_repos: nodes(v, "repositories")
-            .into_iter()
-            .filter_map(|r| {
-                Some(RepoRef {
-                    id: r["id"].as_str()?.to_string(),
-                    slug: r["nameWithOwner"].as_str()?.parse().ok()?,
-                })
-            })
+        linked_repos: linked.iter().filter_map(|r| linked_ref(r)).collect(),
+        issue_repos: linked
+            .iter()
+            .filter(|r| crate::github::lookups::writable(r))
+            .filter_map(|r| linked_ref(r))
             .collect(),
+    })
+}
+
+fn linked_ref(r: &Value) -> Option<RepoRef> {
+    Some(RepoRef {
+        id: r["id"].as_str()?.to_string(),
+        slug: r["nameWithOwner"].as_str()?.parse().ok()?,
     })
 }
 
@@ -958,5 +963,26 @@ pub(crate) mod tests {
         );
         let p = project_from_wire(&project_json(), &board()).unwrap();
         assert!(p.linked_repos.is_empty(), "older recordings have none");
+        assert!(p.issue_repos.is_empty());
+    }
+
+    #[test]
+    fn linked_repositories_offered_for_issues_need_write_access_and_issues_on() {
+        let mut v = project_json();
+        let node = |id: &str, perm: &str, issues: bool| json!({"id": id, "nameWithOwner": format!("acme/{id}"), "viewerPermission": perm, "hasIssuesEnabled": issues});
+        v["repositories"] = json!({"nodes": [
+            node("ok", "WRITE", true),
+            node("ro", "READ", true),
+            node("off", "ADMIN", false),
+            {"id": "old", "nameWithOwner": "acme/old"},
+        ]});
+        let p = project_from_wire(&v, &board()).unwrap();
+        assert_eq!(
+            p.linked_repos.len(),
+            4,
+            "drafts still take candidates from any"
+        );
+        let slugs: Vec<String> = p.issue_repos.iter().map(|r| r.slug.to_string()).collect();
+        assert_eq!(slugs, ["acme/ok"]);
     }
 }

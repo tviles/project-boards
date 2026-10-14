@@ -454,7 +454,8 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
                     parts.push(format!("{} {} failed", k.label(), app.errors.len()));
                 }
                 let edit = app.edit_hints().unwrap_or_default();
-                let mut general = vec!["/ search".to_string(), "f filter".to_string()];
+                let mut general: Vec<String> = app.new_hint().into_iter().collect();
+                general.extend(["/ search".to_string(), "f filter".to_string()]);
                 if let Some(k) = clear {
                     general.push(format!("{k} clear filter"));
                 }

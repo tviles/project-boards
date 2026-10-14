@@ -11,7 +11,7 @@ use serde_json::Value;
 
 const PUSHABLE_PAGES: usize = 5;
 
-fn writable(repo: &Value) -> bool {
+pub(crate) fn writable(repo: &Value) -> bool {
     matches!(
         repo["viewerPermission"].as_str(),
         Some("ADMIN" | "MAINTAIN" | "WRITE")

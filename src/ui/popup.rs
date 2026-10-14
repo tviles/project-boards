@@ -43,6 +43,8 @@ pub struct ListPicker<T> {
     pub loading: bool,
     /// Why the choices could not load.
     pub error: Option<String>,
+    /// A dim note under the input, such as a list that is only partly shown.
+    pub note: Option<String>,
     /// Typing filters the list. Off in menus, whose letters are keys.
     pub typing: bool,
 }
@@ -120,6 +122,7 @@ impl<T: Clone> ListPicker<T> {
             selected: 0,
             loading: false,
             error: None,
+            note: None,
             typing: true,
         }
     }
@@ -241,8 +244,8 @@ where
 {
     let visible = picker.visible();
     // A status line (error, loading) shares the box with the choices that are already there.
-    let status =
-        u16::from(picker.error.is_some() || picker.loading) * u16::from(!visible.is_empty());
+    let status = u16::from(picker.error.is_some() || picker.note.is_some() || picker.loading)
+        * u16::from(!visible.is_empty());
     let rows = visible.len().clamp(1, 15) as u16 + u16::from(picker.typing) + status;
     let rect = centered(area, area.width.saturating_sub(4).min(64), rows + 2);
     let inner = rect.width.saturating_sub(2) as usize;
@@ -258,6 +261,8 @@ where
     }
     if let Some(e) = &picker.error {
         lines.push(Line::styled(truncate_to_width(e, inner), theme.error()));
+    } else if let Some(n) = &picker.note {
+        lines.push(Line::styled(truncate_to_width(n, inner), theme.dim()));
     } else if picker.loading {
         lines.push(Line::styled("Loading…", theme.dim()));
     } else if visible.is_empty() {

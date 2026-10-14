@@ -36,7 +36,7 @@ fragment ProjectSchemaFields on ProjectV2 {
       sortByFields(first: 5) { nodes { direction field { ...FieldRef } } }
     }
   }
-  repositories(first: 20) { nodes { id nameWithOwner } }
+  repositories(first: 20) { nodes { id nameWithOwner viewerPermission hasIssuesEnabled } }
 }
 
 fragment ItemFields on ProjectV2Item {
