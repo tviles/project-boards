@@ -898,6 +898,7 @@ impl App {
                     }
                     Some(Action::Refresh) => {
                         self.sticky.clear();
+                        self.clear_lookups();
                         vec![Command::Refresh]
                     }
                     Some(Action::OpenBrowser) => self.open_in_browser(),

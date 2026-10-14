@@ -324,6 +324,17 @@ impl App {
         }]
     }
 
+    /// Forgets the candidate and repository lists so the next popover loads them afresh (`r`,
+    /// ruling E23). The "add existing" search stays while its popover is open.
+    pub(crate) fn clear_lookups(&mut self) {
+        self.candidates.clear();
+        self.repos = None;
+        self.repo_lookups.clear();
+        if !matches!(self.popup, Some(Popup::Search { .. })) {
+            self.content_search = None;
+        }
+    }
+
     /// Where a draft's assignees come from: the pane's repository, else the project's first
     /// linked repository.
     pub fn draft_repo(&self) -> Option<RepoSlug> {
@@ -2827,6 +2838,60 @@ mod tests {
         });
         assert_eq!(a.handle_key(key('r')), vec![Command::Refresh]);
         assert!(a.view_items().unwrap().is_empty());
+    }
+
+    /// Controller ruling E23: `r` also forgets the candidate lists, so labels or milestones
+    /// added on GitHub show after a refresh.
+    #[test]
+    fn r_forgets_candidates_and_the_next_popover_loads_them_again() {
+        let mut a = test_app();
+        let repo: RepoSlug = "tviles/t".parse().unwrap();
+        let load = vec![Command::LoadCandidates(repo.clone())];
+        assert_eq!(a.handle_key(key('t')), load);
+        a.on_sync(SyncEvent::Candidates {
+            repo: repo.clone(),
+            candidates: crate::model::RepoCandidates {
+                repo: RepoRef {
+                    id: "R_1".into(),
+                    slug: repo.clone(),
+                },
+                users: vec![],
+                labels: vec![],
+                milestones: vec![],
+                truncated: false,
+            },
+        });
+        a.handle_key(code(KeyCode::Esc));
+        assert!(a.handle_key(key('t')).is_empty(), "cached");
+        a.handle_key(code(KeyCode::Esc));
+        a.need_repos();
+        a.need_repo_lookup(&"acme/app".parse().unwrap());
+        a.start_search("crash", vec![repo.clone()]);
+        assert_eq!(a.mode, Mode::Normal);
+        assert_eq!(a.handle_key(key('r')), vec![Command::Refresh]);
+        assert!(a.candidates.is_empty() && a.repos.is_none() && a.repo_lookups.is_empty());
+        assert!(a.content_search.is_none());
+        assert_eq!(a.handle_key(key('t')), load, "loaded again");
+    }
+
+    #[test]
+    fn r_keeps_the_search_an_open_add_existing_popover_waits_on() {
+        let mut a = test_app();
+        a.pane_repo = Some("acme/app".parse().unwrap());
+        a.handle_key(key('n'));
+        for text in ["existing", "crash"] {
+            for c in text.chars() {
+                a.handle_key(key(c));
+            }
+            a.handle_key(code(KeyCode::Enter));
+        }
+        assert!(matches!(a.popup, Some(Popup::Search { .. })));
+        assert!(matches!(&a.content_search, Some((q, Lookup::Loading)) if q == "crash"));
+        a.clear_lookups();
+        assert!(
+            a.content_search.is_some(),
+            "the open popover still waits on it"
+        );
     }
 
     #[test]
