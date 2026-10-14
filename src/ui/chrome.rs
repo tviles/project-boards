@@ -73,7 +73,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         render_picker(frame, area, p, &app.theme);
     }
     if app.mode == Mode::Popup {
-        draw_popup(frame, body, app);
+        if let Some(Popup::Text { form, .. }) = &mut app.popup {
+            crate::ui::textform::draw(frame, body, form, &app.theme);
+        } else {
+            draw_popup(frame, body, app);
+        }
     }
     if app.mode == Mode::ErrorLog {
         draw_error_log(frame, body, app);
@@ -195,6 +199,8 @@ fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
             };
             render_line_popup(frame, area, title, input, hint, error.as_deref(), theme)
         }
+        // Drawn by `draw`, which has the form mutably.
+        Popup::Text { .. } => {}
     }
 }
 
@@ -1108,6 +1114,26 @@ mod tests {
             if width == 120 {
                 assert!(has_reminder, "{line}");
             }
+        }
+    }
+
+    #[test]
+    fn the_comment_form_draws_over_the_board() {
+        let mut a = app();
+        a.handle_key(key('c'));
+        a.handle_key(key('h'));
+        a.handle_key(key('i'));
+        let screen = render_to_string(100, 30, |f| draw(f, &mut a));
+        for want in [
+            "Comment on #1",
+            "Body",
+            "hi",
+            "[ Comment ]",
+            "[ Open in editor ]",
+            "[ Cancel ]",
+            "Tab next · Alt+Enter submit · Esc cancel",
+        ] {
+            assert!(screen.contains(want), "missing {want:?} in\n{screen}");
         }
     }
 

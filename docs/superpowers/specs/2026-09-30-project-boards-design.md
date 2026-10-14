@@ -303,7 +303,10 @@ Mouse: click selects, the wheel scrolls, and dragging a card to another column m
 - Fuzzy pickers for single values, multi-select pickers for labels and assignees. Candidate labels, assignable users and milestones come from the item's own repository, are loaded when first needed, and are cached.
 - Date input accepts ISO dates (`2026-10-03`), offsets (`+3d`) and weekday names (`fri`).
 - The iteration picker shows the current and upcoming iterations first.
-- Titles, bodies and comments open in `$EDITOR`. The TUI suspends while the editor runs and resumes afterwards.
+- Titles, bodies, comments and new items are typed into a text form, a centred popup like the others. A new issue or draft has a `Title` line and a `Body`, then `[ Create ]` `[ Open in editor ]` `[ Cancel ]`; a comment has a `Body` and `[ Comment ]` `[ Open in editor ]` `[ Cancel ]`; editing a body shows it prefilled with `[ Save ]` `[ Open in editor ]` `[ Cancel ]`; editing a title shows it prefilled with `[ Save ]` `[ Cancel ]`. The heading names the action and the item: `New issue in owner/name`, `New draft`, `Comment on #12`, `Edit body of #12`, `Edit title of #12` (a draft says `Draft`).
+- Form keys: `Tab` / `Shift+Tab` move through the fields, then the buttons, and wrap. `Enter` in `Title` moves to `Body` (in a title-only form it saves); `Enter` in `Body` is a new line; `Enter` on a button runs it; `Alt+Enter` submits from anywhere. Every other key is text, so `q`, `j` and `e` type letters. `Esc` closes the form when nothing was typed, and otherwise asks "Discard what you typed? (y/n)": `y` closes, any other key returns to the form. `Ctrl+C` still quits at once; unsent text is dropped.
+- Submitting checks the text as before: an empty title creates nothing, an unchanged title or body and an empty comment send nothing; the reason shows in the form, which keeps what was typed. A submit that sends closes the form.
+- `Open in editor` runs `$VISUAL` or `$EDITOR` on the form's text (a new item as its title, a blank line and its body). The TUI suspends while the editor runs and resumes afterwards; what the editor saved goes back into the form, never straight to GitHub, and is submitted from there. An editor that fails, or saves text that isn't UTF-8, says so in the form, which keeps its text (or takes the text with the unreadable bytes replaced).
 
 ### Confirmation
 

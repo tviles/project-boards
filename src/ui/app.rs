@@ -39,7 +39,7 @@ pub enum Mode {
     ErrorLog,
 }
 
-/// What a `$EDITOR` session is for.
+/// What a text form, or a `$EDITOR` session opened from one, is for.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditPurpose {
     Title(ItemId),
@@ -92,7 +92,8 @@ pub enum Command {
     Retry,
     /// Send the pending edit with this id (the controller queues it).
     Send(OpId),
-    /// Open `$EDITOR` on `initial`; the text comes back through `App::on_edited`.
+    /// Open `$EDITOR` on `initial` (a text form's `Open in editor`); the text comes back
+    /// through `App::on_edited`, into the form.
     Edit {
         purpose: EditPurpose,
         initial: String,
@@ -176,9 +177,6 @@ pub struct App {
     /// The help overlay's first visible row, and how many rows it showed last draw.
     pub help_scroll: usize,
     pub help_visible: usize,
-    /// Text an editor session saved but could not send (not UTF-8), with its purpose: the
-    /// next session of that purpose opens on it.
-    unsent: Option<(EditPurpose, String)>,
 }
 
 pub(crate) fn task_words(task: &SyncTask) -> &'static str {
@@ -253,7 +251,6 @@ impl App {
             detail_width: 80,
             help_scroll: 0,
             help_visible: usize::MAX,
-            unsent: None,
         }
     }
 

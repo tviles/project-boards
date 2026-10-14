@@ -184,7 +184,7 @@ impl Action {
             Action::Assignees => "assign people to the item",
             Action::Labels => "set the item's labels",
             Action::EditField => "edit a field of the item",
-            Action::Comment => "comment on the item",
+            Action::Comment => "comment on the item (opens a form)",
             Action::CloseReopen => "close or reopen the issue or pull request",
             Action::Archive => "archive or unarchive the item",
             Action::Convert => "convert the draft to an issue",

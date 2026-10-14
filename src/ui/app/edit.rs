@@ -14,6 +14,7 @@ use crate::ui::editor::{Edited, title_and_body, trim_blank_lines};
 use crate::ui::marks::ItemMarks;
 use crate::ui::popup::{Choice, ListPicker};
 use crate::ui::table::Row;
+use crate::ui::textform::{FormKind, TextForm};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -153,6 +154,37 @@ pub const RETURNED_AT_ONCE: &str =
 
 /// The editor saved bytes that aren't UTF-8.
 pub const NOT_UTF8: &str = "The editor saved text that isn't UTF-8; nothing was sent";
+
+/// The editor exited with an error.
+pub const EDITOR_FAILED: &str = "The editor exited with an error; nothing was sent";
+
+/// How a text form's heading names the item: `#12`, or `Draft` (decision C7).
+fn form_ref(item: &Item) -> String {
+    match item.number() {
+        Some(n) => format!("#{n}"),
+        None => "Draft".into(),
+    }
+}
+
+/// Puts what the editor returned into the form it was opened from, with a line saying what
+/// went wrong, if anything. A failed editor leaves the form's text as it was.
+fn refill(form: &mut TextForm, edited: Edited) {
+    let message = match edited {
+        Edited::Saved { text, quick } => {
+            let before = form.editor_text();
+            form.set_from_editor(&text);
+            let same = trim_blank_lines(&form.editor_text()) == trim_blank_lines(&before);
+            (quick && same).then(|| RETURNED_AT_ONCE.to_string())
+        }
+        Edited::Failed => Some(EDITOR_FAILED.into()),
+        Edited::NotUtf8 { lossy } => {
+            form.set_from_editor(&lossy);
+            Some(NOT_UTF8.into())
+        }
+        Edited::Error(message) => Some(message),
+    };
+    form.set_message(message);
+}
 
 /// `text` with CRLF line endings as LF.
 fn lf(text: &str) -> String {
@@ -810,29 +842,24 @@ impl App {
         }
     }
 
-    /// The `Command::Edit` for `purpose`: on `initial`, or on text an earlier session of the
-    /// same purpose saved but could not send (not UTF-8), so it is not lost.
-    pub(super) fn open_editor(&mut self, purpose: EditPurpose, initial: String) -> Vec<Command> {
-        let initial = match self.unsent.take() {
-            Some((p, text)) if p == purpose => text,
-            other => {
-                self.unsent = other;
-                initial
-            }
-        };
-        vec![Command::Edit { purpose, initial }]
+    /// Opens the text form for `purpose` (Part C): what it submits goes where the editor's
+    /// text for that purpose went.
+    fn open_text_form(&mut self, purpose: EditPurpose, form: TextForm) -> Vec<Command> {
+        self.open_popup(Popup::Text { purpose, form });
+        Vec::new()
     }
 
-    /// Opens `$EDITOR` on the item's title.
+    /// Opens the form on the item's title.
     pub(crate) fn edit_title(&mut self) -> Vec<Command> {
         let Some(item) = self.guarded(OpKind::Title) else {
             return Vec::new();
         };
-        let title = item.title().to_string();
-        self.open_editor(EditPurpose::Title(item.id), title)
+        let heading = format!("Edit title of {}", form_ref(&item));
+        let form = TextForm::new(FormKind::Title, heading, item.title(), "");
+        self.open_text_form(EditPurpose::Title(item.id), form)
     }
 
-    /// Opens `$EDITOR` on the item's body. The body is only known once the item detail has
+    /// Opens the form on the item's body. The body is only known once the item detail has
     /// loaded it (Decision 27): until then this opens the detail (or loads it again after a
     /// failure) and asks to try again.
     pub(crate) fn edit_body(&mut self) -> Vec<Command> {
@@ -840,7 +867,9 @@ impl App {
             return Vec::new();
         };
         if let Some(body) = self.loaded_body(&item.id) {
-            return self.open_editor(EditPurpose::Body(item.id), body);
+            let heading = format!("Edit body of {}", form_ref(&item));
+            let form = TextForm::new(FormKind::Body, heading, "", &lf(&body));
+            return self.open_text_form(EditPurpose::Body(item.id), form);
         }
         let cmds = match self.detail.as_ref().filter(|d| d.item == item.id) {
             // Still loading.
@@ -855,12 +884,31 @@ impl App {
         cmds
     }
 
-    /// `c`: opens `$EDITOR` on an empty comment.
+    /// `c`: opens the form on an empty comment.
     pub(crate) fn comment(&mut self) -> Vec<Command> {
         let Some(item) = self.guarded(OpKind::Comment) else {
             return Vec::new();
         };
-        self.open_editor(EditPurpose::Comment(item.id), String::new())
+        let heading = format!("Comment on {}", form_ref(&item));
+        let form = TextForm::new(FormKind::Comment, heading, "", "");
+        self.open_text_form(EditPurpose::Comment(item.id), form)
+    }
+
+    /// `n`, "New draft": the form for a new draft that starts with `presets`.
+    pub(crate) fn new_draft_form(&mut self, presets: Vec<(FieldId, FieldValue)>) -> Vec<Command> {
+        let form = TextForm::new(FormKind::NewItem, "New draft", "", "");
+        self.open_text_form(EditPurpose::NewDraft { presets }, form)
+    }
+
+    /// `n`, "New issue", once the repository is chosen: the form for the new issue.
+    pub(crate) fn new_issue_form(
+        &mut self,
+        repo: RepoRef,
+        presets: Vec<(FieldId, FieldValue)>,
+    ) -> Vec<Command> {
+        let heading = format!("New issue in {}", repo.slug);
+        let form = TextForm::new(FormKind::NewItem, heading, "", "");
+        self.open_text_form(EditPurpose::NewIssue { repo, presets }, form)
     }
 
     /// The body the open detail has loaded for `item`.
@@ -869,26 +917,44 @@ impl App {
         d.detail.as_ref().map(|x| x.body.clone())
     }
 
-    /// The editor closed. Sends the edit unless the editor failed, the text isn't UTF-8 (it is
-    /// kept for the next session of the same purpose), or it is empty or unchanged; the
-    /// status line says which. Nothing changed after an editor that returned at once suggests
-    /// a waiting flag. `Option<String>` converts: `Some` saved, `None` failed.
+    /// The editor closed. When the text form it was opened from is still open, its text goes
+    /// back into the form (decision C6): nothing is sent, and a failure or text that isn't
+    /// UTF-8 is said in the form, which keeps what it had. With no such form open, the text
+    /// goes to `on_text`, and a failure is said on the status line. `Option<String>`
+    /// converts: `Some` saved, `None` failed.
     pub(crate) fn on_edited(
         &mut self,
         purpose: EditPurpose,
         edited: impl Into<Edited>,
     ) -> Vec<Command> {
-        let (text, quick) = match edited.into() {
-            Edited::Saved { text, quick } => (text, quick),
-            Edited::Failed => {
-                return self.say("The editor exited with an error; nothing was sent");
-            }
-            Edited::NotUtf8 { lossy } => {
-                self.unsent = Some((purpose, lossy));
-                return self.say(NOT_UTF8);
-            }
-            Edited::Error(message) => return self.say(&message),
-        };
+        let edited = edited.into();
+        if let Some(Popup::Text {
+            purpose: open,
+            form,
+        }) = &mut self.popup
+            && *open == purpose
+        {
+            refill(form, edited);
+            return Vec::new();
+        }
+        match edited {
+            Edited::Saved { text, quick } => self.on_text(purpose, text, quick),
+            Edited::Failed => self.say(EDITOR_FAILED),
+            Edited::NotUtf8 { .. } => self.say(NOT_UTF8),
+            Edited::Error(message) => self.say(&message),
+        }
+    }
+
+    /// Sends `text` for `purpose` (decision C5), shared by the text form (`quick` false) and
+    /// an editor whose form is gone. Nothing is sent when the text is empty or unchanged; the
+    /// status line says which. Nothing changed after an editor that returned at once
+    /// (`quick`) suggests a waiting flag.
+    pub(crate) fn on_text(
+        &mut self,
+        purpose: EditPurpose,
+        text: String,
+        quick: bool,
+    ) -> Vec<Command> {
         let unchanged = |what: &'static str| if quick { RETURNED_AT_ONCE } else { what };
         match purpose {
             EditPurpose::Title(id) => {
@@ -3789,15 +3855,14 @@ mod tests {
     }
 
     #[test]
-    fn a_title_edit_opens_the_editor_with_the_title_and_sends_the_new_one() {
+    fn a_title_edit_opens_the_form_with_the_title_and_sends_the_new_one() {
         let mut a = test_app();
-        assert_eq!(
-            a.edit_title(),
-            vec![Command::Edit {
-                purpose: EditPurpose::Title(ItemId::new("a")),
-                initial: "Fix crash".into()
-            }]
-        );
+        assert!(a.edit_title().is_empty());
+        let (purpose, form) = text_form(&a);
+        assert_eq!(purpose, &EditPurpose::Title(ItemId::new("a")));
+        assert_eq!(form.title_text(), "Fix crash");
+        // The editor's text, arriving with no form open, is sent as it always was.
+        a.handle_key(code(KeyCode::Esc));
         let cmds = a.on_edited(
             EditPurpose::Title(ItemId::new("a")),
             Some("Fix the crash on start\n".into()),
@@ -3867,13 +3932,11 @@ mod tests {
             },
             older: false,
         });
-        assert_eq!(
-            a.edit_body(),
-            vec![Command::Edit {
-                purpose: EditPurpose::Body(ItemId::new("a")),
-                initial: "Steps".into()
-            }]
-        );
+        assert!(a.edit_body().is_empty());
+        let (purpose, form) = text_form(&a);
+        assert_eq!(purpose, &EditPurpose::Body(ItemId::new("a")));
+        assert_eq!(form.body_text(), "Steps");
+        a.handle_key(code(KeyCode::Esc));
         assert_eq!(
             a.on_edited(
                 EditPurpose::Body(ItemId::new("a")),
@@ -3887,13 +3950,11 @@ mod tests {
     fn a_comment_is_sent_and_the_open_detail_reloads_once_it_lands() {
         let mut a = test_app();
         open_detail_with_body(&mut a, "Steps");
-        assert_eq!(
-            a.handle_key(key('c')),
-            vec![Command::Edit {
-                purpose: EditPurpose::Comment(ItemId::new("a")),
-                initial: String::new()
-            }]
-        );
+        assert!(a.handle_key(key('c')).is_empty());
+        let (purpose, form) = text_form(&a);
+        assert_eq!(purpose, &EditPurpose::Comment(ItemId::new("a")));
+        assert_eq!(form.body_text(), "");
+        a.handle_key(code(KeyCode::Esc));
         assert_eq!(
             a.on_edited(
                 EditPurpose::Comment(ItemId::new("a")),
@@ -3938,7 +3999,6 @@ mod tests {
     #[test]
     fn an_edit_for_an_item_that_left_the_board_sends_nothing() {
         let mut a = test_app();
-        assert_eq!(a.comment().len(), 1);
         let mut snap = a.snapshot().unwrap().clone();
         snap.items.remove(&ItemId::new("a"));
         a.store.apply(crate::store::StoreUpdate::Replace(snap));
@@ -3982,39 +4042,6 @@ mod tests {
                 item: ItemId::new("a"),
                 before: None
             }]
-        );
-    }
-
-    #[test]
-    fn text_that_isnt_utf8_is_not_sent_and_reopens_next_time() {
-        let mut a = test_app();
-        let comment = || EditPurpose::Comment(ItemId::new("a"));
-        let lossy = Edited::NotUtf8 {
-            lossy: "caf\u{FFFD}".into(),
-        };
-        assert!(a.on_edited(comment(), lossy).is_empty());
-        assert_eq!(a.status.flash.as_deref(), Some(NOT_UTF8));
-        assert_eq!(a.pending_count(), 0);
-        assert_eq!(
-            a.edit_title(),
-            vec![Command::Edit {
-                purpose: EditPurpose::Title(ItemId::new("a")),
-                initial: "Fix crash".into()
-            }],
-            "another purpose opens as usual"
-        );
-        let reopen = vec![Command::Edit {
-            purpose: comment(),
-            initial: "caf\u{FFFD}".into(),
-        }];
-        assert_eq!(a.comment(), reopen);
-        assert_eq!(
-            a.comment()[0],
-            Command::Edit {
-                purpose: comment(),
-                initial: String::new()
-            },
-            "once"
         );
     }
 
@@ -4084,6 +4111,210 @@ mod tests {
             Op::Comment { body, .. } => assert_eq!(body, "    let x = 1;\n  - item"),
             other => panic!("expected a comment, got {other:?}"),
         }
+    }
+
+    /// The open text form, and what it is for.
+    fn text_form(a: &App) -> (&EditPurpose, &crate::ui::textform::TextForm) {
+        match &a.popup {
+            Some(crate::ui::app::Popup::Text { purpose, form }) => (purpose, form),
+            other => panic!("expected the text form, got {other:?}"),
+        }
+    }
+
+    fn type_in(a: &mut App, text: &str) -> Vec<Command> {
+        text.chars().flat_map(|c| a.handle_key(key(c))).collect()
+    }
+
+    fn alt_enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn c_opens_a_comment_form_and_alt_enter_sends_it() {
+        use crate::ui::textform::FormKind;
+        let mut a = test_app();
+        assert!(a.handle_key(key('c')).is_empty());
+        assert_eq!(a.mode, Mode::Popup);
+        let (purpose, form) = text_form(&a);
+        assert_eq!(purpose, &EditPurpose::Comment(ItemId::new("a")));
+        assert_eq!(form.kind(), FormKind::Comment);
+        assert_eq!(form.heading(), "Comment on #1");
+        // Printable keys are text, even board keys such as q, j and e.
+        assert!(type_in(&mut a, "quick je").is_empty());
+        assert!(!a.quit);
+        assert_eq!(a.handle_key(alt_enter()), vec![Command::Send(1)]);
+        assert!(a.popup.is_none());
+        assert_eq!(a.mode, Mode::Normal);
+        match &a.store.pending()[0].op {
+            Op::Comment { body, .. } => assert_eq!(body, "quick je"),
+            other => panic!("expected a comment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_comment_keeps_the_form_open_with_the_reason() {
+        let mut a = test_app();
+        a.handle_key(key('c'));
+        assert!(a.handle_key(alt_enter()).is_empty());
+        let (_, form) = text_form(&a);
+        assert_eq!(form.message(), Some("Empty comment; nothing was sent"));
+        assert_eq!(a.mode, Mode::Popup);
+        assert_eq!(a.pending_count(), 0);
+    }
+
+    #[test]
+    fn the_title_form_is_prefilled_and_enter_saves_it() {
+        use crate::ui::textform::FormKind;
+        let mut a = test_app();
+        assert!(a.edit_title().is_empty());
+        let (purpose, form) = text_form(&a);
+        assert_eq!(purpose, &EditPurpose::Title(ItemId::new("a")));
+        assert_eq!(form.kind(), FormKind::Title);
+        assert_eq!(form.heading(), "Edit title of #1");
+        assert_eq!(form.title_text(), "Fix crash");
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        assert_eq!(text_form(&a).1.message(), Some("Title unchanged"));
+        type_in(&mut a, " now");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert!(a.popup.is_none());
+        assert_eq!(a.item(&ItemId::new("a")).unwrap().title(), "Fix crash now");
+    }
+
+    #[test]
+    fn the_body_form_is_prefilled_from_the_loaded_body() {
+        use crate::ui::textform::FormKind;
+        let mut a = test_app();
+        open_detail_with_body(&mut a, "Steps\r\n1. run");
+        assert!(a.edit_body().is_empty());
+        let (purpose, form) = text_form(&a);
+        assert_eq!(purpose, &EditPurpose::Body(ItemId::new("a")));
+        assert_eq!(form.kind(), FormKind::Body);
+        assert_eq!(form.heading(), "Edit body of #1");
+        assert_eq!(form.body_text(), "Steps\n1. run");
+        assert!(a.handle_key(alt_enter()).is_empty());
+        assert_eq!(text_form(&a).1.message(), Some("Body unchanged"));
+        a.handle_key(code(KeyCode::Enter));
+        type_in(&mut a, "2. crash");
+        assert_eq!(a.handle_key(alt_enter()), vec![Command::Send(1)]);
+        assert_eq!(a.mode, Mode::Detail, "back to the detail");
+        match &a.store.pending()[0].op {
+            Op::Body { body, .. } => assert_eq!(body, "Steps\n1. run\n2. crash"),
+            other => panic!("expected a body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_in_editor_round_trips_through_the_form() {
+        let mut a = test_app();
+        let purpose = || EditPurpose::Comment(ItemId::new("a"));
+        a.handle_key(key('c'));
+        type_in(&mut a, "hi");
+        a.handle_key(code(KeyCode::Tab));
+        a.handle_key(code(KeyCode::Tab));
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::Edit {
+                purpose: purpose(),
+                initial: "hi".into()
+            }]
+        );
+        assert_eq!(a.mode, Mode::Popup, "the form stays open underneath");
+        // The editor's text goes back into the form, never straight to GitHub.
+        assert!(
+            a.on_edited(purpose(), Some("hello\nworld\n".into()))
+                .is_empty()
+        );
+        assert_eq!(text_form(&a).1.body_text(), "hello\nworld");
+        assert_eq!(a.pending_count(), 0);
+        // A failed editor keeps the form's text and says so in the form.
+        assert!(a.on_edited(purpose(), None).is_empty());
+        let (_, form) = text_form(&a);
+        assert_eq!(form.body_text(), "hello\nworld");
+        assert_eq!(
+            form.message(),
+            Some("The editor exited with an error; nothing was sent")
+        );
+        let error = Edited::Error("Could not start vi: No such file or directory".into());
+        assert!(a.on_edited(purpose(), error).is_empty());
+        assert_eq!(
+            text_form(&a).1.message(),
+            Some("Could not start vi: No such file or directory")
+        );
+        // An editor that came back at once with nothing changed hints at a waiting flag.
+        let at_once = Edited::Saved {
+            text: "hello\nworld".into(),
+            quick: true,
+        };
+        assert!(a.on_edited(purpose(), at_once).is_empty());
+        assert_eq!(text_form(&a).1.message(), Some(RETURNED_AT_ONCE));
+        assert_eq!(a.pending_count(), 0);
+        assert_eq!(a.handle_key(alt_enter()), vec![Command::Send(1)]);
+        match &a.store.pending()[0].op {
+            Op::Comment { body, .. } => assert_eq!(body, "hello\nworld"),
+            other => panic!("expected a comment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_that_isnt_utf8_goes_into_the_form_and_is_not_sent() {
+        let mut a = test_app();
+        let comment = || EditPurpose::Comment(ItemId::new("a"));
+        a.handle_key(key('c'));
+        let lossy = Edited::NotUtf8 {
+            lossy: "caf\u{FFFD}".into(),
+        };
+        assert!(a.on_edited(comment(), lossy).is_empty());
+        let (_, form) = text_form(&a);
+        assert_eq!(form.body_text(), "caf\u{FFFD}");
+        assert_eq!(form.message(), Some(NOT_UTF8));
+        assert_eq!(a.pending_count(), 0);
+    }
+
+    #[test]
+    fn esc_with_typed_text_asks_and_y_discards() {
+        let mut a = test_app();
+        a.handle_key(key('c'));
+        assert!(a.handle_key(code(KeyCode::Esc)).is_empty());
+        assert!(a.popup.is_none(), "nothing typed: Esc closes at once");
+        a.handle_key(key('c'));
+        type_in(&mut a, "draft");
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!(a.mode, Mode::Popup, "asks first");
+        a.handle_key(key('n'));
+        assert_eq!(
+            text_form(&a).1.body_text(),
+            "draft",
+            "n returns to the form"
+        );
+        a.handle_key(code(KeyCode::Esc));
+        assert!(a.handle_key(key('y')).is_empty());
+        assert!(a.popup.is_none());
+        assert_eq!(a.mode, Mode::Normal);
+        assert_eq!(a.pending_count(), 0);
+    }
+
+    #[test]
+    fn ctrl_c_in_the_form_still_quits() {
+        let mut a = test_app();
+        a.handle_key(key('c'));
+        type_in(&mut a, "draft");
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(a.handle_key(ctrl_c), vec![Command::Quit]);
+        assert!(a.quit);
+    }
+
+    #[test]
+    fn a_form_whose_item_left_the_board_says_so_and_stays_open() {
+        let mut a = test_app();
+        a.handle_key(key('c'));
+        type_in(&mut a, "LGTM");
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.items.remove(&ItemId::new("a"));
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        assert!(a.handle_key(alt_enter()).is_empty());
+        let (_, form) = text_form(&a);
+        assert_eq!(form.message(), Some("That item is no longer on the board"));
+        assert_eq!(form.body_text(), "LGTM");
     }
 
     fn with_pull_request(a: &mut App, state: crate::model::ContentState) {

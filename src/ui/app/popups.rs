@@ -9,6 +9,7 @@ use crate::model::{
 use crate::ops::{NewItem, Op};
 use crate::ui::multiselect::{MultiOption, MultiOutcome, MultiSelect};
 use crate::ui::popup::{Choice, LineOutcome, ListOutcome, ListPicker, edit_line};
+use crate::ui::textform::{FormEvent, FormKind, TextForm};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
@@ -21,7 +22,7 @@ pub enum LineKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldTarget {
     Field(FieldId),
-    /// The title, in `$EDITOR`.
+    /// The title, in the text form.
     Title,
     Assignees,
     Labels,
@@ -35,9 +36,9 @@ pub enum MenuEntry {
     Key(Action),
     /// The milestone picker (it has no key of its own; `e` reaches it too).
     Milestone,
-    /// The title in `$EDITOR` (`e` reaches it too).
+    /// The title in the text form (`e` reaches it too).
     EditTitle,
-    /// The body in `$EDITOR`; it has no key.
+    /// The body in the text form; it has no key.
     EditBody,
     /// Removes the item from the project, after asking; it has no key.
     Remove,
@@ -60,6 +61,9 @@ pub enum RepoPurpose {
     Convert { item: ItemId },
 }
 
+// The text form is far larger than the other popovers, but there is only ever one popover,
+// so boxing it would save nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Popup {
     /// `n`: an issue or a draft; `presets` are the selected column's and lane's values.
@@ -144,6 +148,12 @@ pub enum Popup {
         title: String,
         input: String,
         error: Option<String>,
+    },
+    /// A title, body, comment or new item typed in the text form (Part C). `purpose` is what
+    /// submitting it does, the same as the editor's text for that purpose.
+    Text {
+        purpose: EditPurpose,
+        form: TextForm,
     },
 }
 
@@ -256,6 +266,16 @@ fn line_value(
         LineKind::Date => {
             parse_date_input(input, today).map(|d| d.map(|d| FieldValue::Date(format_iso_date(d))))
         }
+    }
+}
+
+/// What a text form submits: what the editor would have saved. A new item with no title
+/// submits nothing, so its body never becomes the title.
+fn submitted_text(form: &TextForm) -> String {
+    match form.kind() {
+        FormKind::Title => form.title_text(),
+        FormKind::NewItem if form.title_text().trim().is_empty() => String::new(),
+        _ => form.editor_text(),
     }
 }
 
@@ -569,9 +589,7 @@ impl App {
 
     fn repo_chosen(&mut self, purpose: RepoPurpose, repo: RepoRef) -> Vec<Command> {
         match purpose {
-            RepoPurpose::NewIssue { presets } => {
-                self.open_editor(EditPurpose::NewIssue { repo, presets }, String::new())
-            }
+            RepoPurpose::NewIssue { presets } => self.new_issue_form(repo, presets),
             RepoPurpose::Convert { item } => {
                 self.submit(OpKind::Convert, Op::Convert { item, repo })
             }
@@ -975,9 +993,7 @@ impl App {
                     let presets = presets.clone();
                     self.close_popup();
                     return match kind {
-                        NewKind::Draft => {
-                            self.open_editor(EditPurpose::NewDraft { presets }, String::new())
-                        }
+                        NewKind::Draft => self.new_draft_form(presets),
                         NewKind::Existing => {
                             self.open_popup(Popup::Search {
                                 presets,
@@ -1011,7 +1027,7 @@ impl App {
                 wanted,
             } => {
                 // A typed owner/name that is not listed is looked up; once found it is listed
-                // and Enter picks it (the editor only ever starts from a key press).
+                // and Enter picks it.
                 if key.code == KeyCode::Enter
                     && let Ok(slug) = picker.input.trim().parse::<RepoSlug>()
                 {
@@ -1144,8 +1160,7 @@ impl App {
                     return self.open_field_editor(&item, &field);
                 }
                 ListOutcome::Chosen(FieldTarget::Title) => {
-                    // The editor is a program of its own: the menu closes rather than
-                    // waiting behind it.
+                    // The title form replaces the menu.
                     self.close_popup();
                     return self.edit_title();
                 }
@@ -1319,6 +1334,32 @@ impl App {
                     return self.back_to_menu(&target);
                 }
                 LineOutcome::Typing => *error = None,
+            },
+            Popup::Text { purpose, form } => match form.handle_key(key) {
+                FormEvent::None => {}
+                FormEvent::Cancel => {
+                    self.close_popup();
+                    return Vec::new();
+                }
+                FormEvent::OpenEditor => {
+                    // The form stays open underneath; the editor's text comes back into it.
+                    let edit = Command::Edit {
+                        purpose: purpose.clone(),
+                        initial: form.editor_text(),
+                    };
+                    self.popup = Some(popup);
+                    return vec![edit];
+                }
+                FormEvent::Submit => {
+                    let cmds = self.on_text(purpose.clone(), submitted_text(form), false);
+                    if cmds.iter().any(|c| matches!(c, Command::Send(_))) {
+                        self.close_popup();
+                        return cmds;
+                    }
+                    // Refused ("Empty title…"): the reason shows in the form, which keeps
+                    // what was typed (decision C5).
+                    form.set_message(self.status.flash.take());
+                }
             },
         }
         self.popup = Some(popup);
@@ -2461,7 +2502,7 @@ mod tests {
     }
 
     #[test]
-    fn title_in_the_e_menu_opens_the_editor_and_closes_the_menu() {
+    fn title_in_the_e_menu_opens_the_title_form_and_closes_the_menu() {
         use crate::ui::app::EditPurpose;
         let mut a = test_app();
         a.handle_key(key('e'));
@@ -2477,14 +2518,13 @@ mod tests {
         for _ in 0..at {
             a.handle_key(code(KeyCode::Down));
         }
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
         assert_eq!(
-            a.handle_key(code(KeyCode::Enter)),
-            vec![Command::Edit {
-                purpose: EditPurpose::Title(ItemId::new("a")),
-                initial: "Fix crash".into()
-            }]
+            text_form(&a),
+            (EditPurpose::Title(ItemId::new("a")), "Fix crash".into())
         );
-        assert!(a.popup.is_none());
+        a.handle_key(code(KeyCode::Esc));
+        assert!(a.popup.is_none(), "the menu closed behind the form");
         assert_eq!(a.mode, Mode::Normal);
     }
 
@@ -2504,13 +2544,12 @@ mod tests {
         for _ in 0..at {
             a.handle_key(code(KeyCode::Down));
         }
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
         assert_eq!(
-            a.handle_key(code(KeyCode::Enter)),
-            vec![Command::Edit {
-                purpose: EditPurpose::Title(ItemId::new("a")),
-                initial: "Fix crash".into()
-            }]
+            text_form(&a),
+            (EditPurpose::Title(ItemId::new("a")), "Fix crash".into())
         );
+        a.handle_key(code(KeyCode::Esc));
         assert!(a.popup.is_none());
         a.handle_key(key(' '));
         let at = menu(&a).iter().position(|(l, _)| l == "Edit body").unwrap();
@@ -2551,6 +2590,97 @@ mod tests {
 
     use crate::ui::app::EditPurpose;
 
+    /// The open text form's purpose and the text `Open in editor` would start from.
+    fn text_form(a: &App) -> (EditPurpose, String) {
+        match &a.popup {
+            Some(Popup::Text { purpose, form }) => {
+                let text = match form.kind() {
+                    crate::ui::textform::FormKind::Title => form.title_text(),
+                    _ => form.editor_text(),
+                };
+                (purpose.clone(), text)
+            }
+            other => panic!("expected the text form, got {other:?}"),
+        }
+    }
+
+    fn alt_enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn a_new_draft_opens_a_form_and_an_empty_title_creates_nothing() {
+        let mut a = test_app();
+        a.handle_key(key('n'));
+        choose(&mut a, "draft");
+        let Some(Popup::Text { form, .. }) = &a.popup else {
+            panic!("expected the text form")
+        };
+        assert_eq!(form.heading(), "New draft");
+        assert_eq!(form.kind(), crate::ui::textform::FormKind::NewItem);
+        a.handle_key(code(KeyCode::Tab));
+        type_text(&mut a, "only a body");
+        assert!(a.handle_key(alt_enter()).is_empty());
+        let Some(Popup::Text { form, .. }) = &a.popup else {
+            panic!("the form stays open")
+        };
+        assert_eq!(form.message(), Some("Empty title; nothing was created"));
+        assert_eq!(a.pending_count(), 0);
+    }
+
+    #[test]
+    fn open_in_editor_on_a_new_item_sends_title_and_body_and_refills_both() {
+        let mut a = test_app();
+        a.handle_key(key('n'));
+        choose(&mut a, "draft");
+        type_text(&mut a, "Idea");
+        a.handle_key(code(KeyCode::Tab));
+        type_text(&mut a, "Why");
+        // Body, then [ Create ], then [ Open in editor ].
+        a.handle_key(code(KeyCode::Tab));
+        a.handle_key(code(KeyCode::Tab));
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        let [Command::Edit { purpose, initial }] = &cmds[..] else {
+            panic!("expected the editor, got {cmds:?}")
+        };
+        assert_eq!(initial, "Idea\n\nWhy");
+        let purpose = purpose.clone();
+        assert!(
+            a.on_edited(purpose, Some("Better idea\n\nBecause\n".into()))
+                .is_empty()
+        );
+        let Some(Popup::Text { form, .. }) = &a.popup else {
+            panic!("the form stays open")
+        };
+        assert_eq!(
+            (form.title_text().as_str(), form.body_text().as_str()),
+            ("Better idea", "Because")
+        );
+        assert_eq!(a.pending_count(), 0);
+        assert_eq!(a.handle_key(alt_enter()), vec![Command::Send(1)]);
+        assert!(matches!(
+            &a.store.pending()[0].op,
+            Op::Create { new: NewItem::Draft { title, body }, .. }
+                if title == "Better idea" && body == "Because"
+        ));
+    }
+
+    #[test]
+    fn a_draft_title_form_says_draft() {
+        let mut a = test_app();
+        replace_item(&mut a, |i| {
+            i.content = crate::model::ItemContent::Draft {
+                title: "Idea".into(),
+            }
+        });
+        a.edit_title();
+        let Some(Popup::Text { form, .. }) = &a.popup else {
+            panic!("expected the text form")
+        };
+        assert_eq!(form.heading(), "Edit title of Draft");
+        assert_eq!(form.title_text(), "Idea");
+    }
+
     fn choose(a: &mut App, label: &str) -> Vec<Command> {
         type_text(a, label);
         a.handle_key(code(KeyCode::Enter))
@@ -2575,27 +2705,25 @@ mod tests {
             "In Progress, lane P1"
         );
         assert!(a.handle_key(key('n')).is_empty());
-        let cmds = choose(&mut a, "draft");
-        let Some(Command::Edit {
-            purpose: EditPurpose::NewDraft { presets },
-            initial,
-        }) = cmds.first()
-        else {
-            panic!("expected the editor, got {cmds:?}")
+        assert!(choose(&mut a, "draft").is_empty());
+        let (EditPurpose::NewDraft { presets }, initial) = text_form(&a) else {
+            panic!("expected a new draft")
         };
-        assert!(initial.is_empty());
+        assert!(initial.trim().is_empty());
         let names: Vec<String> = presets
             .iter()
             .map(|(f, v)| format!("{}={}", f, v.display()))
             .collect();
         assert_eq!(names, ["F_status=In Progress", "F_prio=P1"]);
-        let purpose = EditPurpose::NewDraft {
-            presets: presets.clone(),
-        };
-        assert_eq!(
-            a.on_edited(purpose, Some("Idea\n\nA body".into())),
-            vec![Command::Send(1)]
-        );
+        type_text(&mut a, "Idea");
+        a.handle_key(code(KeyCode::Enter));
+        type_text(&mut a, "A body");
+        assert_eq!(a.handle_key(alt_enter()), vec![Command::Send(1)]);
+        assert!(matches!(
+            &a.store.pending()[0].op,
+            Op::Create { new: NewItem::Draft { title, body }, presets: p, .. }
+                if title == "Idea" && body == "A body" && *p == presets
+        ));
         let temp = ItemId::new("local:1");
         assert_eq!(
             a.selected_item().unwrap().id,
@@ -2655,25 +2783,24 @@ mod tests {
             rows,
             [("tviles/t", "this pane's repository"), ("acme/app", "")]
         );
-        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        let (purpose, initial) = text_form(&a);
         assert_eq!(
-            cmds,
-            vec![Command::Edit {
-                purpose: EditPurpose::NewIssue {
-                    repo: repo_ref("tviles/t"),
-                    presets: vec![]
-                },
-                initial: String::new()
-            }]
+            purpose,
+            EditPurpose::NewIssue {
+                repo: repo_ref("tviles/t"),
+                presets: vec![]
+            }
         );
-        let purpose = EditPurpose::NewIssue {
-            repo: repo_ref("tviles/t"),
-            presets: vec![],
+        assert!(initial.trim().is_empty());
+        let Some(Popup::Text { form, .. }) = &a.popup else {
+            unreachable!()
         };
-        assert_eq!(
-            a.on_edited(purpose, Some("Crash on start\n\nSteps".into())),
-            vec![Command::Send(1)]
-        );
+        assert_eq!(form.heading(), "New issue in tviles/t");
+        type_text(&mut a, "Crash on start");
+        a.handle_key(code(KeyCode::Enter));
+        type_text(&mut a, "Steps");
+        assert_eq!(a.handle_key(alt_enter()), vec![Command::Send(1)]);
         assert!(
             matches!(&a.store.pending()[0].op, Op::Create { new: crate::ops::NewItem::Issue { title, body, .. }, .. } if title == "Crash on start" && body == "Steps")
         );
@@ -2711,9 +2838,9 @@ mod tests {
             slug: octo.clone(),
             repo: Some(repo_ref("octo/dots")),
         });
-        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
         assert!(
-            matches!(&cmds[..], [Command::Edit { purpose: EditPurpose::NewIssue { repo, .. }, .. }] if repo.slug == octo)
+            matches!(text_form(&a), (EditPurpose::NewIssue { repo, .. }, _) if repo.slug == octo)
         );
     }
 
@@ -2816,12 +2943,10 @@ mod tests {
 
     fn drafted(a: &mut App) -> Vec<(FieldId, FieldValue)> {
         a.handle_key(key('n'));
-        match choose(a, "draft").first() {
-            Some(Command::Edit {
-                purpose: EditPurpose::NewDraft { presets },
-                ..
-            }) => presets.clone(),
-            other => panic!("expected the editor, got {other:?}"),
+        choose(a, "draft");
+        match text_form(a) {
+            (EditPurpose::NewDraft { presets }, _) => presets,
+            other => panic!("expected a new draft, got {other:?}"),
         }
     }
 
@@ -2864,10 +2989,11 @@ mod tests {
             a.handle_key(code(KeyCode::Backspace));
         }
         type_text(&mut a, "octo/dots");
-        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        let (purpose, _) = text_form(&a);
         assert!(
-            matches!(&cmds[..], [Command::Edit { purpose: EditPurpose::NewIssue { repo, .. }, .. }] if repo.id == "R_Octo/Dots"),
-            "an exact match, in any case, is taken directly: {cmds:?}"
+            matches!(&purpose, EditPurpose::NewIssue { repo, .. } if repo.id == "R_Octo/Dots"),
+            "an exact match, in any case, is taken directly: {purpose:?}"
         );
     }
 

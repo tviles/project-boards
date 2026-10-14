@@ -2117,9 +2117,14 @@ mod tests {
     #[test]
     fn the_editor_runs_as_an_effect_and_its_text_comes_back_as_input() {
         use crate::ui::app::EditPurpose;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let dir = tempfile::tempdir().unwrap();
         let (mut c, t0) = opened(dir.path());
-        let effects = c.handle(Input::Key(key('c')), t0);
+        // `c` opens the comment form; its `Open in editor` button runs the editor.
+        assert!(c.handle(Input::Key(key('c')), t0).is_empty());
+        c.handle(Input::Key(code(KeyCode::Tab)), t0);
+        c.handle(Input::Key(code(KeyCode::Tab)), t0);
+        let effects = c.handle(Input::Key(code(KeyCode::Enter)), t0);
         assert_eq!(
             effects,
             vec![Effect::Editor {
@@ -2134,6 +2139,12 @@ mod tests {
             },
             t0,
         );
+        assert!(
+            mutates(&effects).is_empty(),
+            "the text goes back into the form"
+        );
+        let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+        let effects = c.handle(Input::Key(alt_enter), t0);
         assert_eq!(mutates(&effects), [1]);
     }
 }

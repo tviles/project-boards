@@ -155,6 +155,20 @@ impl TextForm {
         self.focus = ring[(at + if back { n - 1 } else { 1 }) % n];
     }
 
+    pub fn kind(&self) -> FormKind {
+        self.kind
+    }
+
+    /// The popup's title, e.g. `Comment on #12`.
+    pub fn heading(&self) -> &str {
+        &self.heading
+    }
+
+    /// The line `set_message` put in the form, until the next key.
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+
     pub fn title_text(&self) -> String {
         text_of(&self.title)
     }
