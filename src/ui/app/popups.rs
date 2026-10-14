@@ -57,6 +57,7 @@ pub enum NewKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RepoPurpose {
     NewIssue { presets: Vec<(FieldId, FieldValue)> },
+    Convert { item: ItemId },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -555,6 +556,7 @@ impl App {
         }
         let title = match &purpose {
             RepoPurpose::NewIssue { .. } => "Repository for the new issue",
+            RepoPurpose::Convert { .. } => "Convert to an issue in…",
         };
         self.open_popup(Popup::Repo {
             purpose,
@@ -569,6 +571,9 @@ impl App {
         match purpose {
             RepoPurpose::NewIssue { presets } => {
                 self.open_editor(EditPurpose::NewIssue { repo, presets }, String::new())
+            }
+            RepoPurpose::Convert { item } => {
+                self.submit(OpKind::Convert, Op::Convert { item, repo })
             }
         }
     }
@@ -1036,9 +1041,13 @@ impl App {
                         return self.repo_chosen(purpose, repo);
                     }
                     ListOutcome::Cancel => {
-                        // One level back: the issue-or-draft question, same presets.
-                        let RepoPurpose::NewIssue { presets } = purpose.clone();
-                        self.open_new_kind(presets);
+                        // One level back: the issue-or-draft question, same presets. A
+                        // conversion has no earlier step: Esc closes.
+                        if let RepoPurpose::NewIssue { presets } = purpose.clone() {
+                            self.open_new_kind(presets);
+                        } else {
+                            self.close_popup();
+                        }
                         return Vec::new();
                     }
                     ListOutcome::None | ListOutcome::Key(_) => {}
@@ -3194,5 +3203,50 @@ mod tests {
         let a = test_app();
         assert!(a.on_board(&hit("tviles/t", 3, "x")).is_some());
         assert!(a.on_board(&hit("acme/other", 3, "x")).is_none());
+    }
+
+    #[test]
+    fn c_converts_a_draft_in_a_chosen_repository() {
+        let mut a = test_app();
+        for _ in 0..3 {
+            a.handle_key(key('j'));
+        }
+        assert_eq!(a.handle_key(key('C')), vec![Command::LoadRepos]);
+        a.on_sync(SyncEvent::Repos(PushableRepos {
+            repos: vec![repo_ref("tviles/t")],
+            truncated: false,
+        }));
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert!(
+            matches!(&a.store.pending()[0].op, Op::Convert { item, repo } if item.as_str() == "d" && repo.slug == repo_ref("tviles/t").slug)
+        );
+        a.handle_key(key('t'));
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Drafts have no labels — convert to issue first (`C`)"),
+            "the spec's reason, with its key"
+        );
+    }
+
+    #[test]
+    fn only_drafts_convert() {
+        let mut a = test_app();
+        assert!(a.handle_key(key('C')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Only drafts convert to issues")
+        );
+    }
+
+    #[test]
+    fn esc_closes_the_convert_repository_picker() {
+        let mut a = test_app();
+        for _ in 0..3 {
+            a.handle_key(key('j'));
+        }
+        a.handle_key(key('C'));
+        a.handle_key(code(KeyCode::Esc));
+        assert!(a.popup.is_none(), "no earlier step: Esc closes");
+        assert!(a.store.pending().is_empty());
     }
 }

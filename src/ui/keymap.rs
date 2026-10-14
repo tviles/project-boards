@@ -35,6 +35,7 @@ pub enum Action {
     Comment,
     CloseReopen,
     Archive,
+    Convert,
     New,
     ActionMenu,
     ErrorLog,
@@ -56,6 +57,7 @@ impl Action {
             Action::Comment => &[OpKind::Comment],
             Action::CloseReopen => &[OpKind::Close, OpKind::Reopen],
             Action::Archive => &[OpKind::Archive, OpKind::Unarchive],
+            Action::Convert => &[OpKind::Convert],
             _ => &[],
         }
     }
@@ -68,7 +70,7 @@ impl Action {
             .find(|a| a.kinds().contains(&kind))
     }
 
-    pub const ALL: [Action; 36] = [
+    pub const ALL: [Action; 37] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -101,6 +103,7 @@ impl Action {
         Action::Comment,
         Action::CloseReopen,
         Action::Archive,
+        Action::Convert,
         Action::New,
         Action::ActionMenu,
         Action::ErrorLog,
@@ -142,6 +145,7 @@ impl Action {
             Action::Comment => "comment",
             Action::CloseReopen => "close_reopen",
             Action::Archive => "archive",
+            Action::Convert => "convert",
             Action::New => "new",
             Action::ActionMenu => "action_menu",
             Action::ErrorLog => "error_log",
@@ -183,6 +187,7 @@ impl Action {
             Action::Comment => "comment on the item",
             Action::CloseReopen => "close or reopen the issue or pull request",
             Action::Archive => "archive or unarchive the item",
+            Action::Convert => "convert the draft to an issue",
             Action::New => "new issue, draft, or existing item",
             Action::ActionMenu => "actions: every operation the item allows",
             Action::ErrorLog => "error log: failed edits",
@@ -324,6 +329,7 @@ const DEFAULTS: &[(&str, Action)] = &[
     ("c", Action::Comment),
     ("X", Action::CloseReopen),
     ("A", Action::Archive),
+    ("C", Action::Convert),
     ("n", Action::New),
     ("space", Action::ActionMenu),
     ("E", Action::ErrorLog),
@@ -535,7 +541,7 @@ mod tests {
             km.action(&ev(KeyCode::Char('e'), KeyModifiers::NONE)),
             Some(Action::EditField)
         );
-        assert_eq!(Action::ALL.len(), 36);
+        assert_eq!(Action::ALL.len(), 37);
         assert_eq!(
             km.action(&ev(KeyCode::Char('a'), KeyModifiers::NONE)),
             Some(Action::Assignees)

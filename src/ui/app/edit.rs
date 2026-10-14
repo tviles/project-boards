@@ -171,6 +171,7 @@ pub(crate) const EDIT_ACTIONS: &[Action] = &[
     Action::Comment,
     Action::CloseReopen,
     Action::Archive,
+    Action::Convert,
 ];
 
 /// The menu's words for an action.
@@ -207,7 +208,7 @@ const HINTED: &[Action] = &[Action::Assignees, Action::Labels, Action::EditField
 const HINTED_AFTER_MOVE: &[Action] = &[Action::CloseReopen, Action::Comment];
 
 /// The key listed last, after `J K reorder`: the rarest edits drop first under E17.
-const HINTED_LAST: &[Action] = &[Action::Archive];
+const HINTED_LAST: &[Action] = &[Action::Archive, Action::Convert];
 
 /// A lookup an editor waits on.
 #[derive(Debug, Clone, PartialEq)]
@@ -700,6 +701,7 @@ impl App {
             Action::Comment => self.comment(),
             Action::CloseReopen => self.close_or_reopen(),
             Action::Archive => self.archive_or_unarchive(),
+            Action::Convert => self.convert(),
             Action::New => self.open_new(),
             Action::ActionMenu => self.open_action_menu(),
             Action::ErrorLog => self.open_error_log(),
@@ -709,6 +711,14 @@ impl App {
     }
 
     /// The item `kind` would act on, when `check_here` allows it; otherwise shows why.
+    /// `C`: pick the repository, then convert.
+    pub(crate) fn convert(&mut self) -> Vec<Command> {
+        let Some(item) = self.guarded(OpKind::Convert) else {
+            return Vec::new();
+        };
+        self.open_repo_picker(RepoPurpose::Convert { item: item.id })
+    }
+
     fn guarded(&mut self, kind: OpKind) -> Option<Item> {
         let Some(item) = self.action_item().cloned() else {
             self.status.flash = Some("Select an item first".into());

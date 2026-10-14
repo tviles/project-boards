@@ -89,6 +89,8 @@ enum Recent {
     Op(Op),
     /// An item this app created: polls may not list it yet.
     Item(Box<Item>),
+    /// The issue a converted draft became: replaces the item while polls still list the draft.
+    Converted(Box<Item>),
 }
 
 pub struct MemoryStore {
@@ -147,6 +149,12 @@ impl MemoryStore {
                 // Only while polls lack it; once listed, the poll's copy wins.
                 Recent::Item(item) => {
                     if !c.items.contains_key(&item.id) {
+                        c.upsert_items(vec![(**item).clone()]);
+                    }
+                }
+                // A poll that dropped the item meanwhile wins, as in `settle_ok`.
+                Recent::Converted(item) => {
+                    if c.items.contains_key(&item.id) {
                         c.upsert_items(vec![(**item).clone()]);
                     }
                 }
@@ -224,14 +232,20 @@ impl Store for MemoryStore {
             other => {
                 if let Some(c) = self.confirmed.as_mut() {
                     // A poll that removed the item meanwhile wins over the server's copy.
-                    if let Confirmed::Item(item) = other
+                    if let Confirmed::Item(item) = &other
                         && c.items.contains_key(&item.id)
                     {
-                        c.upsert_items(vec![item]);
+                        c.upsert_items(vec![item.clone()]);
                     }
                     op.apply(c);
                 }
-                self.recent.push((now, Recent::Op(op)));
+                // `Convert` replays nothing: keep the returned issue instead.
+                match (&op, other) {
+                    (Op::Convert { .. }, Confirmed::Item(item)) => {
+                        self.recent.push((now, Recent::Converted(Box::new(item))));
+                    }
+                    _ => self.recent.push((now, Recent::Op(op))),
+                }
                 None
             }
         };
@@ -445,6 +459,42 @@ mod tests {
         s.settle_ok(id, Confirmed::Item(stale_a()));
         assert!(!s.confirmed().unwrap().items.contains_key(&ItemId::new("a")));
         assert!(!s.snapshot().unwrap().items.contains_key(&ItemId::new("a")));
+    }
+
+    /// `Convert` replays nothing, so a stale poll inside the window that still lists the
+    /// draft must not turn the converted item back into one.
+    #[test]
+    fn a_converted_item_stays_an_issue_through_stale_polls_for_the_window() {
+        use crate::model::ItemContent;
+        let (mut s, now) = layered();
+        let draft = ItemId::new("d");
+        let stale_draft = s.confirmed().unwrap().items[&draft].clone();
+        assert!(matches!(stale_draft.content, ItemContent::Draft { .. }));
+        let mut converted = issue("d", 7, "Converted");
+        converted.values = stale_draft.values.clone();
+        let id = s.begin(Op::Convert {
+            item: draft.clone(),
+            repo: crate::model::RepoRef {
+                id: "R_1".into(),
+                slug: "acme/app".parse().unwrap(),
+            },
+        });
+        s.settle_ok(id, Confirmed::Item(converted));
+        let is_issue = |s: &MemoryStore| {
+            matches!(
+                s.snapshot().unwrap().items[&draft].content,
+                ItemContent::Issue { .. }
+            )
+        };
+        assert!(is_issue(&s), "settled: the issue");
+        s.apply(StoreUpdate::UpsertItems(vec![stale_draft.clone()]));
+        assert!(is_issue(&s), "a stale poll lists the draft again");
+        *now.lock().unwrap() += RECENT_WINDOW - Duration::from_secs(1);
+        s.apply(StoreUpdate::UpsertItems(vec![stale_draft.clone()]));
+        assert!(is_issue(&s), "still inside the window");
+        *now.lock().unwrap() += Duration::from_secs(1);
+        s.apply(StoreUpdate::UpsertItems(vec![stale_draft]));
+        assert!(!is_issue(&s), "after the window the poll wins");
     }
 
     #[test]
