@@ -196,7 +196,10 @@ impl TextForm {
 
     /// The text differs from what the form opened with.
     pub fn is_dirty(&self) -> bool {
-        self.title_text() != self.initial_title || self.body_text() != self.initial_body
+        // Bodies are compared without surrounding blank lines, which is how an editor
+        // round-trip normalises them, so an unchanged round-trip stays clean.
+        self.title_text() != self.initial_title
+            || trim_blank_lines(&self.body_text()) != trim_blank_lines(&self.initial_body)
     }
 
     fn escape(&mut self) -> FormEvent {
@@ -328,6 +331,10 @@ pub fn draw(f: &mut Frame, area: Rect, form: &mut TextForm, theme: &Theme) {
         ));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
+    // Too small for the fields: leave just the box rather than render into empty rects.
+    if rect.width < 8 || rect.height < min_h {
+        return;
+    }
 
     let mut rows = Vec::new();
     if form.has_title() {
@@ -705,5 +712,77 @@ mod tests {
         let shown = render_to_string(100, 30, |fr| draw(fr, fr.area(), &mut f, &Theme::plain()));
         assert!(shown.contains("»[ Create ]«"), "{shown}");
         assert!(!shown.contains("»[ Cancel ]«"), "{shown}");
+    }
+
+    #[test]
+    fn draw_survives_tiny_areas() {
+        let body = "word ".repeat(40) + "\nsecond line\n\nthird";
+        for kind in [
+            FormKind::NewItem,
+            FormKind::Comment,
+            FormKind::Body,
+            FormKind::Title,
+        ] {
+            for w in 0..=12 {
+                for h in 0..=14 {
+                    let mut f = TextForm::new(kind, "A heading that is long", "A title", &body);
+                    f.set_message(Some("Empty title; nothing was created".into()));
+                    render_to_string(w, h, |fr| draw(fr, fr.area(), &mut f, &Theme::plain()));
+                    f.confirm_discard = true;
+                    render_to_string(w, h, |fr| draw(fr, fr.area(), &mut f, &Theme::plain()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn editor_text_with_an_empty_title_comes_back_with_the_first_line_as_title() {
+        let mut f = new_item();
+        press(&mut f, KeyCode::Tab);
+        type_str(&mut f, "body");
+        let text = f.editor_text();
+        assert_eq!(text, "\n\nbody");
+        f.set_from_editor(&text);
+        assert_eq!(f.title_text(), "body");
+        assert_eq!(f.body_text(), "");
+    }
+
+    #[test]
+    fn an_unchanged_editor_round_trip_stays_clean() {
+        let mut f = TextForm::new(FormKind::Body, "Edit body of #12", "", "\nfirst\nsecond\n");
+        assert!(!f.is_dirty());
+        let text = f.editor_text();
+        f.set_from_editor(&text);
+        assert!(!f.is_dirty());
+        assert_eq!(press(&mut f, KeyCode::Esc), FormEvent::Cancel);
+    }
+
+    #[test]
+    fn tab_leaves_text_unchanged() {
+        let mut f = new_item();
+        type_str(&mut f, "ab");
+        press(&mut f, KeyCode::Tab);
+        type_str(&mut f, "cd");
+        for _ in 0..6 {
+            press(&mut f, KeyCode::Tab);
+        }
+        f.handle_key(code(KeyCode::BackTab));
+        assert_eq!(
+            (f.title_text().as_str(), f.body_text().as_str()),
+            ("ab", "cd")
+        );
+    }
+
+    #[test]
+    fn alt_enter_and_ctrl_c_during_the_discard_prompt() {
+        let mut f = new_item();
+        type_str(&mut f, "x");
+        press(&mut f, KeyCode::Esc);
+        let c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(f.handle_key(c), FormEvent::None);
+        assert!(f.confirm_discard, "Ctrl+C leaves the prompt alone");
+        assert_eq!(f.handle_key(alt_enter()), FormEvent::None);
+        assert!(!f.confirm_discard);
+        assert_eq!(f.title_text(), "x");
     }
 }
