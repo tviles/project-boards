@@ -45,8 +45,32 @@ pub enum MenuEntry {
     ToggleArchived,
 }
 
+/// What `n` adds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewKind {
+    Issue,
+    Draft,
+}
+
+/// What a chosen repository is for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RepoPurpose {
+    NewIssue { presets: Vec<(FieldId, FieldValue)> },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Popup {
+    /// `n`: an issue or a draft; `presets` are the selected column's and lane's values.
+    NewKind {
+        presets: Vec<(FieldId, FieldValue)>,
+        picker: ListPicker<NewKind>,
+    },
+    /// Which repository a new issue goes to. `wanted` is a typed `owner/name` being looked up.
+    Repo {
+        purpose: RepoPurpose,
+        picker: ListPicker<RepoRef>,
+        wanted: Option<RepoSlug>,
+    },
     /// Space: every operation the item allows, with its key.
     Actions {
         /// `None` when no item is selected: only the board's entries are listed.
@@ -367,6 +391,124 @@ impl App {
         self.mode = self.base_mode();
     }
 
+    /// The values a new item starts with: on a board, the selected column's and the selected
+    /// card's swimlane (spec section 6, "Where a new item lands"); none in a table.
+    pub(crate) fn new_item_presets(&self) -> Vec<(FieldId, FieldValue)> {
+        if self.layout().0 != Layout::Board {
+            return Vec::new();
+        }
+        let (Some(field), Some(view), Some(project)) =
+            (self.column_field(), self.current_view(), self.project())
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        if let Some(column) = self.board_columns().get(self.board_sel.column)
+            && let Some(key) = &column.bucket.key
+            && let Some(value) = field.value_for_bucket(key)
+        {
+            out.push((field.id.clone(), value));
+        }
+        if let (Some(lane), Some(item)) = (view.group_field(&project.fields), self.selected_item())
+            && lane.kind.can_be_column()
+            && let Some(value) = item.value(&lane.id)
+        {
+            out.push((lane.id.clone(), value.clone()));
+        }
+        out
+    }
+
+    /// `n`: what to add.
+    pub(crate) fn open_new(&mut self) -> Vec<Command> {
+        if let Err(denial) = check_new(false, &self.edit_context()) {
+            self.status.flash = Some(self.denial_text(denial));
+            return Vec::new();
+        }
+        let presets = self.new_item_presets();
+        let picker = ListPicker::new(
+            "New item",
+            vec![
+                Choice::new("New issue", NewKind::Issue),
+                Choice::new("New draft", NewKind::Draft),
+            ],
+        );
+        self.open_popup(Popup::NewKind { presets, picker });
+        Vec::new()
+    }
+
+    /// Repositories to pick from, in Decision 23's order and deterministic: the pane's
+    /// repository, the project's linked ones, repositories found by typing `owner/name`
+    /// (sorted by name), then those the user can push to (most recently pushed first). Each
+    /// is listed once, at its first place. The flag says the list is still loading.
+    pub(crate) fn repo_choices(&self) -> (Vec<Choice<RepoRef>>, bool) {
+        let mut out: Vec<Choice<RepoRef>> = Vec::new();
+        let mut push = |repo: &RepoRef, detail: &str| {
+            if !out.iter().any(|c| c.value.slug == repo.slug) {
+                out.push(Choice::new(repo.slug.to_string(), repo.clone()).with_detail(detail));
+            }
+        };
+        if let Some(pane) = &self.pane_repo
+            && let Some(Lookup::Ready(Some(repo))) = self.repo_lookups.get(pane)
+        {
+            push(repo, "this pane's repository");
+        }
+        if let Some(project) = self.project() {
+            for repo in &project.linked_repos {
+                push(repo, "linked");
+            }
+        }
+        let mut found: Vec<&RepoRef> = self
+            .repo_lookups
+            .values()
+            .filter_map(|l| match l {
+                Lookup::Ready(Some(repo)) => Some(repo),
+                _ => None,
+            })
+            .collect();
+        found.sort_by(|a, b| a.slug.cmp(&b.slug));
+        for repo in found {
+            push(repo, "");
+        }
+        if let Some(Lookup::Ready(list)) = &self.repos {
+            for repo in &list.repos {
+                push(repo, "");
+            }
+        }
+        let loading = matches!(self.repos, Some(Lookup::Loading) | None);
+        (out, loading)
+    }
+
+    pub(crate) fn open_repo_picker(&mut self, purpose: RepoPurpose) -> Vec<Command> {
+        let mut cmds = self.need_repos();
+        if let Some(pane) = self.pane_repo.clone() {
+            cmds.extend(self.need_repo_lookup(&pane));
+        }
+        let title = match &purpose {
+            RepoPurpose::NewIssue { .. } => "Repository for the new issue",
+        };
+        self.open_popup(Popup::Repo {
+            purpose,
+            picker: ListPicker::loading(title),
+            wanted: None,
+        });
+        self.refresh_popup();
+        cmds
+    }
+
+    fn repo_chosen(&mut self, purpose: RepoPurpose, repo: RepoRef) -> Vec<Command> {
+        match purpose {
+            RepoPurpose::NewIssue { presets } => {
+                self.open_editor(EditPurpose::NewIssue { repo, presets }, String::new())
+            }
+        }
+    }
+
+    /// The placeholder id of the next new item.
+    pub(crate) fn next_temp(&mut self) -> ItemId {
+        self.temp_counter += 1;
+        ItemId::new(format!("local:{}", self.temp_counter))
+    }
+
     /// Space: every operation `action_item` allows, each with its key; or why there are none.
     pub(crate) fn open_action_menu(&mut self) -> Vec<Command> {
         let item = self.action_item().cloned();
@@ -407,6 +549,12 @@ impl App {
             }
         }
         if self.current_view().is_some() {
+            if check_new(false, &self.edit_context()).is_ok() {
+                choices.push(
+                    Choice::new("New item", MenuEntry::Key(Action::New))
+                        .with_detail(key(Action::New)),
+                );
+            }
             let shown = self
                 .extra_filter()
                 .is_some_and(|f| edit::archived_token(f).is_some());
@@ -747,6 +895,59 @@ impl App {
         };
         let today = self.today();
         match &mut popup {
+            Popup::NewKind { presets, picker } => match picker.handle(&key) {
+                ListOutcome::Chosen(kind) => {
+                    let presets = presets.clone();
+                    self.close_popup();
+                    return match kind {
+                        NewKind::Draft => {
+                            self.open_editor(EditPurpose::NewDraft { presets }, String::new())
+                        }
+                        NewKind::Issue => match check_new(true, &self.edit_context()) {
+                            Ok(()) => self.open_repo_picker(RepoPurpose::NewIssue { presets }),
+                            Err(denial) => {
+                                self.status.flash = Some(self.denial_text(denial));
+                                Vec::new()
+                            }
+                        },
+                    };
+                }
+                ListOutcome::Cancel => {
+                    self.close_popup();
+                    return Vec::new();
+                }
+                ListOutcome::None | ListOutcome::Key(_) => {}
+            },
+            Popup::Repo {
+                purpose,
+                picker,
+                wanted,
+            } => {
+                // A typed owner/name that is not listed is looked up; once found it is listed
+                // and Enter picks it (the editor only ever starts from a key press).
+                if key.code == KeyCode::Enter
+                    && picker.current().is_none()
+                    && let Ok(slug) = picker.input.trim().parse::<RepoSlug>()
+                {
+                    *wanted = Some(slug.clone());
+                    self.popup = Some(popup);
+                    let cmds = self.need_repo_lookup(&slug);
+                    self.refresh_popup();
+                    return cmds;
+                }
+                match picker.handle(&key) {
+                    ListOutcome::Chosen(repo) => {
+                        let purpose = purpose.clone();
+                        self.close_popup();
+                        return self.repo_chosen(purpose, repo);
+                    }
+                    ListOutcome::Cancel => {
+                        self.close_popup();
+                        return Vec::new();
+                    }
+                    ListOutcome::None | ListOutcome::Key(_) => {}
+                }
+            }
             Popup::Actions { picker, .. } => match picker.handle(&key) {
                 ListOutcome::Chosen(MenuEntry::Key(action)) => {
                     self.close_popup();
@@ -2197,5 +2398,286 @@ mod tests {
         a.handle_key(code(KeyCode::Esc));
         assert!(a.handle_key(key('c')).is_empty());
         assert!(a.status.flash.is_some(), "c says why");
+    }
+
+    use crate::ui::app::EditPurpose;
+
+    fn choose(a: &mut App, label: &str) -> Vec<Command> {
+        type_text(a, label);
+        a.handle_key(code(KeyCode::Enter))
+    }
+
+    fn repo_ref(slug: &str) -> RepoRef {
+        RepoRef {
+            id: format!("R_{slug}"),
+            slug: slug.parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn n_in_a_board_column_presets_its_column_and_lane() {
+        let mut a = test_app();
+        a.select_view(&crate::model::ViewId::new("V_board"));
+        a.handle_key(code(KeyCode::Home));
+        a.handle_key(key('l'));
+        assert_eq!(
+            a.selected_item().unwrap().id.as_str(),
+            "b",
+            "In Progress, lane P1"
+        );
+        assert!(a.handle_key(key('n')).is_empty());
+        let cmds = choose(&mut a, "draft");
+        let Some(Command::Edit {
+            purpose: EditPurpose::NewDraft { presets },
+            initial,
+        }) = cmds.first()
+        else {
+            panic!("expected the editor, got {cmds:?}")
+        };
+        assert!(initial.is_empty());
+        let names: Vec<String> = presets
+            .iter()
+            .map(|(f, v)| format!("{}={}", f, v.display()))
+            .collect();
+        assert_eq!(names, ["F_status=In Progress", "F_prio=P1"]);
+        let purpose = EditPurpose::NewDraft {
+            presets: presets.clone(),
+        };
+        assert_eq!(
+            a.on_edited(purpose, Some("Idea\n\nA body".into())),
+            vec![Command::Send(1)]
+        );
+        let temp = ItemId::new("local:1");
+        assert_eq!(
+            a.selected_item().unwrap().id,
+            temp,
+            "the new item is selected"
+        );
+        assert_eq!(a.highlight, Some(temp.clone()));
+        assert_eq!(
+            a.item(&temp)
+                .unwrap()
+                .value(&FieldId::new("F_status"))
+                .map(|v| v.display())
+                .as_deref(),
+            Some("In Progress")
+        );
+        let mut created = a.item(&temp).unwrap().clone();
+        created.id = ItemId::new("PVTI_new");
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Ok(crate::ops::Confirmed::Created {
+                temp,
+                item: created,
+                refused: vec![],
+            }),
+        });
+        assert_eq!(
+            a.selected_item().unwrap().id.as_str(),
+            "PVTI_new",
+            "the cursor follows the real item"
+        );
+    }
+
+    #[test]
+    fn a_new_issue_asks_for_the_repository_first() {
+        let mut a = test_app();
+        a.pane_repo = Some(repo());
+        a.handle_key(key('n'));
+        let cmds = choose(&mut a, "issue");
+        assert_eq!(cmds, vec![Command::LoadRepos, Command::LookupRepo(repo())]);
+        a.on_sync(SyncEvent::Repos(PushableRepos {
+            repos: vec![repo_ref("acme/app"), repo_ref("tviles/t")],
+            truncated: false,
+        }));
+        a.on_sync(SyncEvent::RepoFound {
+            slug: repo(),
+            repo: Some(repo_ref("tviles/t")),
+        });
+        let Some(Popup::Repo { picker, .. }) = &a.popup else {
+            panic!("repository picker")
+        };
+        let rows: Vec<(&str, &str)> = picker
+            .choices
+            .iter()
+            .map(|c| (c.label.as_str(), c.detail.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [("tviles/t", "this pane's repository"), ("acme/app", "")]
+        );
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert_eq!(
+            cmds,
+            vec![Command::Edit {
+                purpose: EditPurpose::NewIssue {
+                    repo: repo_ref("tviles/t"),
+                    presets: vec![]
+                },
+                initial: String::new()
+            }]
+        );
+        let purpose = EditPurpose::NewIssue {
+            repo: repo_ref("tviles/t"),
+            presets: vec![],
+        };
+        assert_eq!(
+            a.on_edited(purpose, Some("Crash on start\n\nSteps".into())),
+            vec![Command::Send(1)]
+        );
+        assert!(
+            matches!(&a.store.pending()[0].op, Op::Create { new: crate::ops::NewItem::Issue { title, body, .. }, .. } if title == "Crash on start" && body == "Steps")
+        );
+    }
+
+    #[test]
+    fn a_typed_repository_is_looked_up_and_offered() {
+        let mut a = test_app();
+        a.handle_key(key('n'));
+        choose(&mut a, "issue");
+        a.on_sync(SyncEvent::Repos(PushableRepos {
+            repos: vec![],
+            truncated: false,
+        }));
+        type_text(&mut a, "octo/dots");
+        let octo: RepoSlug = "octo/dots".parse().unwrap();
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::LookupRepo(octo.clone())]
+        );
+        a.on_sync(SyncEvent::RepoFound {
+            slug: octo.clone(),
+            repo: None,
+        });
+        let Some(Popup::Repo { picker, .. }) = &a.popup else {
+            panic!("repository picker")
+        };
+        assert!(picker.error.as_deref().unwrap().contains("octo/dots"));
+        a.repo_lookups.remove(&octo);
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::LookupRepo(octo.clone())]
+        );
+        a.on_sync(SyncEvent::RepoFound {
+            slug: octo.clone(),
+            repo: Some(repo_ref("octo/dots")),
+        });
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert!(
+            matches!(&cmds[..], [Command::Edit { purpose: EditPurpose::NewIssue { repo, .. }, .. }] if repo.slug == octo)
+        );
+    }
+
+    /// Pre-flight ruling 21: Decision 23's order, the same every time.
+    #[test]
+    fn the_repository_picker_lists_pane_linked_found_then_pushable() {
+        let mut a = test_app();
+        a.pane_repo = Some(repo());
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.project.linked_repos = vec![repo_ref("acme/api"), repo_ref("tviles/t")];
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        for slug in ["zeta/z", "octo/dots", "tviles/t"] {
+            let slug: RepoSlug = slug.parse().unwrap();
+            a.repo_lookups.insert(
+                slug.clone(),
+                crate::ui::app::Lookup::Ready(Some(repo_ref(&slug.to_string()))),
+            );
+        }
+        a.repos = Some(crate::ui::app::Lookup::Ready(PushableRepos {
+            repos: vec![repo_ref("acme/app"), repo_ref("acme/api")],
+            truncated: false,
+        }));
+        let (choices, loading) = a.repo_choices();
+        let rows: Vec<(&str, &str)> = choices
+            .iter()
+            .map(|c| (c.label.as_str(), c.detail.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("tviles/t", "this pane's repository"),
+                ("acme/api", "linked"),
+                ("octo/dots", ""),
+                ("zeta/z", ""),
+                ("acme/app", ""),
+            ]
+        );
+        assert!(!loading);
+    }
+
+    #[test]
+    fn a_truncated_repository_list_says_so() {
+        let mut a = test_app();
+        a.handle_key(key('n'));
+        choose(&mut a, "issue");
+        a.on_sync(SyncEvent::Repos(PushableRepos {
+            repos: vec![repo_ref("acme/app")],
+            truncated: true,
+        }));
+        let Some(Popup::Repo { picker, .. }) = &a.popup else {
+            panic!("repository picker")
+        };
+        assert!(
+            picker
+                .error
+                .as_deref()
+                .unwrap()
+                .starts_with("showing the first 500 repositories")
+        );
+    }
+
+    #[test]
+    fn an_empty_new_item_creates_nothing_and_a_read_only_board_says_why() {
+        let mut a = test_app();
+        assert!(
+            a.on_edited(
+                EditPurpose::NewDraft { presets: vec![] },
+                Some("\n\n".into())
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Empty title; nothing was created")
+        );
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.project.viewer_can_update = false;
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        assert!(a.handle_key(key('n')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("This board is read-only for you")
+        );
+        assert!(a.popup.is_none());
+    }
+
+    #[test]
+    fn a_refused_preset_is_reported_after_the_item_is_created() {
+        let mut a = test_app();
+        a.on_edited(
+            EditPurpose::NewDraft { presets: vec![] },
+            Some("Idea".into()),
+        );
+        let mut created = a.item(&ItemId::new("local:1")).unwrap().clone();
+        created.id = ItemId::new("PVTI_new");
+        let refused = vec![(
+            FieldId::new("F_status"),
+            crate::github::GithubError::Network("reset".into()),
+        )];
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Ok(crate::ops::Confirmed::Created {
+                temp: ItemId::new("local:1"),
+                item: created,
+                refused,
+            }),
+        });
+        assert!(
+            a.status
+                .error
+                .as_deref()
+                .unwrap()
+                .starts_with("Added 'Idea', but a field was not set")
+        );
     }
 }

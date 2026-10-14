@@ -10,7 +10,7 @@ use crate::store::BoardSnapshot;
 use crate::ui::app::popups::{
     GONE, assignee_options, fill_checklist, label_options, milestone_choices,
 };
-use crate::ui::editor::{Edited, trim_blank_lines};
+use crate::ui::editor::{Edited, title_and_body, trim_blank_lines};
 use crate::ui::marks::ItemMarks;
 use crate::ui::popup::{Choice, ListPicker};
 use crate::ui::table::Row;
@@ -234,7 +234,6 @@ impl App {
         vec![Command::LoadCandidates(repo.clone())]
     }
 
-    #[allow(dead_code)] // the editors that ask arrive in Tasks 30, 34 and 35
     pub(crate) fn need_repos(&mut self) -> Vec<Command> {
         if matches!(self.repos, Some(Lookup::Ready(_) | Lookup::Loading)) {
             return Vec::new();
@@ -243,7 +242,6 @@ impl App {
         vec![Command::LoadRepos]
     }
 
-    #[allow(dead_code)] // the editors that ask arrive in Tasks 30, 34 and 35
     pub(crate) fn need_repo_lookup(&mut self, slug: &RepoSlug) -> Vec<Command> {
         if matches!(
             self.repo_lookups.get(slug),
@@ -360,6 +358,25 @@ impl App {
                 }
                 _ => {}
             },
+            Popup::Repo { picker, wanted, .. } => {
+                let (choices, loading) = self.repo_choices();
+                picker.set_choices(choices);
+                picker.loading = loading && picker.choices.is_empty();
+                picker.error = match wanted.as_ref().map(|w| (w, self.repo_lookups.get(w))) {
+                    Some((w, Some(Lookup::Ready(None)))) => {
+                        Some(format!("{w}: not found, or you can't create issues there"))
+                    }
+                    Some((_, Some(Lookup::Failed(e)))) => Some(e.clone()),
+                    _ => match &self.repos {
+                        Some(Lookup::Failed(e)) => Some(e.clone()),
+                        Some(Lookup::Ready(list)) if list.truncated => Some(
+                            "showing the first 500 repositories; type owner/name for another"
+                                .into(),
+                        ),
+                        _ => None,
+                    },
+                };
+            }
             _ => {}
         }
         self.popup = Some(popup);
@@ -653,6 +670,7 @@ impl App {
             Action::Comment => self.comment(),
             Action::CloseReopen => self.close_or_reopen(),
             Action::Archive => self.archive_or_unarchive(),
+            Action::New => self.open_new(),
             Action::ActionMenu => self.open_action_menu(),
             Action::ErrorLog => self.open_error_log(),
             _ => return None,
@@ -677,7 +695,7 @@ impl App {
 
     /// The `Command::Edit` for `purpose`: on `initial`, or on text an earlier session of the
     /// same purpose saved but could not send (not UTF-8), so it is not lost.
-    fn open_editor(&mut self, purpose: EditPurpose, initial: String) -> Vec<Command> {
+    pub(super) fn open_editor(&mut self, purpose: EditPurpose, initial: String) -> Vec<Command> {
         let initial = match self.unsent.take() {
             Some((p, text)) if p == purpose => text,
             other => {
@@ -799,6 +817,34 @@ impl App {
                     body,
                 })
             }
+            EditPurpose::NewDraft { presets } => match title_and_body(&text) {
+                None => self.say(unchanged("Empty title; nothing was created")),
+                Some((title, body)) => {
+                    let temp = self.next_temp();
+                    self.submit_new(
+                        Op::Create {
+                            temp,
+                            new: NewItem::Draft { title, body },
+                            presets,
+                        },
+                        false,
+                    )
+                }
+            },
+            EditPurpose::NewIssue { repo, presets } => match title_and_body(&text) {
+                None => self.say(unchanged("Empty title; nothing was created")),
+                Some((title, body)) => {
+                    let temp = self.next_temp();
+                    self.submit_new(
+                        Op::Create {
+                            temp,
+                            new: NewItem::Issue { repo, title, body },
+                            presets,
+                        },
+                        true,
+                    )
+                }
+            },
         }
     }
 
@@ -4152,6 +4198,7 @@ mod tests {
                 "Unarchive",
                 "Remove from project",
                 "Open in the browser",
+                "New item",
                 "Show archived items"
             ]
         );

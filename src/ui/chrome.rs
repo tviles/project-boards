@@ -139,6 +139,8 @@ fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
     let Some(popup) = &app.popup else { return };
     let theme = &app.theme;
     match popup {
+        Popup::NewKind { picker, .. } => render_list_picker(frame, area, picker, theme),
+        Popup::Repo { picker, .. } => render_list_picker(frame, area, picker, theme),
         Popup::Actions { picker, .. } => render_list_picker(frame, area, picker, theme),
         Popup::Fields { picker, .. } => render_list_picker(frame, area, picker, theme),
         Popup::Value { picker, .. } => render_list_picker(frame, area, picker, theme),
@@ -1145,7 +1147,7 @@ mod tests {
     fn help_that_fits_closes_on_any_key() {
         let mut a = app();
         a.handle_key(key('?'));
-        render_to_string(100, 40, |f| draw(f, &mut a));
+        render_to_string(100, 50, |f| draw(f, &mut a));
         a.handle_key(key('j'));
         assert_eq!(a.mode, Mode::Normal);
     }

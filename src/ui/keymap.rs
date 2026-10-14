@@ -35,6 +35,7 @@ pub enum Action {
     Comment,
     CloseReopen,
     Archive,
+    New,
     ActionMenu,
     ErrorLog,
     Retry,
@@ -67,7 +68,7 @@ impl Action {
             .find(|a| a.kinds().contains(&kind))
     }
 
-    pub const ALL: [Action; 35] = [
+    pub const ALL: [Action; 36] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -100,6 +101,7 @@ impl Action {
         Action::Comment,
         Action::CloseReopen,
         Action::Archive,
+        Action::New,
         Action::ActionMenu,
         Action::ErrorLog,
         Action::Retry,
@@ -140,6 +142,7 @@ impl Action {
             Action::Comment => "comment",
             Action::CloseReopen => "close_reopen",
             Action::Archive => "archive",
+            Action::New => "new",
             Action::ActionMenu => "action_menu",
             Action::ErrorLog => "error_log",
             Action::Retry => "retry",
@@ -180,6 +183,7 @@ impl Action {
             Action::Comment => "comment on the item",
             Action::CloseReopen => "close or reopen the issue or pull request",
             Action::Archive => "archive or unarchive the item",
+            Action::New => "new issue, draft, or existing item",
             Action::ActionMenu => "actions: every operation the item allows",
             Action::ErrorLog => "error log: failed edits",
             Action::Retry => "error log: retry the selected edit",
@@ -320,6 +324,7 @@ const DEFAULTS: &[(&str, Action)] = &[
     ("c", Action::Comment),
     ("X", Action::CloseReopen),
     ("A", Action::Archive),
+    ("n", Action::New),
     ("space", Action::ActionMenu),
     ("E", Action::ErrorLog),
     ("R", Action::Retry),
@@ -530,7 +535,7 @@ mod tests {
             km.action(&ev(KeyCode::Char('e'), KeyModifiers::NONE)),
             Some(Action::EditField)
         );
-        assert_eq!(Action::ALL.len(), 35);
+        assert_eq!(Action::ALL.len(), 36);
         assert_eq!(
             km.action(&ev(KeyCode::Char('a'), KeyModifiers::NONE)),
             Some(Action::Assignees)

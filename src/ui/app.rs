@@ -20,7 +20,7 @@ mod popups;
 
 use crate::ops::OpId;
 pub use edit::{Confirm, ConfirmAction, FailedEdit, Lookup};
-pub use popups::{FieldTarget, LineKind, MenuEntry, Popup};
+pub use popups::{FieldTarget, LineKind, MenuEntry, NewKind, Popup, RepoPurpose};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -45,6 +45,15 @@ pub enum EditPurpose {
     Title(ItemId),
     Body(ItemId),
     Comment(ItemId),
+    /// A new draft: its title and body, and the values it starts with.
+    NewDraft {
+        presets: Vec<(FieldId, FieldValue)>,
+    },
+    /// A new issue in `repo`.
+    NewIssue {
+        repo: RepoRef,
+        presets: Vec<(FieldId, FieldValue)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +162,8 @@ pub struct App {
     pub(crate) candidates: HashMap<RepoSlug, Lookup<RepoCandidates>>,
     /// Repositories the user can push to, for the repository picker.
     pub(crate) repos: Option<Lookup<PushableRepos>>,
+    /// Numbers the placeholders of new items (`local:N`).
+    temp_counter: u64,
     pub(crate) repo_lookups: HashMap<RepoSlug, Lookup<Option<RepoRef>>>,
     /// The latest "add existing" search and its results (`search` is the quick-search text).
     pub(crate) content_search: Option<(String, Lookup<Vec<ContentHit>>)>,
@@ -234,6 +245,7 @@ impl App {
             popup: None,
             candidates: HashMap::new(),
             repos: None,
+            temp_counter: 0,
             repo_lookups: HashMap::new(),
             content_search: None,
             pane_repo: None,
