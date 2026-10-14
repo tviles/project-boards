@@ -209,7 +209,11 @@ pub fn build_doc(
         truncate_to_width(item.title(), w),
         theme.heading(),
     )];
-    let mut meta = vec![item.number().map(|n| format!("#{n}")).unwrap_or_default()];
+    let mut meta = vec![match item.number() {
+        Some(n) => format!("#{n}"),
+        None if item.is_placeholder() => "new".to_string(),
+        None => String::new(),
+    }];
     if let Some(r) = item.reference() {
         meta.push(r.repo.clone());
     }
@@ -236,7 +240,13 @@ pub fn build_doc(
 
     let mut targets = Vec::new();
     let Some(detail) = &state.detail else {
-        let msg = state.error.clone().unwrap_or_else(|| "Loading…".into());
+        let msg = state.error.clone().unwrap_or_else(|| {
+            if crate::model::is_placeholder(&state.item) {
+                "Creating on GitHub…".into()
+            } else {
+                "Loading…".into()
+            }
+        });
         let style = if state.error.is_some() {
             theme.error()
         } else {
@@ -694,5 +704,36 @@ mod tests {
             render_detail(f, f.area(), &doc, &s, &Theme::plain())
         });
         assert!(screen.contains("[2] #2"), "{screen}");
+    }
+
+    #[test]
+    fn a_new_items_detail_heading_says_new_not_zero() {
+        let (p, all) = (project(), items());
+        let mut placeholder = all[0].clone();
+        placeholder.id = ItemId::new("local:1");
+        if let ItemContent::Issue { reference, .. } = &mut placeholder.content {
+            reference.number = 0;
+        }
+        let state = DetailState::new(ItemId::new("local:1"));
+        let doc = build_doc(&placeholder, &p, &state, 60, &Theme::plain());
+        let screen = render_to_string(60, 12, |f| {
+            render_detail(f, f.area(), &doc, &state, &Theme::plain())
+        });
+        assert!(screen.contains("new · tviles/t"), "{screen}");
+        assert!(!screen.contains("#0"), "{screen}");
+    }
+
+    #[test]
+    fn a_new_items_detail_says_it_is_being_created() {
+        let (p, all) = (project(), items());
+        let mut placeholder = all[0].clone();
+        placeholder.id = ItemId::new("local:1");
+        let state = DetailState::new(ItemId::new("local:1"));
+        let doc = build_doc(&placeholder, &p, &state, 60, &Theme::plain());
+        let screen = render_to_string(60, 12, |f| {
+            render_detail(f, f.area(), &doc, &state, &Theme::plain())
+        });
+        assert!(screen.contains("Creating on GitHub"), "{screen}");
+        assert!(!screen.contains("Loading"));
     }
 }

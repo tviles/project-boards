@@ -13,7 +13,8 @@ use crate::store::MemoryStore;
 use crate::store::cache::{cache_path, load_cache, save_cache};
 use crate::sync::scheduler::{PollConfig, PollKind, Scheduler};
 use crate::sync::{IncrementalMode, SyncEvent, SyncTask};
-use crate::ui::app::{App, Command, Mode, setup_message};
+use crate::ui::app::{App, Command, EditPurpose, Mode, setup_message};
+use crate::ui::editor::Edited;
 use crate::ui::keymap::Keymap;
 use crate::ui::picker::PickerState;
 use crate::ui::theme::Theme;
@@ -51,6 +52,11 @@ pub enum Input {
         generation: u64,
         event: SyncEvent,
     },
+    /// `$EDITOR` closed (`Effect::Editor`).
+    Edited {
+        purpose: EditPurpose,
+        edited: Edited,
+    },
 }
 
 /// One unit of network work for the shell to spawn on the Syncer.
@@ -77,6 +83,14 @@ pub enum SyncJob {
     },
     RepoProjects(RepoSlug),
     Projects(Option<RepoSlug>),
+    /// Lookups for the editors; they never touch the poll scheduler.
+    Candidates(RepoSlug),
+    Repos,
+    LookupRepo(RepoSlug),
+    Search {
+        query: String,
+        scope: Vec<RepoSlug>,
+    },
     /// Send one pending edit.
     Mutate {
         id: crate::ops::OpId,
@@ -96,6 +110,10 @@ impl SyncJob {
             Self::Detail { .. } => "Detail",
             Self::RepoProjects(_) => "RepoProjects",
             Self::Projects(_) => "Projects",
+            Self::Candidates(_) => "Candidates",
+            Self::Repos => "Repos",
+            Self::LookupRepo(_) => "LookupRepo",
+            Self::Search { .. } => "Search",
             Self::Mutate { .. } => "Mutate",
         }
     }
@@ -112,6 +130,12 @@ pub enum Effect {
     OpenUrl(String),
     /// Resolve the token again and call `start` (after Retry).
     ResolveToken,
+    /// Run `$EDITOR` on `initial` with the TUI suspended, then answer with `Input::Edited`.
+    /// Only ever produced by a key press (Decision 27).
+    Editor {
+        purpose: EditPurpose,
+        initial: String,
+    },
     Exit,
 }
 
@@ -178,6 +202,7 @@ impl Controller {
             Theme::from_env(|k| std::env::var(k).ok()),
         );
         app.utc_offset = options.utc_offset;
+        app.pane_repo = options.repo.clone();
         app.status.notes = options
             .warnings
             .iter()
@@ -409,6 +434,10 @@ impl Controller {
                     return Vec::new();
                 }
                 self.on_sync(event, now)
+            }
+            Input::Edited { purpose, edited } => {
+                let cmds = self.app.on_edited(purpose, edited);
+                self.commands(cmds, now)
             }
         }
     }
@@ -650,6 +679,14 @@ impl Controller {
                 Command::LoadDetail { item, before } => {
                     effects.push(self.spawn(SyncJob::Detail { item, before }))
                 }
+                Command::LoadCandidates(repo) => {
+                    effects.push(self.spawn(SyncJob::Candidates(repo)))
+                }
+                Command::LoadRepos => effects.push(self.spawn(SyncJob::Repos)),
+                Command::LookupRepo(slug) => effects.push(self.spawn(SyncJob::LookupRepo(slug))),
+                Command::Search { query, scope } => {
+                    effects.push(self.spawn(SyncJob::Search { query, scope }))
+                }
                 Command::OpenUrl(url) if is_web_link(&url) => effects.push(Effect::OpenUrl(url)),
                 Command::OpenUrl(_) => self.app.status.flash = Some(NOT_A_WEB_LINK.into()),
                 Command::Refresh => {
@@ -703,6 +740,9 @@ impl Controller {
                     effects.extend(self.show_picker(required));
                 }
                 Command::Retry => effects.push(Effect::ResolveToken),
+                Command::Edit { purpose, initial } => {
+                    effects.push(Effect::Editor { purpose, initial })
+                }
                 Command::Quit => effects.push(Effect::Exit),
             }
         }
@@ -1665,6 +1705,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn lookup_commands_become_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        let repo: RepoSlug = "acme/app".parse().unwrap();
+        let polling = c.scheduler.in_flight();
+        let effects = c.commands(
+            vec![
+                Command::LoadCandidates(repo.clone()),
+                Command::LoadRepos,
+                Command::LookupRepo(repo.clone()),
+                Command::Search {
+                    query: "crash".into(),
+                    scope: vec![repo.clone()],
+                },
+            ],
+            t0,
+        );
+        let jobs: Vec<&str> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Spawn { job, .. } => Some(job.kind()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(jobs, ["Candidates", "Repos", "LookupRepo", "Search"]);
+        assert_eq!(c.app.pane_repo, Some("tviles/app".parse().unwrap()));
+        assert_eq!(c.scheduler.in_flight(), polling, "lookups are not polls");
+    }
+
+    #[test]
+    fn a_stale_lookup_answer_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        c.app.need_repos();
+        let stale = c.generation().wrapping_add(1);
+        let effects = c.handle(
+            Input::Sync {
+                generation: stale,
+                event: SyncEvent::Repos(PushableRepos {
+                    repos: vec![],
+                    truncated: false,
+                }),
+            },
+            t0,
+        );
+        assert!(effects.is_empty());
+        assert!(matches!(c.app.repos, Some(crate::ui::app::Lookup::Loading)));
+    }
+
     fn submit(c: &mut Controller, op: Op, now: Instant) -> Vec<Effect> {
         let cmds = c.app.submit(OpKind::Move, op);
         c.commands(cmds, now)
@@ -1949,5 +2039,112 @@ mod tests {
             [1],
             "the new board writes at once"
         );
+    }
+
+    fn mutate_op(effects: &[Effect]) -> Option<&Op> {
+        effects.iter().find_map(|e| match e {
+            Effect::Spawn {
+                job: SyncJob::Mutate { op, .. },
+                ..
+            } => Some(op),
+            _ => None,
+        })
+    }
+
+    /// A new item is queued under its placeholder. Controller ruling E15: an issue GitHub
+    /// created but did not add is never sent again by the queue, even when the add was rate
+    /// limited; `R` sends only the add. Once created, edits to the real item go out at once.
+    #[test]
+    fn a_new_issue_is_created_once_and_its_real_item_takes_edits() {
+        use crate::ops::NewItem;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        let temp = ItemId::new("local:1");
+        let create = Op::Create {
+            temp: temp.clone(),
+            new: NewItem::Issue {
+                repo: crate::model::RepoRef {
+                    id: "R_1".into(),
+                    slug: "tviles/t".parse().unwrap(),
+                },
+                title: "New bug".into(),
+                body: String::new(),
+            },
+            presets: vec![],
+        };
+        let cmds = c.app.submit_new(create, true);
+        let effects = c.commands(cmds, t0);
+        assert_eq!(mutates(&effects), [1]);
+        let not_added = Confirmed::NotAdded {
+            issue: "I_new".into(),
+            error: GithubError::RateLimited {
+                retry_after_secs: 30,
+            },
+        };
+        assert!(mutates(&done(&mut c, 1, Ok(not_added), t0)).is_empty());
+        assert_eq!(c.app.status.write_pause, None, "not a rate-limit pause");
+        assert!(
+            mutates(&c.handle(Input::Tick, t0 + Duration::from_secs(60))).is_empty(),
+            "never sent again by itself"
+        );
+        assert_eq!(c.app.errors.len(), 1);
+        c.handle(Input::Key(key('E')), t0);
+        let effects = c.handle(Input::Key(key('R')), t0);
+        assert_eq!(mutates(&effects), [2]);
+        assert!(matches!(
+            mutate_op(&effects),
+            Some(Op::Create { new: NewItem::Existing { hit }, .. }) if hit.id == "I_new"
+        ));
+        let mut item = c.app.snapshot().unwrap().items[&temp].clone();
+        item.id = ItemId::new("PVTI_new");
+        done(
+            &mut c,
+            2,
+            Ok(Confirmed::Created {
+                temp,
+                item,
+                refused: vec![],
+            }),
+            t0,
+        );
+        assert_eq!(c.app.selected_item().unwrap().id.as_str(), "PVTI_new");
+        assert_eq!(
+            mutates(&submit(&mut c, set_status("PVTI_new", "o_done"), t0)),
+            [3]
+        );
+    }
+
+    #[test]
+    fn the_editor_runs_as_an_effect_and_its_text_comes_back_as_input() {
+        use crate::ui::app::EditPurpose;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        // `c` opens the comment form; its `Open in editor` button runs the editor.
+        assert!(c.handle(Input::Key(key('c')), t0).is_empty());
+        c.handle(Input::Key(code(KeyCode::Tab)), t0);
+        c.handle(Input::Key(code(KeyCode::Tab)), t0);
+        let effects = c.handle(Input::Key(code(KeyCode::Enter)), t0);
+        assert_eq!(
+            effects,
+            vec![Effect::Editor {
+                purpose: EditPurpose::Comment(ItemId::new("a")),
+                initial: String::new()
+            }]
+        );
+        let effects = c.handle(
+            Input::Edited {
+                purpose: EditPurpose::Comment(ItemId::new("a")),
+                edited: Some("LGTM".to_string()).into(),
+            },
+            t0,
+        );
+        assert!(
+            mutates(&effects).is_empty(),
+            "the text goes back into the form"
+        );
+        let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+        let effects = c.handle(Input::Key(alt_enter), t0);
+        assert_eq!(mutates(&effects), [1]);
     }
 }

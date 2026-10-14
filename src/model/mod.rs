@@ -8,6 +8,7 @@ pub mod ids;
 pub mod input;
 pub mod item;
 pub mod project;
+pub mod refs;
 pub mod sort;
 pub mod view;
 
@@ -19,5 +20,6 @@ pub use ids::*;
 pub use input::*;
 pub use item::*;
 pub use project::*;
+pub use refs::*;
 pub use sort::*;
 pub use view::*;

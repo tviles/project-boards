@@ -42,4 +42,42 @@ operation!(
     UpdateItemPosition,
     AddDraftIssue,
     DeleteItem,
+    AddAssignees,
+    RemoveAssignees,
+    AddLabels,
+    RemoveLabels,
+    UpdateIssueTitle,
+    UpdateIssueBody,
+    SetIssueMilestone,
+    UpdatePullRequestTitle,
+    UpdatePullRequestBody,
+    SetPullRequestMilestone,
+    UpdateDraftTitle,
+    UpdateDraftBody,
+    SetDraftAssignees,
+    AddComment,
+    CloseIssue,
+    ReopenIssue,
+    ClosePullRequest,
+    ReopenPullRequest,
+    AddItemById,
+    CreateIssue,
+    ConvertDraft,
+    ArchiveItem,
+    UnarchiveItem,
+    RepoCandidates,
+    PushableRepos,
+    RepoLookup,
+    SearchContent,
+    ContentByNumber,
 );
+
+/// The live suite's cleanup only: release builds do not contain this operation.
+#[cfg(feature = "live")]
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "graphql/schema.graphql",
+    query_path = "graphql/cleanup.graphql",
+    variables_derives = "Debug, Clone"
+)]
+pub struct DeleteIssue;

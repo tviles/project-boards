@@ -5,6 +5,7 @@ pub mod board;
 pub mod chrome;
 pub mod controller;
 pub mod detail;
+pub mod editor;
 pub mod keymap;
 pub mod labels;
 pub mod markdown;
@@ -17,6 +18,7 @@ pub mod runtime;
 pub mod search;
 pub mod table;
 pub mod text;
+pub mod textform;
 pub mod theme;
 
 #[cfg(test)]

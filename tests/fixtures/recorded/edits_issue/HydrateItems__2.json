@@ -1,0 +1,75 @@
+{
+  "data": {
+    "nodes": [
+      {
+        "__typename": "ProjectV2Item",
+        "content": {
+          "__typename": "Issue",
+          "assignees": {
+            "nodes": []
+          },
+          "closedAt": "2026-10-14T14:50:11Z",
+          "closedByPullRequestsReferences": {
+            "nodes": []
+          },
+          "createdAt": "2026-10-14T14:50:05Z",
+          "id": "I_kwDOU8uH6c8AAAABXLAQAA",
+          "issueType": null,
+          "labels": {
+            "nodes": []
+          },
+          "milestone": null,
+          "number": 28,
+          "parent": null,
+          "repository": {
+            "nameWithOwner": "tviles/project-boards-testbed"
+          },
+          "state": "CLOSED",
+          "stateReason": "NOT_PLANNED",
+          "subIssuesSummary": {
+            "completed": 0,
+            "total": 0
+          },
+          "title": "pb live: retitled",
+          "updatedAt": "2026-10-14T14:50:11Z",
+          "url": "https://github.com/tviles/project-boards-testbed/issues/28"
+        },
+        "fieldValues": {
+          "nodes": [
+            {
+              "__typename": "ProjectV2ItemFieldRepositoryValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr3U"
+              },
+              "repository": {
+                "nameWithOwner": "tviles/project-boards-testbed"
+              }
+            },
+            {
+              "__typename": "ProjectV2ItemFieldTextValue",
+              "field": {
+                "__typename": "ProjectV2Field",
+                "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
+              },
+              "text": "pb live: retitled"
+            },
+            {
+              "__typename": "ProjectV2ItemFieldSingleSelectValue",
+              "field": {
+                "__typename": "ProjectV2SingleSelectField",
+                "id": "PVTSSF_lAHOADq2Kc4Bl819zhknr3E"
+              },
+              "name": "Todo",
+              "optionId": "f75ad846"
+            }
+          ]
+        },
+        "id": "PVTI_lAHOADq2Kc4Bl819zhAvHTY",
+        "isArchived": false,
+        "type": "ISSUE",
+        "updatedAt": "2026-10-14T14:50:10Z"
+      }
+    ]
+  }
+}

@@ -148,6 +148,8 @@ pub fn project() -> Project {
             ),
             view("V_bugs", "Bugs", Layout::Table, "label:bug", &[], &[], &[]),
         ],
+        linked_repos: vec![],
+        issue_repos: vec![],
     }
 }
 
@@ -176,7 +178,10 @@ fn issue(id: &str, number: u32, title: &str, values: Vec<(FieldId, FieldValue)>)
         archived: false,
         updated_at: "2026-10-01T00:00:00Z".into(),
         values: values.into_iter().collect::<BTreeMap<_, _>>(),
-        content_fields: ContentFields::default(),
+        content_fields: ContentFields {
+            content_id: Some(format!("I_{id}")),
+            ..ContentFields::default()
+        },
     }
 }
 
@@ -214,12 +219,16 @@ pub fn items() -> Vec<Item> {
             state: ContentState::Open,
             is_draft: false,
         }],
+        content_id: Some("I_a".into()),
         ..ContentFields::default()
     };
+    fix_crash.content_fields.assignee_ids = [("tviles".to_string(), "U_tviles".to_string())].into();
+    fix_crash.content_fields.label_ids = [("bug".to_string(), "L_bug".to_string())].into();
     let mut draft = issue("d", 0, "", vec![select("F_status", "o_done", "Done")]);
     draft.content = ItemContent::Draft {
         title: "Draft idea".into(),
     };
+    draft.content_fields.content_id = Some("DI_d".into());
     vec![
         fix_crash,
         issue(

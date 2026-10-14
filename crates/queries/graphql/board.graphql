@@ -36,6 +36,7 @@ fragment ProjectSchemaFields on ProjectV2 {
       sortByFields(first: 5) { nodes { direction field { ...FieldRef } } }
     }
   }
+  repositories(first: 20) { nodes { id nameWithOwner viewerPermission hasIssuesEnabled } }
 }
 
 fragment ItemFields on ProjectV2Item {
@@ -48,23 +49,25 @@ fragment ItemFields on ProjectV2Item {
     __typename
     # Card fields: plain objects, no connection, so they add nothing to the cost.
     ... on Issue {
-      number title url state stateReason repository { nameWithOwner }
+      id number title url state stateReason repository { nameWithOwner }
       createdAt updatedAt closedAt
       issueType { name color }
       parent { number title state }
       subIssuesSummary { total completed }
-      labels(first: 20) { nodes { name color } }
-      assignees(first: 10) { nodes { login } }
+      milestone { id title }
+      labels(first: 20) { nodes { id name color } }
+      assignees(first: 10) { nodes { id login } }
       closedByPullRequestsReferences(first: 5, includeClosedPrs: true) { nodes { number state isDraft } }
     }
     ... on PullRequest {
-      number title url state isDraft repository { nameWithOwner }
+      id number title url state isDraft repository { nameWithOwner }
       createdAt updatedAt closedAt
-      labels(first: 20) { nodes { name color } }
-      assignees(first: 10) { nodes { login } }
+      milestone { id title }
+      labels(first: 20) { nodes { id name color } }
+      assignees(first: 10) { nodes { id login } }
       reviewRequests(first: 10) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { slug } } } }
     }
-    ... on DraftIssue { title }
+    ... on DraftIssue { id title assignees(first: 10) { nodes { id login } } }
   }
   fieldValues(first: 50) {
     nodes {
@@ -257,4 +260,150 @@ mutation AddDraftIssue($project: ID!, $title: String!, $body: String!) {
 
 mutation DeleteItem($project: ID!, $item: ID!) {
   deleteProjectV2Item(input: {projectId: $project, itemId: $item}) { deletedItemId }
+}
+
+# --- Mutations: issues, pull requests and drafts (0.3) -------------------------------------
+# Title, body and milestone each have their own operation, so setting one never sends null
+# for another (a null milestoneId clears the milestone).
+
+mutation AddAssignees($id: ID!, $users: [ID!]!) {
+  addAssigneesToAssignable(input: {assignableId: $id, assigneeIds: $users}) { clientMutationId }
+}
+
+mutation RemoveAssignees($id: ID!, $users: [ID!]!) {
+  removeAssigneesFromAssignable(input: {assignableId: $id, assigneeIds: $users}) { clientMutationId }
+}
+
+mutation AddLabels($id: ID!, $labels: [ID!]!) {
+  addLabelsToLabelable(input: {labelableId: $id, labelIds: $labels}) { clientMutationId }
+}
+
+mutation RemoveLabels($id: ID!, $labels: [ID!]!) {
+  removeLabelsFromLabelable(input: {labelableId: $id, labelIds: $labels}) { clientMutationId }
+}
+
+mutation UpdateIssueTitle($id: ID!, $title: String!) {
+  updateIssue(input: {id: $id, title: $title}) { issue { id } }
+}
+
+mutation UpdateIssueBody($id: ID!, $body: String!) {
+  updateIssue(input: {id: $id, body: $body}) { issue { id } }
+}
+
+mutation SetIssueMilestone($id: ID!, $milestone: ID) {
+  updateIssue(input: {id: $id, milestoneId: $milestone}) { issue { id } }
+}
+
+mutation UpdatePullRequestTitle($id: ID!, $title: String!) {
+  updatePullRequest(input: {pullRequestId: $id, title: $title}) { pullRequest { id } }
+}
+
+mutation UpdatePullRequestBody($id: ID!, $body: String!) {
+  updatePullRequest(input: {pullRequestId: $id, body: $body}) { pullRequest { id } }
+}
+
+mutation SetPullRequestMilestone($id: ID!, $milestone: ID) {
+  updatePullRequest(input: {pullRequestId: $id, milestoneId: $milestone}) { pullRequest { id } }
+}
+
+mutation UpdateDraftTitle($id: ID!, $title: String!) {
+  updateProjectV2DraftIssue(input: {draftIssueId: $id, title: $title}) { draftIssue { id } }
+}
+
+mutation UpdateDraftBody($id: ID!, $body: String!) {
+  updateProjectV2DraftIssue(input: {draftIssueId: $id, body: $body}) { draftIssue { id } }
+}
+
+mutation SetDraftAssignees($id: ID!, $users: [ID!]!) {
+  updateProjectV2DraftIssue(input: {draftIssueId: $id, assigneeIds: $users}) { draftIssue { id } }
+}
+
+mutation AddComment($subject: ID!, $body: String!) {
+  addComment(input: {subjectId: $subject, body: $body}) { clientMutationId }
+}
+
+mutation CloseIssue($id: ID!, $reason: IssueClosedStateReason!) {
+  closeIssue(input: {issueId: $id, stateReason: $reason}) { issue { id } }
+}
+
+mutation ReopenIssue($id: ID!) {
+  reopenIssue(input: {issueId: $id}) { issue { id } }
+}
+
+mutation ClosePullRequest($id: ID!) {
+  closePullRequest(input: {pullRequestId: $id}) { pullRequest { id } }
+}
+
+mutation ReopenPullRequest($id: ID!) {
+  reopenPullRequest(input: {pullRequestId: $id}) { pullRequest { id } }
+}
+
+# --- Mutations: project items (0.3) --------------------------------------------------------
+
+mutation AddItemById($project: ID!, $content: ID!) {
+  addProjectV2ItemById(input: {projectId: $project, contentId: $content}) { item { ...ItemFields } }
+}
+
+mutation CreateIssue($repo: ID!, $title: String!, $body: String!) {
+  createIssue(input: {repositoryId: $repo, title: $title, body: $body}) { issue { id } }
+}
+
+mutation ConvertDraft($item: ID!, $repo: ID!) {
+  convertProjectV2DraftIssueItemToIssue(input: {itemId: $item, repositoryId: $repo}) { item { ...ItemFields } }
+}
+
+mutation ArchiveItem($project: ID!, $item: ID!) {
+  archiveProjectV2Item(input: {projectId: $project, itemId: $item}) { item { id } }
+}
+
+mutation UnarchiveItem($project: ID!, $item: ID!) {
+  unarchiveProjectV2Item(input: {projectId: $project, itemId: $item}) { item { id } }
+}
+
+# --- Lookups for the editors (0.3) ---------------------------------------------------------
+# Cost per call (nodes requested / 100, rounded up, minimum 1): RepoCandidates 1+100+100+50 = 251 -> 3;
+# PushableRepos 1+1+100 = 102 -> 2 per page, at most 5 pages; RepoLookup 1; SearchContent 1+20 = 21 -> 1; ContentByNumber 1.
+
+query RepoCandidates($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    id
+    assignableUsers(first: 100) { nodes { id login } pageInfo { hasNextPage } }
+    labels(first: 100) { nodes { id name color } pageInfo { hasNextPage } }
+    milestones(first: 50, states: [OPEN], orderBy: {field: DUE_DATE, direction: ASC}) { nodes { id title } pageInfo { hasNextPage } }
+  }
+}
+
+query PushableRepos($after: String) {
+  viewer {
+    repositories(first: 100, after: $after, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER],
+                 ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER],
+                 isArchived: false, orderBy: {field: PUSHED_AT, direction: DESC}) {
+      nodes { id nameWithOwner viewerPermission hasIssuesEnabled }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+
+query RepoLookup($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) { id nameWithOwner viewerPermission hasIssuesEnabled }
+}
+
+query SearchContent($query: String!) {
+  search(query: $query, type: ISSUE, first: 20) {
+    nodes {
+      __typename
+      ... on Issue { id number title state repository { nameWithOwner } }
+      ... on PullRequest { id number title state repository { nameWithOwner } }
+    }
+  }
+}
+
+query ContentByNumber($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issueOrPullRequest(number: $number) {
+      __typename
+      ... on Issue { id number title state repository { nameWithOwner } }
+      ... on PullRequest { id number title state repository { nameWithOwner } }
+    }
+  }
 }

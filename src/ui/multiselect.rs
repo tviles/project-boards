@@ -30,6 +30,8 @@ pub struct MultiSelect<T> {
     pub selected: usize,
     pub loading: bool,
     pub error: Option<String>,
+    /// The candidates are only the first page of what the repository has.
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +67,7 @@ impl<T: Clone> MultiSelect<T> {
             selected: 0,
             loading: false,
             error: None,
+            truncated: false,
         }
     }
 
@@ -184,7 +187,7 @@ pub fn render_multiselect<T: Clone>(
     theme: &Theme,
 ) {
     let visible = m.visible();
-    let status = m.error.is_some() || m.loading || visible.is_empty();
+    let status = m.error.is_some() || m.loading || visible.is_empty() || m.truncated;
     // Input line, status line, the options, the hint line, and the border.
     let height = 3 + u16::from(status) + visible.len().min(15) as u16 + 1;
     let rect = centered(area, area.width.saturating_sub(4).min(64), height);
@@ -199,6 +202,11 @@ pub fn render_multiselect<T: Clone>(
         lines.push(Line::styled("Loading…", theme.dim()));
     } else if visible.is_empty() {
         lines.push(Line::styled("No matches", theme.dim()));
+    } else if m.truncated {
+        lines.push(Line::styled(
+            truncate_to_width("showing the first 100 — type to narrow", inner),
+            theme.dim(),
+        ));
     }
     let room = (rect.height as usize).saturating_sub(3 + lines.len());
     let start = m.selected.saturating_sub(room.saturating_sub(1));
@@ -332,6 +340,23 @@ mod tests {
             "{screen}"
         );
         assert!(screen.contains("space toggles"), "{screen}");
+    }
+
+    #[test]
+    fn truncated_candidates_show_a_dim_narrowing_hint() {
+        let mut m = MultiSelect::new("Labels", labels(), |_| false);
+        let draw = |m: &MultiSelect<&str>| {
+            render_to_string(60, 10, |f| {
+                render_multiselect(f, f.area(), m, &Theme::plain())
+            })
+        };
+        assert!(!draw(&m).contains("showing the first"));
+        m.truncated = true;
+        let screen = draw(&m);
+        assert!(
+            screen.contains("showing the first 100 — type to narrow"),
+            "{screen}"
+        );
     }
 
     #[test]

@@ -73,7 +73,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         render_picker(frame, area, p, &app.theme);
     }
     if app.mode == Mode::Popup {
-        draw_popup(frame, body, app);
+        if let Some(Popup::Text { form, .. }) = &mut app.popup {
+            crate::ui::textform::draw(frame, body, form, &app.theme);
+        } else {
+            draw_popup(frame, body, app);
+        }
     }
     if app.mode == Mode::ErrorLog {
         draw_error_log(frame, body, app);
@@ -139,9 +143,47 @@ fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
     let Some(popup) = &app.popup else { return };
     let theme = &app.theme;
     match popup {
+        Popup::NewKind { picker, .. } => render_list_picker(frame, area, picker, theme),
+        Popup::Search {
+            input,
+            searched,
+            hits,
+            selected,
+            loading,
+            error,
+            ..
+        } => {
+            let status = match (error, loading, searched) {
+                (Some(e), _, _) => e.clone(),
+                (None, true, _) => "Searching…".to_string(),
+                (None, false, Some(q)) if hits.is_empty() && q == input.trim() => {
+                    "Nothing found".to_string()
+                }
+                _ => "Enter searches (repo:owner/name widens it; a pasted URL works) · Enter again adds"
+                    .to_string(),
+            };
+            let rows: Vec<(String, String)> = hits
+                .iter()
+                .map(|h| {
+                    let kind = if h.pull { "PR" } else { "issue" };
+                    let detail = if app.on_board(h).is_some() {
+                        format!("{kind} · already on the board")
+                    } else {
+                        kind.to_string()
+                    };
+                    (format!("{}#{} {}", h.repo, h.number, h.title), detail)
+                })
+                .collect();
+            crate::ui::popup::render_search(frame, area, input, &status, &rows, *selected, theme)
+        }
+        Popup::Repo { picker, .. } => render_list_picker(frame, area, picker, theme),
         Popup::Actions { picker, .. } => render_list_picker(frame, area, picker, theme),
         Popup::Fields { picker, .. } => render_list_picker(frame, area, picker, theme),
         Popup::Value { picker, .. } => render_list_picker(frame, area, picker, theme),
+        Popup::Assignees { select, .. } => render_multiselect(frame, area, select, theme),
+        Popup::Labels { select, .. } => render_multiselect(frame, area, select, theme),
+        Popup::Milestone { picker, .. } => render_list_picker(frame, area, picker, theme),
+        Popup::CloseReason { picker, .. } => render_list_picker(frame, area, picker, theme),
         Popup::Options { select, .. } => render_multiselect(frame, area, select, theme),
         Popup::Line {
             kind,
@@ -157,6 +199,8 @@ fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
             };
             render_line_popup(frame, area, title, input, hint, error.as_deref(), theme)
         }
+        // Drawn by `draw`, which has the form mutably.
+        Popup::Text { .. } => {}
     }
 }
 
@@ -419,6 +463,9 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
                     truncate_to_width(flash, area.width as usize),
                     app.theme.accent(),
                 )
+            } else if matches!(app.popup, Some(Popup::Text { .. })) {
+                // Board keys type text here, and the form draws its own hint in its border.
+                Line::from("")
             } else if app.mode == Mode::ErrorLog {
                 Line::styled(error_log_hints(app, area.width as usize), app.theme.dim())
             } else if let Some(e) = &app.status.error {
@@ -441,25 +488,38 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
                 let clear = app
                     .extra_filter()
                     .and(app.keymap.keys_for(Action::ClearFilter).first().copied())
-                    .map(|k| format!(" · {} clear filter", k.label()))
-                    .unwrap_or_default();
+                    .map(|k| k.label());
                 if !app.errors.is_empty()
                     && let Some(k) = app.keymap.keys_for(Action::ErrorLog).first()
                 {
                     parts.push(format!("{} {} failed", k.label(), app.errors.len()));
                 }
-                parts.extend(app.edit_hints());
-                parts.push(format!("/ search · f filter{clear} · L layout · q quit"));
+                let edit = app.edit_hints().unwrap_or_default();
+                let mut general: Vec<String> = app.new_hint().into_iter().collect();
+                general.extend(["/ search".to_string(), "f filter".to_string()]);
+                if let Some(k) = clear {
+                    general.push(format!("{k} clear filter"));
+                }
+                general.extend(["L layout".to_string(), "q quit".to_string()]);
                 // The reminder outranks the hints: they are cut for it, but only when what
                 // is left of them is still worth showing.
+                let actions = app.actions_hint();
+                let kept = actions.as_ref().map_or(0, |a| display_width(a) + 3);
                 let reminder = (!marks.unmatched.is_empty()
                     && area.width as usize
                         >= display_width(crate::ui::marks::UNMATCHED_TEXT)
                             + display_width(" · ? help")
+                            + kept
                             + MIN_HINT_ROOM)
                     .then_some(crate::ui::marks::UNMATCHED_TEXT);
+                let hints = Hints {
+                    lead: &parts,
+                    edit: &edit,
+                    general: &general,
+                    actions,
+                };
                 Line::styled(
-                    status_line_with(&parts.join(" · "), reminder, area.width as usize),
+                    status_hints(&hints, reminder, area.width as usize),
                     app.theme.dim(),
                 )
             }
@@ -506,6 +566,62 @@ fn error_log_hints(app: &App, width: usize) -> String {
 /// The least room the hints keep when the unmatched reminder is shown.
 const MIN_HINT_ROOM: usize = 12;
 
+/// The pieces of the bottom hint line, in display order before `space actions · ? help`.
+struct Hints<'a> {
+    lead: &'a [String],
+    edit: &'a [String],
+    general: &'a [String],
+    actions: Option<String>,
+}
+
+/// The hint line with `space actions` and `? help` always kept (Decision E17): when short of
+/// room, the edit hints are dropped from the end first, then the general ones.
+fn status_hints(h: &Hints, keep: Option<&str>, width: usize) -> String {
+    let keep_all = match (&h.actions, keep) {
+        (Some(a), Some(k)) => Some(format!("{a} · {k}")),
+        (Some(a), None) => Some(a.clone()),
+        (None, k) => k.map(str::to_string),
+    };
+    let tail = keep_all.as_deref();
+    let tail_width = display_width(&tail.map(|t| format!(" · {t}")).unwrap_or_default())
+        + display_width(" · ? help");
+    let room = width.saturating_sub(tail_width);
+    let join = |e: usize, g: usize| {
+        h.lead
+            .iter()
+            .chain(&h.edit[..e])
+            .chain(&h.general[..g])
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    let fits = |text: &str| !text.is_empty() && display_width(text) <= room;
+    let mut left = None;
+    // With an item selected its edit keys matter more than the board-wide keys, so the
+    // general hints go first (from the end), then the edit hints (E17).
+    for g in (0..=h.general.len()).rev() {
+        let t = join(h.edit.len(), g);
+        if fits(&t) {
+            left = Some(t);
+            break;
+        }
+    }
+    if left.is_none() {
+        for e in (0..h.edit.len()).rev() {
+            let t = join(e, 0);
+            if fits(&t) {
+                left = Some(t);
+                break;
+            }
+        }
+    }
+    status_line_with(
+        &left.unwrap_or_else(|| join(0, h.general.len())),
+        tail,
+        width,
+    )
+}
+
 /// The bottom hint line: `left` cut with `…` to fit, then `? help`, which always shows
 /// (pre-flight ruling 4).
 pub fn status_line(left: &str, width: usize) -> String {
@@ -533,7 +649,23 @@ fn status_line_with(left: &str, keep: Option<&str>, width: usize) -> String {
         };
         return truncate_to_width(bare, width);
     }
-    format!("{}{tail}", truncate_to_width(left, room))
+    format!("{}{tail}", fit_entries(left, room))
+}
+
+/// `left` cut to `room`: whole ` · ` entries are dropped from the end, never cut through; only
+/// when not even the first fits is it cut with `…`.
+fn fit_entries(left: &str, room: usize) -> String {
+    if display_width(left) <= room {
+        return left.to_string();
+    }
+    let entries: Vec<&str> = left.split(" · ").collect();
+    for n in (1..entries.len()).rev() {
+        let joined = entries[..n].join(" · ");
+        if display_width(&joined) <= room {
+            return joined;
+        }
+    }
+    truncate_to_width(left, room)
 }
 
 /// The help overlay: every action with its keys. When the pane is too short for all of them
@@ -989,6 +1121,48 @@ mod tests {
     }
 
     #[test]
+    fn the_comment_form_draws_over_the_board() {
+        let mut a = app();
+        a.handle_key(key('c'));
+        a.handle_key(key('h'));
+        a.handle_key(key('i'));
+        let screen = render_to_string(100, 30, |f| draw(f, &mut a));
+        for want in [
+            "Comment on #1",
+            "Body",
+            "hi",
+            "[ Comment ]",
+            "[ Open in editor ]",
+            "[ Cancel ]",
+            "Tab next · Alt+Enter submit · Esc cancel",
+        ] {
+            assert!(screen.contains(want), "missing {want:?} in\n{screen}");
+        }
+    }
+
+    #[test]
+    fn the_status_line_hides_board_keys_while_the_text_form_is_open() {
+        let mut a = app();
+        let marks = ItemMarks::default();
+        let status = |a: &App| {
+            render_to_string(200, 3, |f| draw_status(f, f.area(), a, &marks))
+                .lines()
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        assert!(status(&a).contains("q quit"), "{}", status(&a));
+        a.handle_key(key('c'));
+        assert!(matches!(a.popup, Some(Popup::Text { .. })));
+        let line = status(&a);
+        for board_key in ["q quit", "/ search", "f filter", "L layout"] {
+            assert!(!line.contains(board_key), "{line}");
+        }
+        a.handle_key(code(KeyCode::Esc));
+        assert!(status(&a).contains("q quit"), "{}", status(&a));
+    }
+
+    #[test]
     fn a_popover_opened_from_the_detail_draws_over_it() {
         let mut a = app();
         a.handle_key(code(KeyCode::Enter));
@@ -1010,12 +1184,18 @@ mod tests {
         let last = screen.lines().last().unwrap();
         assert!(last.ends_with(" · ? help"), "{last}");
         assert!(
-            last.contains('…'),
-            "the edit hints are cut, not ? help: {last}"
+            !last.contains('…') && last.ends_with("space actions · ? help"),
+            "whole hints are dropped, none is cut through: {last}"
         );
         assert!(display_width(last) <= 50);
         assert_eq!(status_line("", 10), "? help");
         assert_eq!(status_line("e field", 40), "e field · ? help");
+        assert_eq!(
+            status_line("a assignees · t labels · e field", 26),
+            "a assignees · ? help",
+            "entries drop from the end, whole"
+        );
+        assert_eq!(status_line("a long single entry", 14), "a lo… · ? help");
     }
 
     #[test]
@@ -1051,9 +1231,50 @@ mod tests {
     fn help_that_fits_closes_on_any_key() {
         let mut a = app();
         a.handle_key(key('?'));
-        render_to_string(100, 40, |f| draw(f, &mut a));
+        render_to_string(100, 50, |f| draw(f, &mut a));
         a.handle_key(key('j'));
         assert_eq!(a.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn space_actions_and_help_outlast_every_other_hint() {
+        let lead: Vec<String> = vec![];
+        let edit: Vec<String> = ["a assignees", "c comment", "< > move", "J K reorder"]
+            .map(String::from)
+            .to_vec();
+        let general = vec!["/ search · q quit".to_string()];
+        let line = |w| {
+            status_hints(
+                &Hints {
+                    lead: &lead,
+                    edit: &edit,
+                    general: &general,
+                    actions: Some("space actions".into()),
+                },
+                None,
+                w,
+            )
+        };
+        assert_eq!(
+            line(200),
+            "a assignees · c comment · < > move · J K reorder · / search · q quit · space actions · ? help"
+        );
+        // Board-wide hints go first: every edit hint outlasts them.
+        let l = line(88);
+        assert!(l.contains("J K reorder") && !l.contains("/ search"), "{l}");
+        assert!(l.ends_with("space actions · ? help"), "{l}");
+        // Then edit hints go from the end.
+        let l = line(45);
+        assert!(
+            l.starts_with("a assignees") && !l.contains("J K reorder"),
+            "{l}"
+        );
+        assert!(!l.contains("/ search"), "{l}");
+        for w in [30, 22] {
+            let l = line(w);
+            assert!(l.ends_with("space actions · ? help"), "{w}: {l}");
+            assert!(display_width(&l) <= w, "{w}: {l}");
+        }
     }
 
     #[test]
@@ -1084,6 +1305,7 @@ mod tests {
         marks.unmatched.insert(crate::model::ItemId::new("a"));
         let min = display_width(crate::ui::marks::UNMATCHED_TEXT)
             + display_width(" · ? help")
+            + a.actions_hint().map_or(0, |h| display_width(&h) + 3)
             + MIN_HINT_ROOM;
         for (width, shown) in [(min - 1, false), (min, true)] {
             let screen = render_to_string(width as u16, 3, |f| {

@@ -5,7 +5,7 @@ use crate::github::GithubError;
 use crate::github::client::{FULL_PAGE, POLL_PAGE};
 use crate::model::*;
 use crate::store::ViewList;
-use crate::sync::{IncrementalMode, SyncEvent, SyncTask, incremental_query};
+use crate::sync::{IncrementalMode, SyncEvent, SyncTask, incremental_query, search_query};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -58,7 +58,7 @@ impl Syncer {
     }
 
     fn fail(&self, task: SyncTask, error: GithubError) {
-        tracing::warn!(?task, %error, "sync task failed");
+        tracing::warn!(task = task.kind(), %error, "sync task failed");
         self.send(SyncEvent::Failed { task, error });
     }
 
@@ -285,6 +285,52 @@ impl Syncer {
             Err(e) => self.fail(SyncTask::Projects, e),
         }
     }
+
+    pub async fn candidates(&self, repo: &RepoSlug) {
+        match self.gh.repo_candidates(repo).await {
+            Ok(candidates) => self.send(SyncEvent::Candidates {
+                repo: repo.clone(),
+                candidates,
+            }),
+            Err(e) => self.fail(SyncTask::Candidates(repo.clone()), e),
+        }
+    }
+
+    pub async fn repos(&self) {
+        match self.gh.pushable_repos().await {
+            Ok(list) => self.send(SyncEvent::Repos(list)),
+            Err(e) => self.fail(SyncTask::Repos, e),
+        }
+    }
+
+    pub async fn lookup_repo(&self, slug: &RepoSlug) {
+        match self.gh.lookup_repo(slug).await {
+            Ok(repo) => self.send(SyncEvent::RepoFound {
+                slug: slug.clone(),
+                repo,
+            }),
+            Err(e) => self.fail(SyncTask::RepoLookup(slug.clone()), e),
+        }
+    }
+
+    /// A pasted issue or pull request URL is looked up directly; anything else is searched.
+    pub async fn search(&self, query: &str, scope: &[RepoSlug]) {
+        let result = match parse_content_url(query) {
+            Some((repo, number)) => self
+                .gh
+                .content_by_number(&repo, number)
+                .await
+                .map(|hit| hit.into_iter().collect()),
+            None => self.gh.search_content(&search_query(query, scope)).await,
+        };
+        match result {
+            Ok(hits) => self.send(SyncEvent::SearchResults {
+                query: query.to_string(),
+                hits,
+            }),
+            Err(e) => self.fail(SyncTask::Search(query.to_string()), e),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +376,63 @@ mod tests {
             out.push(e);
         }
         out
+    }
+
+    #[tokio::test]
+    async fn lookups_report_their_results() {
+        let (t, s, mut rx) = setup(2000);
+        t.push(
+            "RepoCandidates",
+            json!({"repository": {"id": "R_1", "assignableUsers": {"nodes": []},
+            "labels": {"nodes": []}, "milestones": {"nodes": []}}}),
+        );
+        t.push(
+            "ContentByNumber",
+            json!({"repository": {"issueOrPullRequest": {"__typename": "Issue", "id": "I_1",
+            "number": 12, "title": "Crash", "state": "OPEN", "repository": {"nameWithOwner": "acme/app"}}}}),
+        );
+        t.push_error("PushableRepos", GithubError::Network("offline".into()));
+        let repo: RepoSlug = "acme/app".parse().unwrap();
+        s.candidates(&repo).await;
+        s.search("https://github.com/acme/app/issues/12", &[]).await;
+        s.repos().await;
+        let events = drain(&mut rx);
+        assert!(matches!(&events[0], SyncEvent::Candidates { repo: r, .. } if r == &repo));
+        assert!(
+            matches!(&events[1], SyncEvent::SearchResults { hits, .. } if hits.len() == 1 && hits[0].number == 12)
+        );
+        assert!(matches!(
+            &events[2],
+            SyncEvent::Failed {
+                task: SyncTask::Repos,
+                ..
+            }
+        ));
+        assert_eq!(
+            t.requests()[1].operation_name,
+            "ContentByNumber",
+            "a URL is looked up, not searched"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_search_sends_the_scoped_query_and_a_failure_names_no_text() {
+        let (t, s, mut rx) = setup(2000);
+        t.push("SearchContent", json!({"search": {"nodes": []}}));
+        t.push_error("SearchContent", GithubError::Network("offline".into()));
+        let scope: Vec<RepoSlug> = vec!["acme/app".parse().unwrap()];
+        s.search("crash org:other", &scope).await;
+        s.search("second", &scope).await;
+        let events = drain(&mut rx);
+        assert!(matches!(&events[0], SyncEvent::SearchResults { hits, .. } if hits.is_empty()));
+        assert!(
+            matches!(&events[1], SyncEvent::Failed { task: SyncTask::Search(q), .. } if q == "second")
+        );
+        let sent = serde_json::to_string(&t.requests()[0].variables).unwrap();
+        assert!(
+            sent.contains(r#"crash \"org:other\" repo:acme/app is:open"#),
+            "{sent}"
+        );
     }
 
     #[tokio::test]

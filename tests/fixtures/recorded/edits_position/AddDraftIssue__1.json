@@ -4,7 +4,11 @@
       "projectItem": {
         "content": {
           "__typename": "DraftIssue",
-          "title": "pb live: edits_position 1791909728023515000"
+          "assignees": {
+            "nodes": []
+          },
+          "id": "DI_lAHOADq2Kc4Bl819zgLX32U",
+          "title": "pb live: edits_position 1791989377229263000"
         },
         "fieldValues": {
           "nodes": [
@@ -14,14 +18,14 @@
                 "__typename": "ProjectV2Field",
                 "id": "PVTF_lAHOADq2Kc4Bl819zhknr28"
               },
-              "text": "pb live: edits_position 1791909728023515000"
+              "text": "pb live: edits_position 1791989377229263000"
             }
           ]
         },
-        "id": "PVTI_lAHOADq2Kc4Bl819zhAfVkQ",
+        "id": "PVTI_lAHOADq2Kc4Bl819zhAvG1Q",
         "isArchived": false,
         "type": "DRAFT_ISSUE",
-        "updatedAt": "2026-10-13T16:42:09Z"
+        "updatedAt": "2026-10-14T14:49:37Z"
       }
     }
   }

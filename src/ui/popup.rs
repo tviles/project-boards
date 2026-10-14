@@ -43,6 +43,8 @@ pub struct ListPicker<T> {
     pub loading: bool,
     /// Why the choices could not load.
     pub error: Option<String>,
+    /// A dim note under the input, such as a list that is only partly shown.
+    pub note: Option<String>,
     /// Typing filters the list. Off in menus, whose letters are keys.
     pub typing: bool,
 }
@@ -120,6 +122,7 @@ impl<T: Clone> ListPicker<T> {
             selected: 0,
             loading: false,
             error: None,
+            note: None,
             typing: true,
         }
     }
@@ -241,8 +244,8 @@ where
 {
     let visible = picker.visible();
     // A status line (error, loading) shares the box with the choices that are already there.
-    let status =
-        u16::from(picker.error.is_some() || picker.loading) * u16::from(!visible.is_empty());
+    let status = u16::from(picker.error.is_some() || picker.note.is_some() || picker.loading)
+        * u16::from(!visible.is_empty());
     let rows = visible.len().clamp(1, 15) as u16 + u16::from(picker.typing) + status;
     let rect = centered(area, area.width.saturating_sub(4).min(64), rows + 2);
     let inner = rect.width.saturating_sub(2) as usize;
@@ -258,6 +261,8 @@ where
     }
     if let Some(e) = &picker.error {
         lines.push(Line::styled(truncate_to_width(e, inner), theme.error()));
+    } else if let Some(n) = &picker.note {
+        lines.push(Line::styled(truncate_to_width(n, inner), theme.dim()));
     } else if picker.loading {
         lines.push(Line::styled("Loading…", theme.dim()));
     } else if visible.is_empty() {
@@ -311,6 +316,50 @@ pub fn render_line_popup(
         },
     ];
     boxed(frame, rect, title, lines);
+}
+
+/// The "add existing" popover: the query, a status line, and the hits as (label, detail).
+pub fn render_search(
+    frame: &mut Frame,
+    area: Rect,
+    input: &str,
+    status: &str,
+    rows: &[(String, String)],
+    selected: usize,
+    theme: &Theme,
+) {
+    let rect = centered(
+        area,
+        area.width.saturating_sub(4).min(80),
+        rows.len().clamp(1, 12) as u16 + 4,
+    );
+    let inner = rect.width.saturating_sub(2) as usize;
+    let mut lines = vec![
+        Line::styled(
+            format!("> {}", tail_to_width(input, inner.saturating_sub(2))),
+            theme.accent(),
+        ),
+        Line::styled(truncate_to_width(status, inner), theme.dim()),
+    ];
+    // Keep the highlighted row on screen when there are more hits than rows.
+    let first = selected.saturating_sub(11);
+    for (i, (label, detail)) in rows.iter().enumerate().skip(first).take(12) {
+        let style = if i == selected {
+            theme.selected()
+        } else {
+            ratatui::style::Style::default()
+        };
+        let label_w = inner.saturating_sub(display_width(detail) + 1);
+        lines.push(Line::from(vec![
+            Span::styled(
+                pad_to_width(&truncate_to_width(label, label_w), label_w),
+                style,
+            ),
+            Span::styled(" ", style),
+            Span::styled(detail.clone(), style.patch(theme.dim())),
+        ]));
+    }
+    boxed(frame, rect, "Add an existing issue or pull request", lines);
 }
 
 #[cfg(test)]
@@ -554,5 +603,24 @@ mod tests {
             });
             insta::assert_snapshot!(format!("list_picker_{w}"), screen);
         }
+    }
+
+    #[test]
+    fn the_search_list_scrolls_with_the_selection_and_truncates_long_rows() {
+        let rows: Vec<(String, String)> = (0..20)
+            .map(|i| {
+                (
+                    format!("r/x#{i} {}", "long title ".repeat(12)),
+                    "issue".into(),
+                )
+            })
+            .collect();
+        let theme = Theme::plain();
+        let out = render_to_string(60, 20, |f| {
+            render_search(f, f.area(), "q", "status", &rows, 15, &theme)
+        });
+        assert!(out.contains("r/x#15 "), "the selected row is shown:\n{out}");
+        assert!(!out.contains("r/x#0 "), "rows above the window scroll away");
+        assert!(out.lines().all(|l| display_width(l) <= 60), "{out}");
     }
 }

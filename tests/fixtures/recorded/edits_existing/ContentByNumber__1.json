@@ -1,0 +1,16 @@
+{
+  "data": {
+    "repository": {
+      "issueOrPullRequest": {
+        "__typename": "Issue",
+        "id": "I_kwDOU8uH6c8AAAABXK-5OA",
+        "number": 24,
+        "repository": {
+          "nameWithOwner": "tviles/project-boards-testbed"
+        },
+        "state": "OPEN",
+        "title": "pb live: edits_existing 1791989322116885000"
+      }
+    }
+  }
+}

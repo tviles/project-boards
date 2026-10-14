@@ -1,0 +1,60 @@
+{
+  "data": {
+    "repository": {
+      "assignableUsers": {
+        "nodes": [
+          {
+            "id": "MDQ6VXNlcjM4NDc3MjE=",
+            "login": "tviles"
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false
+        }
+      },
+      "id": "R_kgDOU8uH6Q",
+      "labels": {
+        "nodes": [
+          {
+            "color": "d73a4a",
+            "id": "LA_kwDOU8uH6c8AAAAC7Cx_Ag",
+            "name": "bug"
+          },
+          {
+            "color": "0075ca",
+            "id": "LA_kwDOU8uH6c8AAAAC7Cx_6g",
+            "name": "docs"
+          },
+          {
+            "color": "a2eeef",
+            "id": "LA_kwDOU8uH6c8AAAAC7Cx_ag",
+            "name": "enhancement"
+          },
+          {
+            "color": "7057ff",
+            "id": "LA_kwDOU8uH6c8AAAAC9DJG0w",
+            "name": "good first issue"
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false
+        }
+      },
+      "milestones": {
+        "nodes": [
+          {
+            "id": "MI_kwDOU8uH6c4BF6RX",
+            "title": "v1"
+          },
+          {
+            "id": "MI_kwDOU8uH6c4BG3Di",
+            "title": "v2"
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false
+        }
+      }
+    }
+  }
+}

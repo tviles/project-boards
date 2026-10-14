@@ -157,6 +157,7 @@ pub struct IssueType {
 /// What an issue or pull request says about itself beyond its title and state: the values
 /// of the built-in fields GitHub derives from content. Empty for drafts and other content.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ContentFields {
     /// RFC 3339
     pub created_at: Option<String>,
@@ -169,6 +170,13 @@ pub struct ContentFields {
     pub parent: Option<ParentIssue>,
     pub sub_issues: Option<SubIssuesSummary>,
     pub linked_prs: Vec<LinkedPullRequest>,
+    /// The node id of the Issue, PullRequest or DraftIssue, which content edits go to.
+    pub content_id: Option<String>,
+    /// Assignee login -> user node id, to remove one.
+    pub assignee_ids: BTreeMap<String, String>,
+    /// Label name -> label node id, to remove one.
+    pub label_ids: BTreeMap<String, String>,
+    pub milestone: Option<crate::model::MilestoneRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -226,6 +234,18 @@ impl Item {
         }
     }
 
+    /// Where content edits go: the issue, pull request or draft behind the item.
+    pub fn content_id(&self) -> Option<crate::model::ContentId> {
+        use crate::model::ContentId;
+        let id = self.content_fields.content_id.clone()?;
+        match &self.content {
+            ItemContent::Issue { .. } => Some(ContentId::Issue(id)),
+            ItemContent::PullRequest { .. } => Some(ContentId::PullRequest(id)),
+            ItemContent::Draft { .. } => Some(ContentId::Draft(id)),
+            ItemContent::Redacted | ItemContent::Unknown { .. } => None,
+        }
+    }
+
     pub fn reference(&self) -> Option<&ContentRef> {
         match &self.content {
             ItemContent::Issue { reference, .. } | ItemContent::PullRequest { reference, .. } => {
@@ -235,8 +255,24 @@ impl Item {
         }
     }
 
+    /// The issue or pull request number; `None` for a new item GitHub has not numbered yet.
     pub fn number(&self) -> Option<u32> {
-        self.reference().map(|r| r.number)
+        self.reference().map(|r| r.number).filter(|n| *n > 0)
+    }
+
+    /// A new item GitHub has not created yet (id `local:N`).
+    pub fn is_placeholder(&self) -> bool {
+        crate::model::caps::is_placeholder(&self.id)
+    }
+
+    /// What names the item in headings: `#12`, `new` while GitHub is still creating it, or
+    /// `Draft`.
+    pub fn ref_label(&self) -> String {
+        match self.number() {
+            Some(n) => format!("#{n}"),
+            None if self.is_placeholder() => "new".into(),
+            None => "Draft".into(),
+        }
     }
 
     pub fn url(&self) -> Option<&str> {
@@ -266,6 +302,7 @@ impl Item {
                 .sub_issues
                 .filter(|s| s.total > 0)
                 .map(FieldValue::SubIssues),
+            FieldKind::Title => Some(FieldValue::Text(self.title().to_string())),
             FieldKind::IssueType => c.issue_type.clone().map(FieldValue::IssueType),
             FieldKind::LinkedPullRequests if !c.linked_prs.is_empty() => {
                 Some(FieldValue::PullRequests(c.linked_prs.clone()))
@@ -322,7 +359,10 @@ pub(crate) mod tests {
             archived: false,
             updated_at: "2026-10-01T00:00:00Z".into(),
             values: BTreeMap::new(),
-            content_fields: ContentFields::default(),
+            content_fields: ContentFields {
+                content_id: Some(format!("I_{id}")),
+                ..ContentFields::default()
+            },
         }
     }
 
@@ -379,6 +419,7 @@ pub(crate) mod tests {
                 state: ContentState::Merged,
                 is_draft: false,
             }],
+            ..ContentFields::default()
         };
         let value = |item: &Item, kind| item.field_value(&field(kind)).map(|v| v.display());
         assert_eq!(
@@ -440,5 +481,28 @@ pub(crate) mod tests {
         );
         assert_eq!(item.assignees(), ["tviles"]);
         assert_eq!(item.label_names(), ["bug"]);
+    }
+
+    #[test]
+    fn ref_label_is_number_new_or_draft() {
+        let mut item = issue("I", 5, "x");
+        assert_eq!(item.ref_label(), "#5");
+        item.id = ItemId::new("local:2");
+        assert!(item.is_placeholder());
+        assert_eq!(item.ref_label(), "#5");
+        let mut fresh = issue("local:3", 0, "x");
+        fresh.id = ItemId::new("local:3");
+        assert_eq!(fresh.ref_label(), "new");
+        fresh.content = ItemContent::Draft { title: "d".into() };
+        fresh.id = ItemId::new("PVTI_1");
+        assert_eq!(fresh.ref_label(), "Draft");
+    }
+
+    #[test]
+    fn number_zero_is_no_number() {
+        let mut item = issue("I", 0, "x");
+        assert_eq!(item.number(), None);
+        item = issue("I", 5, "x");
+        assert_eq!(item.number(), Some(5));
     }
 }

@@ -6,10 +6,15 @@ use crate::sync::INCREMENTAL_MODE;
 use crate::sync::syncer::Syncer;
 use crate::ui::chrome;
 use crate::ui::controller::{Controller, Effect, Input, PaneOptions, SyncJob};
+use crate::ui::editor::Edited;
+use anyhow::Context;
+use crossterm::cursor::Show;
 use crossterm::event::{DisableFocusChange, EnableFocusChange, Event, EventStream};
 use crossterm::execute;
-use futures::StreamExt;
+use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
+use futures::{FutureExt, StreamExt};
 use ratatui::DefaultTerminal;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
@@ -23,6 +28,7 @@ pub async fn run(options: PaneOptions) -> anyhow::Result<()> {
     let signals = Signals {
         term: signal(SignalKind::terminate())?,
         hup: signal(SignalKind::hangup())?,
+        int: signal(SignalKind::interrupt())?,
     };
     let mut terminal = ratatui::try_init()?;
     keep_terminal_on_worker_panics(std::thread::current().id());
@@ -83,9 +89,13 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
         .unwrap_or("non-string panic payload")
 }
 
+/// SIGTERM, SIGHUP and SIGINT take the clean exit path. In raw mode `Ctrl+C` is a key, so
+/// SIGINT only comes from outside, or from `Ctrl+C` while `$EDITOR` has the terminal: that one
+/// is the editor's and is dropped (`ended_while_editing`).
 struct Signals {
     term: tokio::signal::unix::Signal,
     hup: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
 }
 
 type Tagged = (u64, crate::sync::SyncEvent);
@@ -99,9 +109,15 @@ async fn event_loop(
     let settings = StartSettings {
         max_items: options.config.max_items,
         gh_user: options.config.gh_user.clone(),
+        state_dir: options.state_dir.clone(),
     };
     // Events arrive tagged with the generation of the job that produced them.
     let (tx, rx) = mpsc::unbounded_channel::<Tagged>();
+    // Files of editor sessions a crashed or killed pane left behind hold the user's text.
+    let edits = crate::ui::editor::edit_dir(&options.state_dir);
+    if let Err(e) = crate::ui::editor::clear_stale(&edits, crate::ui::editor::pid_alive) {
+        tracing::warn!(error = %e, "could not clear old editor files");
+    }
     let mut controller = Controller::new(options, herdr, INCREMENTAL_MODE, Instant::now());
     let result = drive(terminal, &mut controller, tx, rx, &settings, signals).await;
     // Every exit path (Exit effect, SIGTERM/SIGHUP, a failed draw) unregisters the pane.
@@ -122,6 +138,8 @@ async fn drive(
     let mut pending = start(controller, &mut runner, &tx, settings);
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    // Ticks missed while the editor ran are skipped, not fired in a burst.
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         while !pending.is_empty() {
             for effect in std::mem::take(&mut pending) {
@@ -141,6 +159,19 @@ async fn drive(
                     Effect::OpenUrl(url) => open_url(&url),
                     Effect::ResolveToken => {
                         pending.extend(start(controller, &mut runner, &tx, settings))
+                    }
+                    Effect::Editor { purpose, initial } => {
+                        let dir = crate::ui::editor::edit_dir(&settings.state_dir);
+                        let edited = suspended_edit(terminal, &initial, &dir)?;
+                        if ended_while_editing(&mut signals) {
+                            // Asked to stop meanwhile: stop now, sending nothing.
+                            return Ok(());
+                        }
+                        // A fresh reader: nothing typed into the editor reaches the board
+                        // (pre-flight ruling 10; `suspended_edit` drained what was buffered).
+                        events = EventStream::new();
+                        let input = Input::Edited { purpose, edited };
+                        pending.extend(controller.handle(input, Instant::now()));
                     }
                     Effect::Exit => return Ok(()),
                 }
@@ -163,6 +194,7 @@ async fn drive(
             _ = tick.tick() => controller.handle(Input::Tick, now),
             _ = signals.term.recv() => return Ok(()),
             _ = signals.hup.recv() => return Ok(()),
+            _ = signals.int.recv() => return Ok(()),
         };
     }
 }
@@ -176,10 +208,71 @@ struct Runner {
     max_items: usize,
 }
 
-/// What `start` needs from the config to build the GitHub client and sync jobs.
+/// What `start` needs from the config to build the GitHub client and sync jobs, and where
+/// the editor's file goes.
 struct StartSettings {
     max_items: usize,
     gh_user: Option<String>,
+    state_dir: PathBuf,
+}
+
+/// Runs `$EDITOR` on `initial` with the TUI suspended, then restores it. `Err` when the
+/// terminal could not be taken back (the board then exits through the usual clean path).
+///
+/// The editor only ever starts from a key press, which the loop handles before it reads input
+/// again, so no reader waits on the terminal meanwhile (Decision 27). Afterwards whatever
+/// input is still buffered is dropped, never replayed on the board (pre-flight ruling 10).
+fn suspended_edit(
+    terminal: &mut DefaultTerminal,
+    initial: &str,
+    dir: &Path,
+) -> anyhow::Result<Edited> {
+    let _ = execute!(std::io::stdout(), DisableFocusChange, Show);
+    ratatui::restore();
+    let command = crate::ui::editor::editor_command(|k| std::env::var(k).ok());
+    let edited =
+        tokio::task::block_in_place(|| crate::ui::editor::edit_text(initial, &command, dir));
+    // Not `ratatui::try_init`: it would install another panic hook over
+    // `keep_terminal_on_worker_panics`, one that restores the terminal on any thread's panic.
+    enable_raw_mode().context("taking the terminal back after the editor")?;
+    execute!(std::io::stdout(), EnterAlternateScreen)
+        .context("taking the terminal back after the editor")?;
+    let _ = execute!(std::io::stdout(), EnableFocusChange);
+    // The editor drew over the screen: the next draw repaints all of it.
+    terminal.clear()?;
+    drain_input();
+    if let Edited::Error(reason) = &edited {
+        // The program and the OS error only, never the text or the file's contents.
+        tracing::warn!(%reason, "the editor did not run");
+    }
+    Ok(edited)
+}
+
+/// After the editor: drops a SIGINT from `Ctrl+C` in its terminal, and says whether SIGTERM
+/// or SIGHUP arrived meanwhile (the board then exits without sending the edit).
+fn ended_while_editing(signals: &mut Signals) -> bool {
+    fired(&mut signals.int);
+    let term = fired(&mut signals.term);
+    let hup = fired(&mut signals.hup);
+    term || hup
+}
+
+/// Whether `signal` arrived since it was last received, taking every pending delivery.
+fn fired(signal: &mut tokio::signal::unix::Signal) -> bool {
+    let mut any = false;
+    while let Some(Some(())) = signal.recv().now_or_never() {
+        any = true;
+    }
+    any
+}
+
+/// Drops every input event already waiting: keys typed while the editor ran, or right after.
+fn drain_input() {
+    while crossterm::event::poll(Duration::ZERO).unwrap_or(false) {
+        if crossterm::event::read().is_err() {
+            break;
+        }
+    }
 }
 
 /// Resolves the token, builds the GitHub client, and starts the controller.
@@ -242,15 +335,32 @@ impl Runner {
                 SyncJob::Detail { item, before } => s.detail(&item, before).await,
                 SyncJob::RepoProjects(repo) => s.repo_projects(&repo).await,
                 SyncJob::Projects(repo) => s.projects(repo.as_ref()).await,
+                SyncJob::Candidates(repo) => s.candidates(&repo).await,
+                SyncJob::Repos => s.repos().await,
+                SyncJob::LookupRepo(slug) => s.lookup_repo(&slug).await,
+                SyncJob::Search { query, scope } => s.search(&query, &scope).await,
                 SyncJob::Mutate { id, project, op } => s.mutate(id, &project, &op).await,
             }
         });
     }
 }
 
-/// The `OpDone` that answers a Mutate job nobody could run (no token yet).
+/// The event that answers a job nobody could run (no token yet): `OpDone` for an edit, which
+/// would otherwise stay "sending", and `Failed` for a lookup, which would otherwise stay
+/// "loading" for good.
 fn unanswered_edit(job: &SyncJob) -> Option<crate::sync::SyncEvent> {
+    use crate::sync::{SyncEvent, SyncTask};
+    let failed = |task| {
+        Some(SyncEvent::Failed {
+            task,
+            error: crate::github::GithubError::NoToken,
+        })
+    };
     match job {
+        SyncJob::Candidates(repo) => failed(SyncTask::Candidates(repo.clone())),
+        SyncJob::Repos => failed(SyncTask::Repos),
+        SyncJob::LookupRepo(slug) => failed(SyncTask::RepoLookup(slug.clone())),
+        SyncJob::Search { query, .. } => failed(SyncTask::Search(query.clone())),
         SyncJob::Mutate { id, .. } => Some(crate::sync::SyncEvent::OpDone {
             id: *id,
             result: Err(crate::github::GithubError::NoToken),
@@ -287,6 +397,43 @@ mod tests {
     use crate::ops::Op;
     use crate::sync::SyncEvent;
 
+    /// A signal that arrived while the editor ran is seen afterwards, once. Tested with the
+    /// user signals in place of SIGTERM, SIGHUP and SIGINT, so the test process is safe.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stop_signal_during_the_editor_is_seen_and_an_interrupt_is_dropped() {
+        let mut signals = Signals {
+            term: signal(SignalKind::user_defined1()).unwrap(),
+            hup: signal(SignalKind::user_defined2()).unwrap(),
+            int: signal(SignalKind::alarm()).unwrap(),
+        };
+        assert!(!ended_while_editing(&mut signals));
+        let raise = |name: &str| {
+            let pid = std::process::id().to_string();
+            let ok = std::process::Command::new("kill")
+                .args(["-s", name, &pid])
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "kill -s {name}");
+        };
+        let settle = || tokio::time::sleep(Duration::from_millis(200));
+        raise("ALRM");
+        settle().await;
+        assert!(!ended_while_editing(&mut signals), "an interrupt only");
+        assert!(!fired(&mut signals.int), "and it was taken");
+        raise("USR2");
+        let mut seen = false;
+        for _ in 0..50 {
+            settle().await;
+            if ended_while_editing(&mut signals) {
+                seen = true;
+                break;
+            }
+        }
+        assert!(seen, "the hangup was seen");
+        assert!(!ended_while_editing(&mut signals), "once");
+    }
+
     #[test]
     fn only_a_panic_on_the_ui_thread_restores_the_terminal() {
         let ui = std::thread::current().id();
@@ -322,5 +469,12 @@ mod tests {
             })
         ));
         assert!(unanswered_edit(&SyncJob::Projects(None)).is_none());
+        assert!(matches!(
+            unanswered_edit(&SyncJob::Repos),
+            Some(crate::sync::SyncEvent::Failed {
+                task: crate::sync::SyncTask::Repos,
+                ..
+            })
+        ));
     }
 }

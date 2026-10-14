@@ -34,3 +34,23 @@ Setup: `cargo build --release && herdr plugin link .`, keybinding for `tviles.pr
 - [ ] A board you can only read shows `read-only` in the header; `>` says "This board is read-only for you".
 - [ ] With a token lacking the `project` scope, the header shows `read-only: token lacks the project scope` (`read-only (no scope)` when narrow).
 - [ ] `doctor` says "can edit boards and issues" with a token that has `project` and `repo`.
+
+## Editing (0.3)
+
+- [ ] In `$EDITOR` (`c`, then `Open in editor`), type `q`, `j`, `x`, `X`, `>` and arrow keys, then save and quit: back on the board nothing quit, moved, closed or changed filters (no keystroke typed in the editor reached the board), and the whole screen is redrawn.
+- [ ] With `VISUAL='code -w'`, `c`, `Open in editor`, then `Ctrl+C` in the pane: the form says "The editor exited with an error; nothing was sent", keeps its text, and the board stays open.
+- [ ] With the editor open from the `c` form, `kill <pane pid>` from another pane, then quit the editor: the board exits and no comment is sent.
+- [ ] `a` on an issue lists testbed assignees with yours checked; toggling and Enter changes it on github.com; `Esc` closes it (or goes back to the field menu when opened from `e`).
+- [ ] `t`, type `good`, Space, Enter adds "good first issue"; on a draft `t` says "Drafts have no labels — convert to issue first (`C`)".
+- [ ] `e` → Milestone sets v2 and "No milestone" clears it.
+- [ ] `Space` → Edit title opens the form with the title; `Enter` saves and retitles; saving it unchanged says "Title unchanged" in the form.
+- [ ] `c` opens the "Comment on #n" form; typing `q`, `j`, `e` types letters; `Alt+Enter` adds a comment that shows in the detail; submitting it empty says "Empty comment; nothing was sent" in the form.
+- [ ] `Open in editor` in a form (a comment, and a new draft with a title and body) opens `$EDITOR` on the form's text; save and quit: the edited text is back in the form and nothing was sent until `Alt+Enter`.
+- [ ] `Esc` in a form you typed in asks "Discard what you typed? (y/n)"; `n` returns with the text intact, `y` closes and sends nothing; `Esc` in an untouched form closes at once.
+- [ ] `X` on an issue offers completed / not planned; on the sample pull request it asks y/n; `X` again reopens.
+- [ ] `A` archives (the item dims, ⊘); `Space` → Show archived items lists it; `A` unarchives.
+- [ ] `Space` → Remove from project asks first; the issue stays in the repository.
+- [ ] On "Board", `n` in "In Progress" → New draft opens the form; Title and Body then `Alt+Enter` create a draft in that column and lane, selected.
+- [ ] `n` → New issue offers this pane's repository first, then opens the "New issue in owner/name" form; the issue appears on github.com in the project; `Esc` in the repository picker returns to the New item menu.
+- [ ] `n` → Add existing finds an issue by text and by pasted URL; one already on the board is selected instead.
+- [ ] `C` on a draft converts it to an issue in the chosen repository.

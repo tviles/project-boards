@@ -113,6 +113,8 @@ pub(crate) mod tests {
             viewer_can_update: true,
             fields: vec![],
             views: vec![],
+            linked_repos: vec![],
+            issue_repos: vec![],
         }
     }
 

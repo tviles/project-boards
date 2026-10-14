@@ -188,7 +188,7 @@ An edit can make an item stop matching the view's filter, for example moving a c
 
 - **View filter:** GitHub filter syntax, for example `status:Todo assignee:@me -label:bug`, passed to `items(query:)` so results match the web. Changing it refetches the view's ID list.
 - **Session filter (`f`):** a filter typed in herdr is ANDed onto the view's GitHub filter for this session only; it is never saved to GitHub. `x` clears it. A view's ID list fetched with a session filter is left out of the disk cache.
-- **Archived items:** hidden by default, as on the web. "Show archived" in the action menu adds `is:archived` to the view filter, which is where items are unarchived.
+- **Archived items:** hidden by default, as on the web. "Show archived items" in the action menu adds `is:archived` to the session filter (`f`), so `x` clears it too; that view is where items are unarchived. "Hide archived items" takes it out again.
 - **Quick search (`/`):** an instant, client-side match on title, number, assignee and label over the items in the current view. It never touches the network.
 
 ### Polling
@@ -238,9 +238,9 @@ Every operation is offered only when the capability matrix (section 4) allows it
 ### Adding and creating items
 
 - **Repository picker** for a new issue: the focused pane's repository first, then the project's linked repositories, then any repository the user can push to, searched as they type.
-- **Add existing** searches open issues and pull requests in the linked repositories and the pane's repository by default. Typing `repo:owner/name` widens the search.
+- **Add existing** searches open issues and pull requests in the linked repositories and the pane's repository by default. Typing `repo:owner/name` widens the search. With neither a pane repository nor a linked one, nothing is searched until `repo:owner/name` is typed (a pasted issue or pull request URL still works).
 - **Where a new item lands:** pressing `n` in a board column or swimlane pre-sets that column's and swimlane's field values (for example Status = In Progress). In table layout, the item lands with no field values, at the bottom.
-- The new item is selected and briefly highlighted.
+- The new item is selected.
 
 ### Bulk edits
 
@@ -285,7 +285,7 @@ No default uses a Ctrl chord, so herdr's prefix (`ctrl+b`) and any Ctrl bindings
 
 A key whose operation the selected item does not allow shows a one-line reason, for example "Drafts have no labels — convert to issue first (`C`)".
 
-Edit keys act on the highlighted item in the table and the board, and on the open item in the item detail, with the same popovers and editors. The bottom line lists the edit keys the selected item allows, for example `a assignees · t labels · e field · X close`. In popovers with text entry (pickers, the assignee and label checklists, inputs, search) every printable key is text; arrows move the list, `Enter` applies, `Esc` cancels, and in a checklist `Space` toggles. The `Space` action menu has no text entry: `j`/`k` and arrows move, `Enter` runs the entry, the key shown beside an entry runs it directly, `Esc` closes. The bottom line always ends with `? help`; the edit keys before it are cut with `…` when the pane is narrow. The help overlay scrolls with `j`/`k` or the arrows when the pane is too short for it.
+Edit keys act on the highlighted item in the table and the board, and on the open item in the item detail, with the same popovers and editors. The bottom line lists the edit keys the selected item allows, for example `a assignees · t labels · e field · X close`. In popovers with text entry (pickers, the assignee and label checklists, inputs, search) and in the text form (titles, bodies, comments), every printable key is text; arrows move the list, `Enter` applies, `Esc` cancels, and in a checklist `Space` toggles. The `Space` action menu has no text entry: `j`/`k` and arrows move, `Enter` runs the entry, the key shown beside an entry runs it directly, `Esc` closes. The bottom line always ends with `? help`; the edit keys before it are cut with `…` when the pane is narrow. The help overlay scrolls with `j`/`k` or the arrows when the pane is too short for it.
 
 Mouse: click selects, the wheel scrolls, and dragging a card to another column moves it.
 
@@ -303,7 +303,10 @@ Mouse: click selects, the wheel scrolls, and dragging a card to another column m
 - Fuzzy pickers for single values, multi-select pickers for labels and assignees. Candidate labels, assignable users and milestones come from the item's own repository, are loaded when first needed, and are cached.
 - Date input accepts ISO dates (`2026-10-03`), offsets (`+3d`) and weekday names (`fri`).
 - The iteration picker shows the current and upcoming iterations first.
-- Titles, bodies and comments open in `$EDITOR`. The TUI suspends while the editor runs and resumes afterwards.
+- Titles, bodies, comments and new items are typed into a text form, a centred popup like the others. A new issue or draft has a `Title` line and a `Body`, then `[ Create ]` `[ Open in editor ]` `[ Cancel ]`; a comment has a `Body` and `[ Comment ]` `[ Open in editor ]` `[ Cancel ]`; editing a body shows it prefilled with `[ Save ]` `[ Open in editor ]` `[ Cancel ]`; editing a title shows it prefilled with `[ Save ]` `[ Cancel ]`. The heading names the action and the item: `New issue in owner/name`, `New draft`, `Comment on #12`, `Edit body of #12`, `Edit title of #12` (a draft says `Draft`).
+- Form keys: `Tab` / `Shift+Tab` move through the fields, then the buttons, and wrap. `Enter` in `Title` moves to `Body` (in a title-only form it saves); `Enter` in `Body` is a new line; `Enter` on a button runs it; `Alt+Enter` submits from anywhere. Every other key is text, so `q`, `j` and `e` type letters. `Esc` closes the form when nothing was typed, and otherwise asks "Discard what you typed? (y/n)": `y` closes, any other key returns to the form. `Ctrl+C` still quits at once; unsent text is dropped.
+- Submitting checks the text as before: an empty title creates nothing, an unchanged title or body and an empty comment send nothing; the reason shows in the form, which keeps what was typed. A submit that sends closes the form.
+- `Open in editor` runs `$VISUAL` or `$EDITOR` on the form's text (a new item as its title, a blank line and its body). The TUI suspends while the editor runs and resumes afterwards; what the editor saved goes back into the form, never straight to GitHub, and is submitted from there. An editor that fails, or saves text that isn't UTF-8, says so in the form, which keeps its text (or takes the text with the unreadable bytes replaced).
 
 ### Confirmation
 
@@ -313,9 +316,8 @@ Removing an item from the project, closing an issue or pull request, saving a vi
 
 - Single-select options use their GitHub colours (GRAY, BLUE, GREEN, YELLOW, ORANGE, RED, PINK, PURPLE) mapped to the terminal's 16 ANSI colours, so the user's terminal theme applies.
 - Colour is never the only signal: option names are always shown.
-- `NO_COLOR` switches to plain text.
 - Labels are pills in their GitHub colour: exact on terminals with `COLORTERM=truecolor`, otherwise the nearest of 256, with black or white text, whichever reads better. Field values on cards are pills on a subtle background.
-- `NO_COLOR` shows label and field names as plain text.
+- `NO_COLOR` switches to plain text: label and field names show without colour.
 
 ## 7. Error handling and edge cases
 
@@ -390,7 +392,7 @@ idle_after_secs = 300             # idle fallback when focus events are unavaila
 full_refresh_mins = 10
 max_items = 2000
 placement = "tab"                 # tab | overlay | split | zoomed
-gh_user = "my-login"              # gh account whose token to use (gh auth token --user); default: the active account
+gh_user = "my-login"              # gh account whose token to use (gh auth token --user), used when GH_TOKEN and GITHUB_TOKEN are not set; default: the active account
 
 [keys]
 # overrides, for example:

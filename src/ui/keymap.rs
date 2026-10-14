@@ -29,7 +29,14 @@ pub enum Action {
     MoveNextColumn,
     ReorderUp,
     ReorderDown,
+    Assignees,
+    Labels,
     EditField,
+    Comment,
+    CloseReopen,
+    Archive,
+    Convert,
+    New,
     ActionMenu,
     ErrorLog,
     Retry,
@@ -44,7 +51,13 @@ impl Action {
         match self {
             Action::MovePrevColumn | Action::MoveNextColumn => &[OpKind::Move],
             Action::ReorderUp | Action::ReorderDown => &[OpKind::Reorder],
+            Action::Assignees => &[OpKind::Assignees],
+            Action::Labels => &[OpKind::Labels],
             Action::EditField => &[OpKind::SetField],
+            Action::Comment => &[OpKind::Comment],
+            Action::CloseReopen => &[OpKind::Close, OpKind::Reopen],
+            Action::Archive => &[OpKind::Archive, OpKind::Unarchive],
+            Action::Convert => &[OpKind::Convert],
             _ => &[],
         }
     }
@@ -57,7 +70,7 @@ impl Action {
             .find(|a| a.kinds().contains(&kind))
     }
 
-    pub const ALL: [Action; 30] = [
+    pub const ALL: [Action; 37] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -84,7 +97,14 @@ impl Action {
         Action::MoveNextColumn,
         Action::ReorderUp,
         Action::ReorderDown,
+        Action::Assignees,
+        Action::Labels,
         Action::EditField,
+        Action::Comment,
+        Action::CloseReopen,
+        Action::Archive,
+        Action::Convert,
+        Action::New,
         Action::ActionMenu,
         Action::ErrorLog,
         Action::Retry,
@@ -119,7 +139,14 @@ impl Action {
             Action::MoveNextColumn => "move_next_column",
             Action::ReorderUp => "reorder_up",
             Action::ReorderDown => "reorder_down",
+            Action::Assignees => "assignees",
+            Action::Labels => "labels",
             Action::EditField => "edit_field",
+            Action::Comment => "comment",
+            Action::CloseReopen => "close_reopen",
+            Action::Archive => "archive",
+            Action::Convert => "convert",
+            Action::New => "new",
             Action::ActionMenu => "action_menu",
             Action::ErrorLog => "error_log",
             Action::Retry => "retry",
@@ -154,7 +181,14 @@ impl Action {
             Action::MoveNextColumn => "move the item to the next column",
             Action::ReorderUp => "move the item up (reorder)",
             Action::ReorderDown => "move the item down (reorder)",
+            Action::Assignees => "assign people to the item",
+            Action::Labels => "set the item's labels",
             Action::EditField => "edit a field of the item",
+            Action::Comment => "comment on the item (opens a form)",
+            Action::CloseReopen => "close or reopen the issue or pull request",
+            Action::Archive => "archive or unarchive the item",
+            Action::Convert => "convert the draft to an issue",
+            Action::New => "new issue, draft, or existing item",
             Action::ActionMenu => "actions: every operation the item allows",
             Action::ErrorLog => "error log: failed edits",
             Action::Retry => "error log: retry the selected edit",
@@ -289,7 +323,14 @@ const DEFAULTS: &[(&str, Action)] = &[
     (">", Action::MoveNextColumn),
     ("K", Action::ReorderUp),
     ("J", Action::ReorderDown),
+    ("a", Action::Assignees),
+    ("t", Action::Labels),
     ("e", Action::EditField),
+    ("c", Action::Comment),
+    ("X", Action::CloseReopen),
+    ("A", Action::Archive),
+    ("C", Action::Convert),
+    ("n", Action::New),
     ("space", Action::ActionMenu),
     ("E", Action::ErrorLog),
     ("R", Action::Retry),
@@ -402,7 +443,7 @@ mod tests {
     fn overrides_replace_defaults_and_report_problems() {
         let mut o = BTreeMap::new();
         o.insert("next_view".to_string(), "]".to_string());
-        o.insert("clear_filter".to_string(), "X".to_string());
+        o.insert("clear_filter".to_string(), "Z".to_string());
         o.insert("teleport".to_string(), "t".to_string());
         o.insert("quit".to_string(), "ctrl+".to_string());
         let (km, warnings) = Keymap::with_overrides(&o);
@@ -412,7 +453,7 @@ mod tests {
         );
         assert_eq!(km.action(&ev(KeyCode::Tab, KeyModifiers::NONE)), None);
         assert_eq!(
-            km.action(&ev(KeyCode::Char('X'), KeyModifiers::NONE)),
+            km.action(&ev(KeyCode::Char('Z'), KeyModifiers::NONE)),
             Some(Action::ClearFilter)
         );
         assert_eq!(km.action(&ev(KeyCode::Char('x'), KeyModifiers::NONE)), None);
@@ -500,6 +541,19 @@ mod tests {
             km.action(&ev(KeyCode::Char('e'), KeyModifiers::NONE)),
             Some(Action::EditField)
         );
-        assert_eq!(Action::ALL.len(), 30);
+        assert_eq!(Action::ALL.len(), 37);
+        assert_eq!(
+            km.action(&ev(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Some(Action::Assignees)
+        );
+        assert_eq!(
+            km.action(&ev(KeyCode::Char('t'), KeyModifiers::NONE)),
+            Some(Action::Labels)
+        );
+        assert_eq!(
+            km.action(&ev(KeyCode::Char('c'), KeyModifiers::NONE)),
+            Some(Action::Comment)
+        );
+        assert_eq!(Action::for_kind(OpKind::Comment), Some(Action::Comment));
     }
 }

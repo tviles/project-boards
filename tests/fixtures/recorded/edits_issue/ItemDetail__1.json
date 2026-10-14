@@ -1,0 +1,36 @@
+{
+  "data": {
+    "node": {
+      "__typename": "ProjectV2Item",
+      "content": {
+        "__typename": "Issue",
+        "body": "New body",
+        "closedByPullRequestsReferences": {
+          "nodes": []
+        },
+        "comments": {
+          "nodes": [
+            {
+              "author": {
+                "__typename": "User",
+                "login": "tviles"
+              },
+              "body": "A live comment",
+              "createdAt": "2026-10-14T14:50:09Z"
+            }
+          ],
+          "pageInfo": {
+            "hasPreviousPage": false,
+            "startCursor": "Y3Vyc29yOnYyOpHPAAAAAW_UaiE="
+          },
+          "totalCount": 1
+        },
+        "issueType": null,
+        "parent": null,
+        "subIssues": {
+          "nodes": []
+        }
+      }
+    }
+  }
+}

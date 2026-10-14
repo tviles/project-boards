@@ -76,7 +76,8 @@ pub trait Store: Send {
     fn begin(&mut self, op: Op) -> OpId;
     fn pending(&self) -> &[Pending];
     /// GitHub applied edit `id`: it leaves the pending list and enters the confirmed board.
-    /// Returns `(placeholder, real)` when the edit created an item (Part B).
+    /// Returns `(placeholder, real)` when the edit created an item, which stays on the
+    /// board through polls that do not list it yet for `RECENT_WINDOW`.
     fn settle_ok(&mut self, id: OpId, confirmed: Confirmed) -> Option<(ItemId, ItemId)>;
     /// Edit `id` failed: it leaves the pending list and the view is rebuilt without it.
     fn settle_failed(&mut self, id: OpId) -> Option<Op>;
@@ -86,6 +87,10 @@ pub trait Store: Send {
 #[derive(Debug, Clone)]
 enum Recent {
     Op(Op),
+    /// An item this app created: polls may not list it yet.
+    Item(Box<Item>),
+    /// The issue a converted draft became: replaces the item while polls still list the draft.
+    Converted(Box<Item>),
 }
 
 pub struct MemoryStore {
@@ -141,6 +146,18 @@ impl MemoryStore {
         for (_, recent) in &self.recent {
             match recent {
                 Recent::Op(op) => op.apply(c),
+                // Only while polls lack it; once listed, the poll's copy wins.
+                Recent::Item(item) => {
+                    if !c.items.contains_key(&item.id) {
+                        c.upsert_items(vec![(**item).clone()]);
+                    }
+                }
+                // A poll that dropped the item meanwhile wins, as in `settle_ok`.
+                Recent::Converted(item) => {
+                    if c.items.contains_key(&item.id) {
+                        c.upsert_items(vec![(**item).clone()]);
+                    }
+                }
             }
         }
     }
@@ -200,18 +217,40 @@ impl Store for MemoryStore {
     fn settle_ok(&mut self, id: OpId, confirmed: Confirmed) -> Option<(ItemId, ItemId)> {
         let pos = self.pending.iter().position(|p| p.id == id)?;
         let Pending { op, .. } = self.pending.remove(pos);
-        if let Some(c) = self.confirmed.as_mut() {
-            // A poll that removed the item meanwhile wins over the server's copy.
-            if let Confirmed::Item(item) = confirmed
-                && c.items.contains_key(&item.id)
-            {
-                c.upsert_items(vec![item]);
+        let now = (self.clock)();
+        let renamed = match confirmed {
+            Confirmed::Created { temp, item, .. } => {
+                if let Some(c) = self.confirmed.as_mut() {
+                    c.upsert_items(vec![item.clone()]);
+                }
+                let real = item.id.clone();
+                self.recent.push((now, Recent::Item(Box::new(item))));
+                Some((temp, real))
             }
-            op.apply(c);
-        }
-        self.recent.push(((self.clock)(), Recent::Op(op)));
+            // Nothing joined the board; the App logs it as a failure.
+            Confirmed::NotAdded { .. } => None,
+            other => {
+                if let Some(c) = self.confirmed.as_mut() {
+                    // A poll that removed the item meanwhile wins over the server's copy.
+                    if let Confirmed::Item(item) = &other
+                        && c.items.contains_key(&item.id)
+                    {
+                        c.upsert_items(vec![item.clone()]);
+                    }
+                    op.apply(c);
+                }
+                // `Convert` replays nothing: keep the returned issue instead.
+                match (&op, other) {
+                    (Op::Convert { .. }, Confirmed::Item(item)) => {
+                        self.recent.push((now, Recent::Converted(Box::new(item))));
+                    }
+                    _ => self.recent.push((now, Recent::Op(op))),
+                }
+                None
+            }
+        };
         self.rebuild();
-        None
+        renamed
     }
 
     fn settle_failed(&mut self, id: OpId) -> Option<Op> {
@@ -422,6 +461,72 @@ mod tests {
         assert!(!s.snapshot().unwrap().items.contains_key(&ItemId::new("a")));
     }
 
+    /// `Convert` replays nothing, so a stale poll inside the window that still lists the
+    /// draft must not turn the converted item back into one.
+    #[test]
+    fn a_converted_item_stays_an_issue_through_stale_polls_for_the_window() {
+        use crate::model::ItemContent;
+        let (mut s, now) = layered();
+        let draft = ItemId::new("d");
+        let stale_draft = s.confirmed().unwrap().items[&draft].clone();
+        assert!(matches!(stale_draft.content, ItemContent::Draft { .. }));
+        let mut converted = issue("d", 7, "Converted");
+        converted.values = stale_draft.values.clone();
+        let id = s.begin(Op::Convert {
+            item: draft.clone(),
+            repo: crate::model::RepoRef {
+                id: "R_1".into(),
+                slug: "acme/app".parse().unwrap(),
+            },
+        });
+        s.settle_ok(id, Confirmed::Item(converted));
+        let is_issue = |s: &MemoryStore| {
+            matches!(
+                s.snapshot().unwrap().items[&draft].content,
+                ItemContent::Issue { .. }
+            )
+        };
+        assert!(is_issue(&s), "settled: the issue");
+        s.apply(StoreUpdate::UpsertItems(vec![stale_draft.clone()]));
+        assert!(is_issue(&s), "a stale poll lists the draft again");
+        *now.lock().unwrap() += RECENT_WINDOW - Duration::from_secs(1);
+        s.apply(StoreUpdate::UpsertItems(vec![stale_draft.clone()]));
+        assert!(is_issue(&s), "still inside the window");
+        *now.lock().unwrap() += Duration::from_secs(1);
+        s.apply(StoreUpdate::UpsertItems(vec![stale_draft]));
+        assert!(!is_issue(&s), "after the window the poll wins");
+    }
+
+    /// Ruling E11 (deferred T36 test): the converted issue kept for the window only replaces
+    /// the item while polls list it; a poll that removed it wins.
+    #[test]
+    fn a_converted_item_does_not_bring_back_one_a_poll_removed() {
+        let (mut s, _) = layered();
+        let draft = ItemId::new("d");
+        let mut converted = issue("d", 7, "Converted");
+        converted.values = s.confirmed().unwrap().items[&draft].values.clone();
+        let id = s.begin(Op::Convert {
+            item: draft.clone(),
+            repo: crate::model::RepoRef {
+                id: "R_1".into(),
+                slug: "acme/app".parse().unwrap(),
+            },
+        });
+        s.settle_ok(id, Confirmed::Item(converted));
+        assert!(s.snapshot().unwrap().items.contains_key(&draft));
+        let rest: Vec<_> = crate::ui::fixtures::items()
+            .into_iter()
+            .filter(|i| i.id != draft)
+            .collect();
+        s.apply(StoreUpdate::ReplaceItems(rest));
+        assert!(!s.confirmed().unwrap().items.contains_key(&draft));
+        s.apply(StoreUpdate::UpsertItems(vec![stale_a()]));
+        assert!(
+            !s.snapshot().unwrap().items.contains_key(&draft),
+            "a later poll inside the window does not resurrect it"
+        );
+    }
+
     #[test]
     fn the_snapshot_equals_the_confirmed_board_when_nothing_is_pending() {
         let (mut s, _) = layered();
@@ -490,5 +595,119 @@ mod tests {
             .map(|i| i.as_str())
             .collect();
         assert_eq!(ids, ["b", "c", "a"]);
+    }
+
+    #[test]
+    fn a_created_item_replaces_its_placeholder_and_survives_a_stale_full_load() {
+        let (mut s, now) = layered();
+        let temp = ItemId::new("local:1");
+        let id = s.begin(Op::Create {
+            temp: temp.clone(),
+            new: crate::ops::NewItem::Draft {
+                title: "Idea".into(),
+                body: String::new(),
+            },
+            presets: vec![],
+        });
+        assert!(s.snapshot().unwrap().items.contains_key(&temp));
+        let mut created = stale_a();
+        created.id = ItemId::new("PVTI_new");
+        let renamed = s.settle_ok(
+            id,
+            Confirmed::Created {
+                temp: temp.clone(),
+                item: created.clone(),
+                refused: vec![],
+            },
+        );
+        assert_eq!(renamed, Some((temp.clone(), ItemId::new("PVTI_new"))));
+        let snap = s.snapshot().unwrap();
+        assert!(!snap.items.contains_key(&temp) && snap.items.contains_key(&created.id));
+        s.apply(StoreUpdate::ReplaceItems(crate::ui::fixtures::items()));
+        assert!(
+            s.confirmed().unwrap().items.contains_key(&created.id),
+            "the index has not caught up yet"
+        );
+        *now.lock().unwrap() += RECENT_WINDOW + Duration::from_secs(1);
+        s.apply(StoreUpdate::ReplaceItems(crate::ui::fixtures::items()));
+        assert!(
+            !s.confirmed().unwrap().items.contains_key(&created.id),
+            "after the window GitHub decides"
+        );
+    }
+
+    #[test]
+    fn a_removed_item_stays_removed_through_a_stale_poll() {
+        let (mut s, _) = layered();
+        let id = s.begin(Op::Remove {
+            item: ItemId::new("a"),
+        });
+        s.settle_ok(id, Confirmed::Applied);
+        s.apply(StoreUpdate::UpsertItems(vec![stale_a()]));
+        assert!(!s.confirmed().unwrap().items.contains_key(&ItemId::new("a")));
+    }
+
+    /// The poll's copy of a created item wins once the index has it; a later edit to the
+    /// created item still replays after the stored copy.
+    #[test]
+    fn a_polled_created_item_wins_and_later_edits_replay_on_it() {
+        let (mut s, _) = layered();
+        let temp = ItemId::new("local:1");
+        let id = s.begin(Op::Create {
+            temp: temp.clone(),
+            new: crate::ops::NewItem::Draft {
+                title: "Idea".into(),
+                body: String::new(),
+            },
+            presets: vec![],
+        });
+        let mut created = stale_a();
+        created.id = ItemId::new("PVTI_new");
+        s.settle_ok(
+            id,
+            Confirmed::Created {
+                temp,
+                item: created.clone(),
+                refused: vec![],
+            },
+        );
+        let archive = s.begin(Op::Archive {
+            item: created.id.clone(),
+        });
+        s.settle_ok(archive, Confirmed::Applied);
+        let mut polled = created.clone();
+        polled.updated_at = "2026-10-13T00:00:00Z".into();
+        s.apply(StoreUpdate::UpsertItems(vec![polled]));
+        let item = &s.confirmed().unwrap().items[&created.id];
+        assert_eq!(item.updated_at, "2026-10-13T00:00:00Z", "the poll's copy");
+        assert!(item.archived, "the confirmed archive still replays");
+        s.apply(StoreUpdate::ReplaceItems(crate::ui::fixtures::items()));
+        assert!(
+            s.confirmed().unwrap().items[&created.id].archived,
+            "re-added from the stored copy, then archived again"
+        );
+    }
+
+    /// Controller ruling E15: nothing joins the board, and the edit leaves the pending list.
+    #[test]
+    fn an_issue_created_but_not_added_settles_with_nothing_on_the_board() {
+        let (mut s, _) = layered();
+        let before = s.confirmed().cloned();
+        let id = s.begin(Op::Create {
+            temp: ItemId::new("local:1"),
+            new: crate::ops::NewItem::Draft {
+                title: "Idea".into(),
+                body: String::new(),
+            },
+            presets: vec![],
+        });
+        let not_added = Confirmed::NotAdded {
+            issue: "I_new".into(),
+            error: crate::github::GithubError::Network("reset".into()),
+        };
+        assert_eq!(s.settle_ok(id, not_added), None);
+        assert!(s.pending().is_empty());
+        assert_eq!(s.confirmed().cloned(), before);
+        assert_eq!(s.snapshot().cloned(), before);
     }
 }
