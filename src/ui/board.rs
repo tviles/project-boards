@@ -198,6 +198,7 @@ fn card_lines_marked(
     };
     let title = match item.number() {
         Some(n) => format!("{prefix}{marker}#{n} {}", item.title()),
+        None if item.is_placeholder() => format!("{prefix}{marker}new {}", item.title()),
         None => format!("{prefix}{marker}{}", item.title()),
     };
     let assignees: Vec<String> = item.assignees().iter().map(|a| format!("@{a}")).collect();
@@ -1639,6 +1640,46 @@ mod tests {
         let mut adding = items()[0].clone();
         adding.id = ItemId::new("local:2");
         assert!(card_text(&adding, 34, &Theme::plain())[1].starts_with("│● t #1"));
+    }
+
+    fn new_issue_placeholder() -> Item {
+        let mut item = items()[0].clone();
+        item.id = ItemId::new("local:1");
+        if let ItemContent::Issue { reference, .. } = &mut item.content {
+            reference.number = 0;
+        }
+        item
+    }
+
+    #[test]
+    fn new_on_a_placeholder_card_is_drawn_dim() {
+        let p = project();
+        let item = new_issue_placeholder();
+        let header = &bordered_card(&item, field(&p, "Status"), &[], 34, false, &colour())[1];
+        let new = header
+            .spans
+            .iter()
+            .find(|s| s.content.contains("new"))
+            .expect("a span with new");
+        assert!(new.style.add_modifier.contains(Modifier::DIM), "{new:?}");
+    }
+
+    #[test]
+    fn a_narrow_placeholder_card_says_new() {
+        let p = project();
+        let item = new_issue_placeholder();
+        let [title, _] = card_lines_marked(
+            &item,
+            field(&p, "Status"),
+            8,
+            "",
+            false,
+            false,
+            &Theme::plain(),
+        );
+        let text: String = title.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.starts_with("new Fix"), "{text:?}");
+        assert!(!text.contains("#0"), "{text:?}");
     }
 
     #[test]

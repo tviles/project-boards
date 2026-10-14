@@ -485,17 +485,18 @@ pub(crate) mod tests {
 
     #[test]
     fn ref_label_is_number_new_or_draft() {
-        let mut item = issue("I", 5, "x");
-        assert_eq!(item.ref_label(), "#5");
-        item.id = ItemId::new("local:2");
-        assert!(item.is_placeholder());
-        assert_eq!(item.ref_label(), "#5");
-        let mut fresh = issue("local:3", 0, "x");
-        fresh.id = ItemId::new("local:3");
-        assert_eq!(fresh.ref_label(), "new");
-        fresh.content = ItemContent::Draft { title: "d".into() };
-        fresh.id = ItemId::new("PVTI_1");
-        assert_eq!(fresh.ref_label(), "Draft");
+        // A real issue shows its number.
+        assert_eq!(issue("PVTI_1", 5, "x").ref_label(), "#5");
+        // An existing issue being added already knows its number.
+        let adding = issue("local:2", 5, "x");
+        assert!(adding.is_placeholder());
+        assert_eq!(adding.ref_label(), "#5");
+        // A new issue has no number until GitHub creates it.
+        assert_eq!(issue("local:3", 0, "x").ref_label(), "new");
+        // A draft has no number at all.
+        let mut draft = issue("PVTI_4", 0, "x");
+        draft.content = ItemContent::Draft { title: "d".into() };
+        assert_eq!(draft.ref_label(), "Draft");
     }
 
     #[test]
