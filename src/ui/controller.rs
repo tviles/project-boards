@@ -3,7 +3,7 @@
 
 use crate::board_choice::{AfterRepo, FirstStep, after_repo_projects, first_step};
 use crate::config::Config;
-use crate::github::GithubError;
+use crate::error::BackendError;
 use crate::herdr::cli::{HerdrCli, focus_plugin_pane};
 use crate::herdr::registry::PaneRegistry;
 use crate::model::*;
@@ -241,7 +241,7 @@ impl Controller {
     }
 
     /// Called once the shell has tried to resolve a token, and again after Retry.
-    pub fn start(&mut self, token: Result<(), GithubError>, now: Instant) -> Vec<Effect> {
+    pub fn start(&mut self, token: Result<(), BackendError>, now: Instant) -> Vec<Effect> {
         if let Err(e) = token {
             self.show_setup(&e);
             return Vec::new();
@@ -277,7 +277,7 @@ impl Controller {
         }
     }
 
-    fn show_setup(&mut self, error: &GithubError) {
+    fn show_setup(&mut self, error: &BackendError) {
         self.app.setup = setup_message(error).or_else(|| Some(error.to_string()));
         self.app.mode = Mode::Setup;
     }
@@ -444,7 +444,7 @@ impl Controller {
 
     fn on_sync(&mut self, event: SyncEvent, now: Instant) -> Vec<Effect> {
         if let SyncEvent::OpDone { id, result } = &event {
-            if let Err(GithubError::RateLimited { retry_after_secs }) = result {
+            if let Err(BackendError::RateLimited { retry_after_secs }) = result {
                 // Not a failure: the edit goes back to the front and writes pause.
                 self.queue
                     .retry_after(*id, now + Duration::from_secs(*retry_after_secs));
@@ -458,7 +458,7 @@ impl Controller {
         match &event {
             SyncEvent::Rate(rate) => self.scheduler.set_low_budget(rate.is_low()),
             SyncEvent::Failed {
-                error: GithubError::RateLimited { retry_after_secs },
+                error: BackendError::RateLimited { retry_after_secs },
                 ..
             } => {
                 self.scheduler
@@ -813,7 +813,15 @@ mod tests {
     fn token_errors_show_the_setup_screen() {
         let dir = tempfile::tempdir().unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        assert!(c.start(Err(GithubError::NoToken), t0).is_empty());
+        assert!(
+            c.start(
+                Err(BackendError::NoCredentials {
+                    provider: Provider::Github
+                }),
+                t0
+            )
+            .is_empty()
+        );
         assert_eq!(c.app.mode, Mode::Setup);
         assert_eq!(
             c.handle(Input::Key(key('r')), t0),
@@ -902,7 +910,7 @@ mod tests {
         failed.start(Ok(()), t0);
         let failure = SyncEvent::Failed {
             task: SyncTask::Projects,
-            error: GithubError::Network("down".into()),
+            error: BackendError::Network("down".into()),
         };
         assert_eq!(
             failed.handle(
@@ -1156,7 +1164,7 @@ mod tests {
         );
         let limited = SyncEvent::Failed {
             task: SyncTask::Incremental,
-            error: GithubError::RateLimited {
+            error: BackendError::RateLimited {
                 retry_after_secs: 120,
             },
         };
@@ -1398,7 +1406,7 @@ mod tests {
         assert!(c.app.picker.as_ref().unwrap().loading);
         let failure = SyncEvent::Failed {
             task: SyncTask::Projects,
-            error: GithubError::Network("down".into()),
+            error: BackendError::Network("down".into()),
         };
         assert!(
             c.handle(
@@ -1437,7 +1445,7 @@ mod tests {
     fn fail(task: SyncTask) -> SyncEvent {
         SyncEvent::Failed {
             task,
-            error: GithubError::Network("down".into()),
+            error: BackendError::Network("down".into()),
         }
     }
 
@@ -1626,7 +1634,9 @@ mod tests {
         c.start(Ok(()), t0);
         let failure = SyncEvent::Failed {
             task: SyncTask::Projects,
-            error: GithubError::Unauthorized,
+            error: BackendError::Unauthorized {
+                provider: Provider::Github,
+            },
         };
         let e = at(&c, failure);
         assert!(c.handle(e, t0).is_empty());
@@ -1776,7 +1786,7 @@ mod tests {
     fn done(
         c: &mut Controller,
         id: OpId,
-        result: Result<Confirmed, GithubError>,
+        result: Result<Confirmed, BackendError>,
         now: Instant,
     ) -> Vec<Effect> {
         let generation = c.generation();
@@ -1818,7 +1828,7 @@ mod tests {
         let (mut c, t0) = opened(dir.path());
         assert_eq!(mutates(&submit(&mut c, set_status("a", "o_prog"), t0)), [1]);
         assert!(mutates(&submit(&mut c, set_status("a", "o_done"), t0)).is_empty());
-        let error = GithubError::Network("offline".into());
+        let error = BackendError::Network("offline".into());
         assert_eq!(
             mutates(&done(&mut c, 1, Err(error), t0)),
             [2],
@@ -1831,7 +1841,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut c, t0) = opened(dir.path());
         submit(&mut c, set_status("a", "o_done"), t0);
-        let limited = GithubError::RateLimited {
+        let limited = BackendError::RateLimited {
             retry_after_secs: 30,
         };
         assert!(done(&mut c, 1, Err(limited), t0).is_empty());
@@ -1951,7 +1961,9 @@ mod tests {
             &c,
             SyncEvent::Failed {
                 task: SyncTask::FullLoad,
-                error: GithubError::Unauthorized,
+                error: BackendError::Unauthorized {
+                    provider: Provider::Github,
+                },
             },
         );
         c.handle(unauthorized, t0);
@@ -1980,7 +1992,9 @@ mod tests {
             &c,
             SyncEvent::Failed {
                 task: SyncTask::FullLoad,
-                error: GithubError::NoToken,
+                error: BackendError::NoCredentials {
+                    provider: Provider::Github,
+                },
             },
         );
         c.handle(no_token, t0);
@@ -2077,7 +2091,7 @@ mod tests {
         assert_eq!(mutates(&effects), [1]);
         let not_added = Confirmed::NotAdded {
             issue: "I_new".into(),
-            error: GithubError::RateLimited {
+            error: BackendError::RateLimited {
                 retry_after_secs: 30,
             },
         };

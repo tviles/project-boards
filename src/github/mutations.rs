@@ -1,7 +1,7 @@
 //! Every mutation project-boards sends, as `Github` methods returning model types.
 
+use crate::error::BackendError;
 use crate::github::Github;
-use crate::github::GithubError;
 use crate::github::GraphqlErrorEntry;
 use crate::github::convert;
 use crate::github::queries;
@@ -16,15 +16,15 @@ use serde_json::Value;
 pub(crate) fn payload<'a>(
     response: &'a GraphqlResponse,
     name: &str,
-) -> Result<&'a Value, GithubError> {
+) -> Result<&'a Value, BackendError> {
     let p = &response.data[name];
     if p.is_object() {
         return Ok(p);
     }
     if !response.errors.is_empty() {
-        return Err(GithubError::Graphql(response.errors.clone()));
+        return Err(BackendError::Api(response.errors.clone()));
     }
-    Err(GithubError::Decode(format!(
+    Err(BackendError::Decode(format!(
         "GitHub returned no result for {name}"
     )))
 }
@@ -34,10 +34,10 @@ pub(crate) fn item_payload(
     response: &GraphqlResponse,
     name: &str,
     key: &str,
-) -> Result<Item, GithubError> {
+) -> Result<Item, BackendError> {
     let p = payload(response, name)?;
     convert::item_from_wire(&p[key])
-        .ok_or_else(|| GithubError::Decode(format!("{name} returned no item")))
+        .ok_or_else(|| BackendError::Decode(format!("{name} returned no item")))
 }
 
 impl Github {
@@ -49,7 +49,7 @@ impl Github {
         item: &ItemId,
         field: &FieldId,
         value: &FieldValue,
-    ) -> Result<Item, GithubError> {
+    ) -> Result<Item, BackendError> {
         let (project, item, field) = (project.0.clone(), item.0.clone(), field.0.clone());
         let request = match value {
             FieldValue::Text(text) => GraphqlRequest::from_body(
@@ -105,7 +105,7 @@ impl Github {
                 }),
             ),
             other => {
-                return Err(GithubError::Decode(format!(
+                return Err(BackendError::Decode(format!(
                     "`{}` is not a project field value",
                     other.display()
                 )));
@@ -120,7 +120,7 @@ impl Github {
         project: &ProjectId,
         item: &ItemId,
         field: &FieldId,
-    ) -> Result<Item, GithubError> {
+    ) -> Result<Item, BackendError> {
         let body = queries::ClearFieldValue::build_query(queries::clear_field_value::Variables {
             project: project.0.clone(),
             item: item.0.clone(),
@@ -136,7 +136,7 @@ impl Github {
         project: &ProjectId,
         title: &str,
         body: &str,
-    ) -> Result<Item, GithubError> {
+    ) -> Result<Item, BackendError> {
         let request = GraphqlRequest::from_body(queries::AddDraftIssue::build_query(
             queries::add_draft_issue::Variables {
                 project: project.0.clone(),
@@ -150,7 +150,11 @@ impl Github {
 
     /// Removes the item from the project. A draft is deleted with it; an issue or pull
     /// request stays in its repository.
-    pub async fn delete_item(&self, project: &ProjectId, item: &ItemId) -> Result<(), GithubError> {
+    pub async fn delete_item(
+        &self,
+        project: &ProjectId,
+        item: &ItemId,
+    ) -> Result<(), BackendError> {
         let request = GraphqlRequest::from_body(queries::DeleteItem::build_query(
             queries::delete_item::Variables {
                 project: project.0.clone(),
@@ -168,7 +172,7 @@ impl Github {
         project: &ProjectId,
         item: &ItemId,
         after: Option<&ItemId>,
-    ) -> Result<Vec<ItemId>, GithubError> {
+    ) -> Result<Vec<ItemId>, BackendError> {
         let body =
             queries::UpdateItemPosition::build_query(queries::update_item_position::Variables {
                 project: project.0.clone(),
@@ -185,8 +189,8 @@ impl Github {
 }
 
 /// An operation the item type cannot take, refused before any request is sent.
-fn refused(message: &str) -> GithubError {
-    GithubError::Graphql(vec![GraphqlErrorEntry {
+fn refused(message: &str) -> BackendError {
+    BackendError::Api(vec![GraphqlErrorEntry {
         message: message.into(),
         kind: None,
     }])
@@ -198,7 +202,7 @@ impl Github {
         &self,
         body: graphql_client::QueryBody<V>,
         name: &str,
-    ) -> Result<(), GithubError> {
+    ) -> Result<(), BackendError> {
         let response = self.run(GraphqlRequest::from_body(body)).await?;
         payload(&response, name).map(|_| ())
     }
@@ -209,7 +213,7 @@ impl Github {
         &self,
         project: &ProjectId,
         content: &str,
-    ) -> Result<Item, GithubError> {
+    ) -> Result<Item, BackendError> {
         if content.is_empty() {
             return Err(refused("Nothing to add: the content id is empty"));
         }
@@ -232,7 +236,7 @@ impl Github {
         repo: &str,
         title: &str,
         body: &str,
-    ) -> Result<String, GithubError> {
+    ) -> Result<String, BackendError> {
         if title.trim().is_empty() {
             return Err(refused("An issue needs a title"));
         }
@@ -249,11 +253,11 @@ impl Github {
         payload(&response, "createIssue")?["issue"]["id"]
             .as_str()
             .map(String::from)
-            .ok_or_else(|| GithubError::Decode("createIssue returned no issue id".into()))
+            .ok_or_else(|| BackendError::Decode("createIssue returned no issue id".into()))
     }
 
     /// Turns a draft into an issue in `repo`, the repository's node id (`RepoRef::id`).
-    pub async fn convert_draft(&self, item: &ItemId, repo: &str) -> Result<Item, GithubError> {
+    pub async fn convert_draft(&self, item: &ItemId, repo: &str) -> Result<Item, BackendError> {
         let vars = queries::convert_draft::Variables {
             item: item.0.clone(),
             repo: repo.into(),
@@ -270,7 +274,7 @@ impl Github {
         &self,
         project: &ProjectId,
         item: &ItemId,
-    ) -> Result<(), GithubError> {
+    ) -> Result<(), BackendError> {
         let vars = queries::archive_item::Variables {
             project: project.0.clone(),
             item: item.0.clone(),
@@ -286,7 +290,7 @@ impl Github {
         &self,
         project: &ProjectId,
         item: &ItemId,
-    ) -> Result<(), GithubError> {
+    ) -> Result<(), BackendError> {
         let vars = queries::unarchive_item::Variables {
             project: project.0.clone(),
             item: item.0.clone(),
@@ -301,7 +305,7 @@ impl Github {
     /// Deletes an issue. Only the live suite calls this, to clean up the issues it made; it is
     /// compiled only for tests and the `live` feature, so the app cannot delete issues.
     #[cfg(any(test, feature = "live"))]
-    pub async fn delete_issue(&self, issue: &str) -> Result<(), GithubError> {
+    pub async fn delete_issue(&self, issue: &str) -> Result<(), BackendError> {
         if issue.is_empty() {
             return Err(refused("Nothing to delete: the issue id is empty"));
         }
@@ -311,7 +315,7 @@ impl Github {
     }
 
     /// Adding nobody sends nothing.
-    pub async fn add_assignees(&self, content: &str, users: &[String]) -> Result<(), GithubError> {
+    pub async fn add_assignees(&self, content: &str, users: &[String]) -> Result<(), BackendError> {
         if users.is_empty() {
             return Ok(());
         }
@@ -330,7 +334,7 @@ impl Github {
         &self,
         content: &str,
         users: &[String],
-    ) -> Result<(), GithubError> {
+    ) -> Result<(), BackendError> {
         if users.is_empty() {
             return Ok(());
         }
@@ -351,7 +355,7 @@ impl Github {
         &self,
         draft: &str,
         users: &[String],
-    ) -> Result<(), GithubError> {
+    ) -> Result<(), BackendError> {
         let vars = queries::set_draft_assignees::Variables {
             id: draft.into(),
             users: users.to_vec(),
@@ -363,7 +367,7 @@ impl Github {
         .await
     }
 
-    pub async fn add_labels(&self, content: &str, labels: &[String]) -> Result<(), GithubError> {
+    pub async fn add_labels(&self, content: &str, labels: &[String]) -> Result<(), BackendError> {
         if labels.is_empty() {
             return Ok(());
         }
@@ -378,7 +382,11 @@ impl Github {
         .await
     }
 
-    pub async fn remove_labels(&self, content: &str, labels: &[String]) -> Result<(), GithubError> {
+    pub async fn remove_labels(
+        &self,
+        content: &str,
+        labels: &[String],
+    ) -> Result<(), BackendError> {
         if labels.is_empty() {
             return Ok(());
         }
@@ -393,7 +401,7 @@ impl Github {
         .await
     }
 
-    pub async fn set_title(&self, content: &ContentId, title: &str) -> Result<(), GithubError> {
+    pub async fn set_title(&self, content: &ContentId, title: &str) -> Result<(), BackendError> {
         let (id, title) = (content.node_id().to_string(), title.to_string());
         match content {
             ContentId::Issue(_) => {
@@ -426,7 +434,7 @@ impl Github {
         }
     }
 
-    pub async fn set_body(&self, content: &ContentId, body: &str) -> Result<(), GithubError> {
+    pub async fn set_body(&self, content: &ContentId, body: &str) -> Result<(), BackendError> {
         let (id, body) = (content.node_id().to_string(), body.to_string());
         match content {
             ContentId::Issue(_) => {
@@ -466,7 +474,7 @@ impl Github {
         &self,
         content: &ContentId,
         milestone: Option<&str>,
-    ) -> Result<(), GithubError> {
+    ) -> Result<(), BackendError> {
         let (id, milestone) = (content.node_id().to_string(), milestone.map(String::from));
         match content {
             ContentId::Issue(_) => {
@@ -491,7 +499,7 @@ impl Github {
         }
     }
 
-    pub async fn add_comment(&self, subject: &str, body: &str) -> Result<(), GithubError> {
+    pub async fn add_comment(&self, subject: &str, body: &str) -> Result<(), BackendError> {
         let vars = queries::add_comment::Variables {
             subject: subject.into(),
             body: body.into(),
@@ -505,7 +513,7 @@ impl Github {
         &self,
         content: &ContentId,
         reason: Option<CloseReason>,
-    ) -> Result<(), GithubError> {
+    ) -> Result<(), BackendError> {
         use queries::close_issue::IssueClosedStateReason as Reason;
         let id = content.node_id().to_string();
         match content {
@@ -536,7 +544,7 @@ impl Github {
         }
     }
 
-    pub async fn reopen(&self, content: &ContentId) -> Result<(), GithubError> {
+    pub async fn reopen(&self, content: &ContentId) -> Result<(), BackendError> {
         let id = content.node_id().to_string();
         match content {
             ContentId::Issue(_) => {
@@ -563,9 +571,10 @@ impl Github {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::BackendError;
+    use crate::github::Github;
     use crate::github::fixture::FixtureTransport;
     use crate::github::transport::GraphqlRequest;
-    use crate::github::{Github, GithubError};
     use serde_json::json;
     use std::sync::Arc;
 
@@ -595,7 +604,7 @@ mod tests {
         let r = response(&t).await;
         let err = payload(&r, "addComment").unwrap_err();
         assert!(
-            matches!(&err, GithubError::Graphql(e) if e[0].message == "Resource not accessible by integration")
+            matches!(&err, BackendError::Api(e) if e[0].message == "Resource not accessible by integration")
         );
     }
 
@@ -605,7 +614,7 @@ mod tests {
         t.push("Op", json!({"addComment": null}));
         let r = response(&t).await;
         assert!(
-            matches!(payload(&r, "addComment"), Err(GithubError::Decode(m)) if m.contains("addComment"))
+            matches!(payload(&r, "addComment"), Err(BackendError::Decode(m)) if m.contains("addComment"))
         );
     }
 
@@ -742,7 +751,7 @@ mod tests {
         let r = Github::new(t.clone())
             .set_field_value(&p, &i, &f, &FieldValue::Users(vec![]))
             .await;
-        assert!(matches!(r, Err(GithubError::Decode(_))));
+        assert!(matches!(r, Err(BackendError::Decode(_))));
         assert!(t.requests().is_empty());
     }
 
@@ -1001,12 +1010,12 @@ mod tests {
         }
         let gh = Github::new(t.clone());
         let e = gh.add_labels("I_1", &["LA_1".into()]).await.unwrap_err();
-        assert!(matches!(&e, GithubError::Graphql(m) if m[0].message == "Resource not accessible"));
+        assert!(matches!(&e, BackendError::Api(m) if m[0].message == "Resource not accessible"));
         let e = gh
             .close(&ContentId::Issue("I_1".into()), None)
             .await
             .unwrap_err();
-        assert!(matches!(&e, GithubError::Graphql(m) if m[0].message == "Resource not accessible"));
+        assert!(matches!(&e, BackendError::Api(m) if m[0].message == "Resource not accessible"));
     }
 
     #[tokio::test]
@@ -1057,9 +1066,7 @@ mod tests {
         );
         let draft = ContentId::Draft("DI_1".into());
         let e = gh.reopen(&draft).await.unwrap_err();
-        assert!(
-            matches!(&e, GithubError::Graphql(m) if m[0].message == "Drafts cannot be reopened")
-        );
+        assert!(matches!(&e, BackendError::Api(m) if m[0].message == "Drafts cannot be reopened"));
         assert!(gh.close(&draft, None).await.is_err());
         assert!(gh.set_milestone(&draft, None).await.is_err());
         assert_eq!(
@@ -1149,8 +1156,8 @@ mod tests {
             .add_item_by_id(&ProjectId::new("PVT_1"), "I_1")
             .await
             .unwrap_err();
-        assert!(matches!(&e, GithubError::Graphql(m) if m[0].message == "Resource not accessible"));
+        assert!(matches!(&e, BackendError::Api(m) if m[0].message == "Resource not accessible"));
         let e = gh.create_issue("R_1", "T", "").await.unwrap_err();
-        assert!(matches!(e, GithubError::Decode(_)));
+        assert!(matches!(e, BackendError::Decode(_)));
     }
 }

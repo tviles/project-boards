@@ -353,7 +353,9 @@ fn unanswered_edit(job: &SyncJob) -> Option<crate::sync::SyncEvent> {
     let failed = |task| {
         Some(SyncEvent::Failed {
             task,
-            error: crate::github::GithubError::NoToken,
+            error: crate::error::BackendError::NoCredentials {
+                provider: crate::model::Provider::Github,
+            },
         })
     };
     match job {
@@ -363,7 +365,9 @@ fn unanswered_edit(job: &SyncJob) -> Option<crate::sync::SyncEvent> {
         SyncJob::Search { query, .. } => failed(SyncTask::Search(query.clone())),
         SyncJob::Mutate { id, .. } => Some(crate::sync::SyncEvent::OpDone {
             id: *id,
-            result: Err(crate::github::GithubError::NoToken),
+            result: Err(crate::error::BackendError::NoCredentials {
+                provider: crate::model::Provider::Github,
+            }),
         }),
         _ => None,
     }

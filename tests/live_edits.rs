@@ -13,7 +13,7 @@ mod common;
 
 use common::*;
 use futures::FutureExt;
-use project_boards::github::{Github, GithubError};
+use project_boards::github::{BackendError, Github};
 use project_boards::model::*;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -321,7 +321,7 @@ async fn a_refused_edit_carries_githubs_message() {
             .await
             .unwrap_err();
         println!("GitHub said: {err}");
-        assert!(matches!(err, GithubError::Graphql(_)), "{err:?}");
+        assert!(matches!(err, BackendError::Api(_)), "{err:?}");
     })
     .await;
 }

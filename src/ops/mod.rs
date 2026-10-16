@@ -133,14 +133,14 @@ pub enum Confirmed {
     Created {
         temp: ItemId,
         item: Item,
-        refused: Vec<(FieldId, crate::github::GithubError)>,
+        refused: Vec<(FieldId, crate::error::BackendError)>,
     },
     /// Not a success: GitHub created the new issue `issue` (its node id) but did not add it
     /// to the project. The App logs it as a failure whose retry adds that issue
     /// (`Op::add_created`) and never creates another.
     NotAdded {
         issue: String,
-        error: crate::github::GithubError,
+        error: crate::error::BackendError,
     },
 }
 

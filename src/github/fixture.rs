@@ -1,14 +1,14 @@
 //! A Transport that replays queued responses. Used by every offline test.
 
+use crate::error::{BackendError, GraphqlErrorEntry};
 use crate::github::transport::{
     BoxFuture, GraphqlRequest, GraphqlResponse, RateInfo, Transport, interpret_body_keeping_errors,
 };
-use crate::github::{GithubError, GraphqlErrorEntry};
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Mutex;
 
-type Queue = VecDeque<Result<(serde_json::Value, Vec<GraphqlErrorEntry>), GithubError>>;
+type Queue = VecDeque<Result<(serde_json::Value, Vec<GraphqlErrorEntry>), BackendError>>;
 
 #[derive(Default)]
 pub struct FixtureTransport {
@@ -28,7 +28,7 @@ impl FixtureTransport {
         self.queue(operation, Ok((data, Vec::new())));
     }
 
-    pub fn push_error(&self, operation: &str, error: GithubError) {
+    pub fn push_error(&self, operation: &str, error: BackendError) {
         self.queue(operation, Err(error));
     }
 
@@ -68,7 +68,7 @@ impl FixtureTransport {
     fn queue(
         &self,
         operation: &str,
-        result: Result<(serde_json::Value, Vec<GraphqlErrorEntry>), GithubError>,
+        result: Result<(serde_json::Value, Vec<GraphqlErrorEntry>), BackendError>,
     ) {
         self.queues
             .lock()
@@ -83,7 +83,7 @@ impl Transport for FixtureTransport {
     fn execute(
         &self,
         request: GraphqlRequest,
-    ) -> BoxFuture<'_, Result<GraphqlResponse, GithubError>> {
+    ) -> BoxFuture<'_, Result<GraphqlResponse, BackendError>> {
         let operation = request.operation_name.clone();
         self.log.lock().unwrap().push(request);
         let next = self
@@ -103,7 +103,7 @@ impl Transport for FixtureTransport {
                     errors,
                 }),
                 Some(Err(e)) => Err(e),
-                None => Err(GithubError::Network(format!(
+                None => Err(BackendError::Network(format!(
                     "no fixture queued for {operation}"
                 ))),
             }
@@ -126,7 +126,7 @@ mod tests {
         assert_eq!(t.execute(req()).await.unwrap().data["n"], 2);
         assert!(matches!(
             t.execute(req()).await,
-            Err(GithubError::Network(_))
+            Err(BackendError::Network(_))
         ));
         assert_eq!(t.requests().len(), 3);
     }

@@ -1,10 +1,11 @@
 //! Read-only lookups the editors need: a repository's assignable users, labels and
 //! milestones; repositories the user can push to; issue and pull request search.
 
+use crate::error::BackendError;
+use crate::github::Github;
 use crate::github::convert::{nodes, str_of, typename};
 use crate::github::queries;
 use crate::github::transport::GraphqlRequest;
-use crate::github::{Github, GithubError};
 use crate::model::*;
 use graphql_client::GraphQLQuery;
 use serde_json::Value;
@@ -43,7 +44,7 @@ fn hit(node: &Value) -> Option<ContentHit> {
 
 impl Github {
     /// The first 100 assignable users and labels and 50 open milestones of `repo`.
-    pub async fn repo_candidates(&self, repo: &RepoSlug) -> Result<RepoCandidates, GithubError> {
+    pub async fn repo_candidates(&self, repo: &RepoSlug) -> Result<RepoCandidates, BackendError> {
         let vars = queries::repo_candidates::Variables {
             owner: repo.owner.clone(),
             name: repo.name.clone(),
@@ -56,7 +57,7 @@ impl Github {
             .data;
         let r = &data["repository"];
         let id = r["id"].as_str().ok_or_else(|| {
-            GithubError::Decode(format!("repository {repo} not found or not visible"))
+            BackendError::Decode(format!("repository {repo} not found or not visible"))
         })?;
         Ok(RepoCandidates {
             repo: RepoRef {
@@ -99,7 +100,7 @@ impl Github {
 
     /// The viewer's most recently pushed repositories they can write to, issues on: up to
     /// five pages of 100, `truncated` when more remain.
-    pub async fn pushable_repos(&self) -> Result<PushableRepos, GithubError> {
+    pub async fn pushable_repos(&self) -> Result<PushableRepos, BackendError> {
         let mut repos = Vec::new();
         let mut after: Option<String> = None;
         for page in 1..=PUSHABLE_PAGES {
@@ -135,7 +136,7 @@ impl Github {
     }
 
     /// `repo` when it exists, the viewer can write to it and it has issues; else `None`.
-    pub async fn lookup_repo(&self, repo: &RepoSlug) -> Result<Option<RepoRef>, GithubError> {
+    pub async fn lookup_repo(&self, repo: &RepoSlug) -> Result<Option<RepoRef>, BackendError> {
         let vars = queries::repo_lookup::Variables {
             owner: repo.owner.clone(),
             name: repo.name.clone(),
@@ -155,7 +156,7 @@ impl Github {
     }
 
     /// Issues and pull requests matching GitHub search `query`, at most 20.
-    pub async fn search_content(&self, query: &str) -> Result<Vec<ContentHit>, GithubError> {
+    pub async fn search_content(&self, query: &str) -> Result<Vec<ContentHit>, BackendError> {
         let vars = queries::search_content::Variables {
             query: query.into(),
         };
@@ -173,7 +174,7 @@ impl Github {
         &self,
         repo: &RepoSlug,
         number: u32,
-    ) -> Result<Option<ContentHit>, GithubError> {
+    ) -> Result<Option<ContentHit>, BackendError> {
         let vars = queries::content_by_number::Variables {
             owner: repo.owner.clone(),
             name: repo.name.clone(),

@@ -703,7 +703,7 @@ mod tests {
         });
         let not_added = Confirmed::NotAdded {
             issue: "I_new".into(),
-            error: crate::github::GithubError::Network("reset".into()),
+            error: crate::error::BackendError::Network("reset".into()),
         };
         assert_eq!(s.settle_ok(id, not_added), None);
         assert!(s.pending().is_empty());

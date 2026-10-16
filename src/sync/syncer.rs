@@ -1,7 +1,7 @@
 //! Runs fetches and reports results as events; never touches the store.
 
+use crate::error::BackendError;
 use crate::github::Github;
-use crate::github::GithubError;
 use crate::github::client::{FULL_PAGE, POLL_PAGE};
 use crate::model::*;
 use crate::store::ViewList;
@@ -9,19 +9,6 @@ use crate::sync::{IncrementalMode, SyncEvent, SyncTask, incremental_query, searc
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-
-/// The variant's name, for logs that must not carry GitHub's message text.
-fn error_kind(e: &GithubError) -> &'static str {
-    match e {
-        GithubError::NoToken => "NoToken",
-        GithubError::Unauthorized => "Unauthorized",
-        GithubError::InsufficientScopes { .. } => "InsufficientScopes",
-        GithubError::RateLimited { .. } => "RateLimited",
-        GithubError::Graphql(_) => "Graphql",
-        GithubError::Network(_) => "Network",
-        GithubError::Decode(_) => "Decode",
-    }
-}
 
 fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
@@ -57,7 +44,7 @@ impl Syncer {
         let _ = self.tx.send(event);
     }
 
-    fn fail(&self, task: SyncTask, error: GithubError) {
+    fn fail(&self, task: SyncTask, error: BackendError) {
         tracing::warn!(task = task.kind(), %error, "sync task failed");
         self.send(SyncEvent::Failed { task, error });
     }
@@ -140,9 +127,9 @@ impl Syncer {
             tokio::spawn(async move { crate::ops::send::send(&gh, &project_id, &sent).await })
                 .await;
         let result = joined
-            .unwrap_or_else(|_| Err(GithubError::Network("the edit failed unexpectedly".into())));
+            .unwrap_or_else(|_| Err(BackendError::Network("the edit failed unexpectedly".into())));
         if let Err(e) = &result {
-            tracing::warn!(op = op.name(), item = %op.item(), error = error_kind(e), "edit failed");
+            tracing::warn!(op = op.name(), item = %op.item(), error = e.kind(), "edit failed");
         }
         self.send(SyncEvent::OpDone { id, result });
         self.send(SyncEvent::Rate(self.gh.rate()));
@@ -391,7 +378,7 @@ mod tests {
             json!({"repository": {"issueOrPullRequest": {"__typename": "Issue", "id": "I_1",
             "number": 12, "title": "Crash", "state": "OPEN", "repository": {"nameWithOwner": "acme/app"}}}}),
         );
-        t.push_error("PushableRepos", GithubError::Network("offline".into()));
+        t.push_error("PushableRepos", BackendError::Network("offline".into()));
         let repo: RepoSlug = "acme/app".parse().unwrap();
         s.candidates(&repo).await;
         s.search("https://github.com/acme/app/issues/12", &[]).await;
@@ -419,7 +406,7 @@ mod tests {
     async fn a_search_sends_the_scoped_query_and_a_failure_names_no_text() {
         let (t, s, mut rx) = setup(2000);
         t.push("SearchContent", json!({"search": {"nodes": []}}));
-        t.push_error("SearchContent", GithubError::Network("offline".into()));
+        t.push_error("SearchContent", BackendError::Network("offline".into()));
         let scope: Vec<RepoSlug> = vec!["acme/app".parse().unwrap()];
         s.search("crash org:other", &scope).await;
         s.search("second", &scope).await;
@@ -463,7 +450,10 @@ mod tests {
     async fn failure_mid_load_sends_no_complete() {
         let (t, s, mut rx) = setup(2000);
         t.push("ItemsPage", page(&["a", "b"], 4, Some("c1")));
-        t.push_error("ItemsPage", GithubError::Network("connection reset".into()));
+        t.push_error(
+            "ItemsPage",
+            BackendError::Network("connection reset".into()),
+        );
         s.full_load(&ProjectId::new("P")).await;
         let events = drain(&mut rx);
         assert!(matches!(&events[0], SyncEvent::ItemsPage { .. }));
@@ -665,7 +655,7 @@ mod tests {
             "ClearFieldValue",
             json!({"clearProjectV2ItemFieldValue": {"projectV2Item": item_json()}}),
         );
-        t.push_error("ClearFieldValue", GithubError::Network("offline".into()));
+        t.push_error("ClearFieldValue", BackendError::Network("offline".into()));
         let op = crate::ops::Op::ClearField {
             item: ItemId::new("PVTI_1"),
             field: FieldId::new("F_notes"),
@@ -685,7 +675,7 @@ mod tests {
             &events[2],
             SyncEvent::OpDone {
                 id: 8,
-                result: Err(GithubError::Network(_))
+                result: Err(BackendError::Network(_))
             }
         ));
     }
@@ -711,7 +701,7 @@ mod tests {
             _request: crate::github::transport::GraphqlRequest,
         ) -> futures::future::BoxFuture<
             '_,
-            Result<crate::github::transport::GraphqlResponse, GithubError>,
+            Result<crate::github::transport::GraphqlResponse, BackendError>,
         > {
             Box::pin(async { panic!("transport blew up") })
         }

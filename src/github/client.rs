@@ -1,9 +1,9 @@
 //! The one GitHub client the rest of the app uses. Methods return model types only.
 
+use crate::error::{BackendError, GraphqlErrorEntry};
 use crate::github::convert;
 use crate::github::queries;
 use crate::github::transport::{GraphqlRequest, GraphqlResponse, RateInfo, Transport};
-use crate::github::{GithubError, GraphqlErrorEntry};
 use crate::model::*;
 use graphql_client::GraphQLQuery;
 use std::sync::{Arc, Mutex};
@@ -44,7 +44,7 @@ impl Github {
     pub(crate) async fn run(
         &self,
         request: GraphqlRequest,
-    ) -> Result<GraphqlResponse, GithubError> {
+    ) -> Result<GraphqlResponse, BackendError> {
         let response = self.transport.execute(request).await?;
         *self.rate.lock().unwrap() = response.rate.clone();
         if response.scopes.is_some() {
@@ -53,7 +53,7 @@ impl Github {
         Ok(response)
     }
 
-    pub async fn resolve_project(&self, board: &BoardRef) -> Result<Project, GithubError> {
+    pub async fn resolve_project(&self, board: &BoardRef) -> Result<Project, BackendError> {
         let body = queries::ResolveProject::build_query(queries::resolve_project::Variables {
             owner: board.owner.clone(),
             number: i64::from(board.number),
@@ -63,7 +63,7 @@ impl Github {
             .into_iter()
             .find(|v| v.is_object())
             .ok_or_else(|| {
-                GithubError::Graphql(vec![GraphqlErrorEntry {
+                BackendError::Api(vec![GraphqlErrorEntry {
                     message: format!("project {board} was not found, or this token cannot see it (fine-grained tokens cannot read boards owned by a user account; use `gh auth login`)"),
                     kind: Some("NOT_FOUND".into()),
                 }])
@@ -75,7 +75,7 @@ impl Github {
         &self,
         id: &ProjectId,
         board: &BoardRef,
-    ) -> Result<Project, GithubError> {
+    ) -> Result<Project, BackendError> {
         let body = queries::ProjectSchema::build_query(queries::project_schema::Variables {
             id: id.0.clone(),
         });
@@ -83,7 +83,7 @@ impl Github {
         convert::project_from_wire(&data["node"], board)
     }
 
-    pub async fn viewer(&self) -> Result<ViewerCheck, GithubError> {
+    pub async fn viewer(&self) -> Result<ViewerCheck, BackendError> {
         let body = queries::Viewer::build_query(queries::viewer::Variables);
         let response = self.run(GraphqlRequest::from_body(body)).await?;
         Ok(ViewerCheck {
@@ -114,12 +114,12 @@ fn page_meta(conn: &serde_json::Value) -> (usize, Option<String>) {
 fn items_conn<'a>(
     data: &'a serde_json::Value,
     id: &ProjectId,
-) -> Result<&'a serde_json::Value, GithubError> {
+) -> Result<&'a serde_json::Value, BackendError> {
     let conn = &data["node"]["items"];
     if conn.is_object() {
         Ok(conn)
     } else {
-        Err(GithubError::Decode(format!(
+        Err(BackendError::Decode(format!(
             "project {} not found or not visible to this token",
             id.0
         )))
@@ -140,7 +140,7 @@ impl Github {
         query: &str,
         first: u32,
         after: Option<String>,
-    ) -> Result<Page<Item>, GithubError> {
+    ) -> Result<Page<Item>, BackendError> {
         let body = queries::ItemsPage::build_query(queries::items_page::Variables {
             id: project.0.clone(),
             first: i64::from(first),
@@ -161,7 +161,7 @@ impl Github {
         project: &ProjectId,
         query: &str,
         after: Option<String>,
-    ) -> Result<Page<ItemId>, GithubError> {
+    ) -> Result<Page<ItemId>, BackendError> {
         let body = queries::ViewItemIds::build_query(queries::view_item_ids::Variables {
             id: project.0.clone(),
             first: i64::from(FULL_PAGE),
@@ -183,7 +183,7 @@ impl Github {
         &self,
         project: &ProjectId,
         first: u32,
-    ) -> Result<u64, GithubError> {
+    ) -> Result<u64, BackendError> {
         let body = queries::ItemsPageCost::build_query(queries::items_page_cost::Variables {
             id: project.0.clone(),
             first: i64::from(first),
@@ -193,18 +193,18 @@ impl Github {
         let data = self.run(GraphqlRequest::from_body(body)).await?.data;
         data["rateLimit"]["cost"]
             .as_u64()
-            .ok_or_else(|| GithubError::Decode("dry run returned no rateLimit.cost".into()))
+            .ok_or_else(|| BackendError::Decode("dry run returned no rateLimit.cost".into()))
     }
 
     /// Loads items by id. Pass at most 100 ids; ids that no longer exist are skipped.
-    pub async fn hydrate_items(&self, ids: &[ItemId]) -> Result<Vec<Item>, GithubError> {
+    pub async fn hydrate_items(&self, ids: &[ItemId]) -> Result<Vec<Item>, BackendError> {
         let body = queries::HydrateItems::build_query(queries::hydrate_items::Variables {
             ids: ids.iter().map(|i| i.0.clone()).collect(),
         });
         let data = self.run(GraphqlRequest::from_body(body)).await?.data;
         let nodes = data["nodes"]
             .as_array()
-            .ok_or_else(|| GithubError::Decode("hydrate response has no nodes array".into()))?;
+            .ok_or_else(|| BackendError::Decode("hydrate response has no nodes array".into()))?;
         Ok(nodes.iter().filter_map(convert::item_from_wire).collect())
     }
 
@@ -212,14 +212,14 @@ impl Github {
         &self,
         item: &ItemId,
         before: Option<String>,
-    ) -> Result<ItemDetail, GithubError> {
+    ) -> Result<ItemDetail, BackendError> {
         let body = queries::ItemDetail::build_query(queries::item_detail::Variables {
             id: item.0.clone(),
             before,
         });
         let data = self.run(GraphqlRequest::from_body(body)).await?.data;
         if data["node"].is_null() {
-            return Err(GithubError::Decode(
+            return Err(BackendError::Decode(
                 "item detail response has no node".into(),
             ));
         }
@@ -229,7 +229,7 @@ impl Github {
     pub async fn list_repo_projects(
         &self,
         repo: &RepoSlug,
-    ) -> Result<Vec<ProjectSummary>, GithubError> {
+    ) -> Result<Vec<ProjectSummary>, BackendError> {
         let body = queries::RepoProjects::build_query(queries::repo_projects::Variables {
             owner: repo.owner.clone(),
             name: repo.name.clone(),
@@ -242,7 +242,7 @@ impl Github {
     }
 
     /// The viewer's own boards, then each organisation's.
-    pub async fn list_viewer_projects(&self) -> Result<Vec<ProjectSummary>, GithubError> {
+    pub async fn list_viewer_projects(&self) -> Result<Vec<ProjectSummary>, BackendError> {
         let body = queries::ViewerProjects::build_query(queries::viewer_projects::Variables);
         let data = self.run(GraphqlRequest::from_body(body)).await?.data;
         let viewer = &data["viewer"];
@@ -398,7 +398,7 @@ mod tests {
         let t = Arc::new(FixtureTransport::new());
         t.push("ItemsPageCost", json!({"rateLimit": null}));
         let r = gh(t).items_page_cost(&ProjectId::new("P"), FULL_PAGE).await;
-        assert!(matches!(r, Err(GithubError::Decode(_))), "{r:?}");
+        assert!(matches!(r, Err(BackendError::Decode(_))), "{r:?}");
     }
 
     #[tokio::test]
@@ -422,11 +422,11 @@ mod tests {
         let p = ProjectId::new("PVT_x");
         assert!(matches!(
             g.fetch_items_page(&p, "", FULL_PAGE, None).await,
-            Err(GithubError::Decode(_))
+            Err(BackendError::Decode(_))
         ));
         assert!(matches!(
             g.fetch_view_ids_page(&p, "", None).await,
-            Err(GithubError::Decode(_))
+            Err(BackendError::Decode(_))
         ));
     }
 
@@ -435,7 +435,7 @@ mod tests {
         let t = Arc::new(FixtureTransport::new());
         t.push("HydrateItems", json!({"nodes": null}));
         let r = gh(t).hydrate_items(&[ItemId::new("a")]).await;
-        assert!(matches!(r, Err(GithubError::Decode(_))), "{r:?}");
+        assert!(matches!(r, Err(BackendError::Decode(_))), "{r:?}");
     }
 
     fn summary_json(owner: &str, number: u32, closed: bool) -> serde_json::Value {
@@ -489,6 +489,6 @@ mod tests {
             .fetch_item_detail(&ItemId::new("x"), None)
             .await
             .unwrap_err();
-        assert!(matches!(err, GithubError::Decode(_)));
+        assert!(matches!(err, BackendError::Decode(_)));
     }
 }
