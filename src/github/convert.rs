@@ -302,8 +302,9 @@ fn content_from_wire(c: &Value) -> ItemContent {
         return ItemContent::Redacted;
     }
     let reference = || ContentRef {
-        repo: str_of(&c["repository"]["nameWithOwner"]),
+        container: str_of(&c["repository"]["nameWithOwner"]),
         number: c["number"].as_u64().unwrap_or(0) as u32,
+        key: None,
         url: str_of(&c["url"]),
     };
     match typename(c) {

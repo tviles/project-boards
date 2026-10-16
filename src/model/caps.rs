@@ -309,8 +309,9 @@ mod tests {
         let mut i = issue("p", 4, "PR");
         i.content = ItemContent::PullRequest {
             reference: ContentRef {
-                repo: "acme/app".into(),
+                container: "acme/app".into(),
                 number: 4,
+                key: None,
                 url: "u".into(),
             },
             title: "PR".into(),

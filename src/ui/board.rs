@@ -291,7 +291,10 @@ fn card_reference(
     let grey = theme.option(OptionColor::Gray).patch(theme.dim());
     let placeholder = item.is_placeholder();
     let short = |r: &ContentRef| {
-        let name = r.repo.split_once('/').map_or(r.repo.as_str(), |(_, n)| n);
+        let name = r
+            .container
+            .split_once('/')
+            .map_or(r.container.as_str(), |(_, n)| n);
         // An existing issue being added has its number already; only a new one has none.
         let number = if placeholder && r.number == 0 {
             "new".to_string()
@@ -1367,8 +1370,9 @@ mod tests {
 
     fn reference(repo: &str, number: u32) -> ContentRef {
         ContentRef {
-            repo: repo.into(),
+            container: repo.into(),
             number,
+            key: None,
             url: String::new(),
         }
     }

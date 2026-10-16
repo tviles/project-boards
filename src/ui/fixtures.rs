@@ -168,8 +168,9 @@ fn issue(id: &str, number: u32, title: &str, values: Vec<(FieldId, FieldValue)>)
         id: ItemId::new(id),
         content: ItemContent::Issue {
             reference: ContentRef {
-                repo: "tviles/t".into(),
+                container: "tviles/t".into(),
                 number,
+                key: None,
                 url: format!("https://github.com/tviles/t/issues/{number}"),
             },
             title: title.into(),

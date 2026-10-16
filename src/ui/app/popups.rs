@@ -480,7 +480,7 @@ impl App {
             .values()
             .find(|i| {
                 i.reference().is_some_and(|r| {
-                    r.repo.eq_ignore_ascii_case(&hit.repo) && r.number == hit.number
+                    r.container.eq_ignore_ascii_case(&hit.repo) && r.number == hit.number
                 })
             })
             .map(|i| i.id.clone())
@@ -2453,7 +2453,7 @@ mod tests {
         let mut a = test_app();
         replace_item(&mut a, |i| {
             if let crate::model::ItemContent::Issue { reference, .. } = &mut i.content {
-                reference.repo = "not a slug".into();
+                reference.container = "not a slug".into();
             }
         });
         assert!(a.handle_key(key('a')).is_empty());

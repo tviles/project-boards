@@ -677,14 +677,14 @@ impl App {
                 let repo = self
                     .detail_item()
                     .and_then(|i| i.reference())
-                    .map(|r| r.repo.clone());
+                    .map(|r| r.container.clone());
                 let Some(repo) = repo else { return Vec::new() };
                 let on_board = self.snapshot().and_then(|s| {
                     s.items
                         .values()
                         .find(|i| {
                             i.reference()
-                                .is_some_and(|r| r.repo == repo && r.number == n)
+                                .is_some_and(|r| r.container == repo && r.number == n)
                         })
                         .map(|i| i.id.clone())
                 });

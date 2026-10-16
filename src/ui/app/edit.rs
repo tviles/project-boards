@@ -370,7 +370,7 @@ impl App {
     /// The repository whose users, labels and milestones `item` can take.
     pub fn candidate_repo(&self, item: &Item) -> Option<RepoSlug> {
         match item.reference() {
-            Some(r) => r.repo.parse().ok(),
+            Some(r) => r.container.parse().ok(),
             None => self.draft_repo(),
         }
     }
@@ -4342,8 +4342,9 @@ mod tests {
         let b = snap.items.get_mut(&ItemId::new("b")).unwrap();
         b.content = crate::model::ItemContent::PullRequest {
             reference: crate::model::ContentRef {
-                repo: "tviles/t".into(),
+                container: "tviles/t".into(),
                 number: 2,
+                key: None,
                 url: "u".into(),
             },
             title: "Add iteration columns".into(),
