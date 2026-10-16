@@ -197,32 +197,73 @@ async fn create_team(linear: &Linear, name: &str, key: &str, created: &mut u32) 
     str_of(&d["teamCreate"]["team"], "id")
 }
 
-async fn create_label(
-    linear: &Linear,
-    name: &str,
-    is_group: bool,
-    single_select: Option<bool>,
-    parent_id: Option<String>,
-) -> String {
-    use seed_create_label::LabelGroupType;
-    let d = run(
-        linear,
-        &SeedCreateLabel::build_query(seed_create_label::Variables {
-            name: name.into(),
-            is_group,
-            group_type: single_select.map(|single| {
-                if single {
-                    LabelGroupType::singleSelect
-                } else {
-                    LabelGroupType::multiSelect
-                }
-            }),
-            parent_id,
-            color: None,
-        }),
-        "create label",
-    )
-    .await;
+/// A fixed invented colour per label: Linear rejects a null colour.
+fn label_color(name: &str) -> String {
+    match name {
+        "Type" => "#5e6ad2",
+        "Bug" => "#eb5757",
+        "Feature" => "#bb87fc",
+        "Chore" => "#95a2b3",
+        "Area" => "#26b5ce",
+        "UI" => "#4cb782",
+        "API" => "#f2c94c",
+        "Docs" => "#f2994a",
+        _ => "#4ea7fc",
+    }
+    .to_string()
+}
+
+/// How a new label hangs in the tree.
+enum NewLabel {
+    Group { single_select: bool },
+    Child { parent_id: String },
+    Loose,
+}
+
+async fn create_label(linear: &Linear, name: &str, kind: NewLabel) -> String {
+    use seed_create_label_group::LabelGroupType;
+    let (name, color) = (name.to_string(), label_color(name));
+    let d = match kind {
+        NewLabel::Group { single_select } => {
+            run(
+                linear,
+                &SeedCreateLabelGroup::build_query(seed_create_label_group::Variables {
+                    name,
+                    group_type: if single_select {
+                        LabelGroupType::singleSelect
+                    } else {
+                        LabelGroupType::multiSelect
+                    },
+                    color,
+                }),
+                "create label group",
+            )
+            .await
+        }
+        NewLabel::Child { parent_id } => {
+            run(
+                linear,
+                &SeedCreateChildLabel::build_query(seed_create_child_label::Variables {
+                    name,
+                    parent_id,
+                    color,
+                }),
+                "create label",
+            )
+            .await
+        }
+        NewLabel::Loose => {
+            run(
+                linear,
+                &SeedCreateLooseLabel::build_query(seed_create_loose_label::Variables {
+                    name,
+                    color,
+                }),
+                "create label",
+            )
+            .await
+        }
+    };
     str_of(&d["issueLabelCreate"]["issueLabel"], "id")
 }
 
@@ -565,7 +606,14 @@ async fn main() {
             Some(id) => id,
             None => {
                 labels_created += 1;
-                create_label(&linear, group, true, Some(single), None).await
+                create_label(
+                    &linear,
+                    group,
+                    NewLabel::Group {
+                        single_select: single,
+                    },
+                )
+                .await
             }
         };
         for child in children {
@@ -587,7 +635,14 @@ async fn main() {
                 }
                 LabelPlan::Create => {
                     labels_created += 1;
-                    create_label(&linear, child, false, None, Some(group_id.clone())).await
+                    create_label(
+                        &linear,
+                        child,
+                        NewLabel::Child {
+                            parent_id: group_id.clone(),
+                        },
+                    )
+                    .await
                 }
             };
             label_ids.insert(child, id);
@@ -598,7 +653,7 @@ async fn main() {
         Some(id) => id,
         None => {
             labels_created += 1;
-            create_label(&linear, loose, false, None, None).await
+            create_label(&linear, loose, NewLabel::Loose).await
         }
     };
     label_ids.insert(loose, id);
@@ -914,6 +969,27 @@ mod tests {
         assert_eq!(pick_state(&states, "canceled").as_deref(), Some("2"));
         assert_eq!(pick_state(&states, "started").as_deref(), Some("3"));
         assert_eq!(pick_state(&states, "completed"), None);
+    }
+
+    #[test]
+    fn every_seeded_label_has_a_hex_colour() {
+        for n in [
+            "Type",
+            "Bug",
+            "Feature",
+            "Chore",
+            "Area",
+            "UI",
+            "API",
+            "Docs",
+            "good first issue",
+        ] {
+            let c = label_color(n);
+            assert!(
+                c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|h| h.is_ascii_hexdigit()),
+                "{n}"
+            );
+        }
     }
 
     #[test]

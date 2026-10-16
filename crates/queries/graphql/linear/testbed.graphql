@@ -120,8 +120,25 @@ query SeedLabels {
   }
 }
 
-mutation SeedCreateLabel($name: String!, $isGroup: Boolean!, $groupType: LabelGroupType, $parentId: String, $color: String) {
-  issueLabelCreate(input: { name: $name, isGroup: $isGroup, groupType: $groupType, parentId: $parentId, color: $color }) {
+# One operation per kind of label, so no variable is ever null (Linear rejects a null colour).
+mutation SeedCreateLabelGroup($name: String!, $groupType: LabelGroupType!, $color: String!) {
+  issueLabelCreate(input: { name: $name, isGroup: true, groupType: $groupType, color: $color }) {
+    issueLabel {
+      id
+    }
+  }
+}
+
+mutation SeedCreateChildLabel($name: String!, $parentId: String!, $color: String!) {
+  issueLabelCreate(input: { name: $name, parentId: $parentId, color: $color }) {
+    issueLabel {
+      id
+    }
+  }
+}
+
+mutation SeedCreateLooseLabel($name: String!, $color: String!) {
+  issueLabelCreate(input: { name: $name, color: $color }) {
     issueLabel {
       id
     }
