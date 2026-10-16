@@ -1,7 +1,7 @@
 //! What the plugin remembers between runs: the board per repository and the last view per board.
 
 use crate::fsutil::write_atomic;
-use crate::model::{BoardRef, Layout, RepoSlug, ViewId};
+use crate::model::{BoardKey, Layout, RepoSlug, ViewId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -17,13 +17,13 @@ pub struct LayoutOverride {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct State {
-    /// `owner/name` → `owner/number`
+    /// `owner/name` → board key
     #[serde(default)]
     pub boards_by_repo: BTreeMap<String, String>,
-    /// `owner/number` → view id
+    /// board key → view id
     #[serde(default)]
     pub last_view: BTreeMap<String, String>,
-    /// `owner/number/view id` → the layout chosen for that view
+    /// `board key/view id` → the layout chosen for that view
     #[serde(default)]
     pub layout_overrides: BTreeMap<String, LayoutOverride>,
 }
@@ -54,38 +54,38 @@ impl State {
         Ok(state)
     }
 
-    pub fn remembered_board(&self, repo: &RepoSlug) -> Option<BoardRef> {
+    pub fn remembered_board(&self, repo: &RepoSlug) -> Option<BoardKey> {
         self.boards_by_repo.get(&repo.to_string())?.parse().ok()
     }
 
-    pub fn remember_board(&mut self, repo: &RepoSlug, board: &BoardRef) {
+    pub fn remember_board(&mut self, repo: &RepoSlug, board: &BoardKey) {
         self.boards_by_repo
             .insert(repo.to_string(), board.to_string());
     }
 
-    pub fn last_view(&self, board: &BoardRef) -> Option<ViewId> {
+    pub fn last_view(&self, board: &BoardKey) -> Option<ViewId> {
         self.last_view.get(&board.to_string()).map(ViewId::new)
     }
 
-    pub fn set_last_view(&mut self, board: &BoardRef, view: &ViewId) {
+    pub fn set_last_view(&mut self, board: &BoardKey, view: &ViewId) {
         self.last_view.insert(board.to_string(), view.0.clone());
     }
 
-    fn layout_key(board: &BoardRef, view: &ViewId) -> String {
+    fn layout_key(board: &BoardKey, view: &ViewId) -> String {
         format!("{board}/{}", view.0)
     }
 
-    pub fn set_layout_override(&mut self, board: &BoardRef, view: &ViewId, o: LayoutOverride) {
+    pub fn set_layout_override(&mut self, board: &BoardKey, view: &ViewId, o: LayoutOverride) {
         self.layout_overrides
             .insert(Self::layout_key(board, view), o);
     }
 
-    pub fn clear_layout_override(&mut self, board: &BoardRef, view: &ViewId) {
+    pub fn clear_layout_override(&mut self, board: &BoardKey, view: &ViewId) {
         self.layout_overrides.remove(&Self::layout_key(board, view));
     }
 
     /// The overrides saved for `board`'s views.
-    pub fn layout_overrides_for(&self, board: &BoardRef) -> Vec<(ViewId, LayoutOverride)> {
+    pub fn layout_overrides_for(&self, board: &BoardKey) -> Vec<(ViewId, LayoutOverride)> {
         let prefix = format!("{board}/");
         self.layout_overrides
             .iter()
@@ -99,10 +99,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn old_state_and_panes_files_still_find_their_boards() {
+        let dir = tempfile::tempdir().unwrap();
+        // state.json and panes.json exactly as 0.3 wrote them.
+        std::fs::write(
+            dir.path().join("state.json"),
+            r#"{"boards_by_repo": {"acme/app": "acme/3"}, "last_view": {"acme/3": "V2"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("panes.json"), r#"{"acme/3": "p7"}"#).unwrap();
+        let board = BoardKey::github("acme", 3);
+        let s = State::load(dir.path());
+        assert_eq!(
+            s.remembered_board(&"acme/app".parse().unwrap()),
+            Some(board.clone())
+        );
+        assert_eq!(s.last_view(&board), Some(ViewId::new("V2")));
+        let panes = crate::herdr::registry::PaneRegistry::new(dir.path());
+        assert_eq!(panes.lookup(&board).as_deref(), Some("p7"));
+    }
+
+    #[test]
+    fn a_linear_board_is_remembered_beside_github_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let team: BoardKey = "linear:team:t1".parse().unwrap();
+        State::update(dir.path(), |s| {
+            s.remember_board(&"acme/app".parse().unwrap(), &team);
+            s.set_last_view(&team, &ViewId::new("board"));
+        })
+        .unwrap();
+        let s = State::load(dir.path());
+        assert_eq!(
+            s.remembered_board(&"acme/app".parse().unwrap()),
+            Some(team.clone())
+        );
+        assert_eq!(s.last_view(&team), Some(ViewId::new("board")));
+        assert_eq!(s.last_view(&BoardKey::github("acme", 3)), None);
+    }
+
+    #[test]
     fn remembers_boards_and_views_across_loads() {
         let dir = tempfile::tempdir().unwrap();
         let repo: RepoSlug = "tviles/app".parse().unwrap();
-        let board: BoardRef = "tviles/3".parse().unwrap();
+        let board: BoardKey = "tviles/3".parse().unwrap();
         State::update(dir.path(), |s| {
             s.remember_board(&repo, &board);
             s.set_last_view(&board, &ViewId::new("PVTV_1"));
@@ -116,7 +155,7 @@ mod tests {
     #[test]
     fn layout_overrides_round_trip_per_board_and_view() {
         let dir = tempfile::tempdir().unwrap();
-        let (a, b): (BoardRef, BoardRef) =
+        let (a, b): (BoardKey, BoardKey) =
             ("tviles/3".parse().unwrap(), "tviles/4".parse().unwrap());
         let o = LayoutOverride {
             layout: Layout::Board,

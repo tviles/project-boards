@@ -86,7 +86,7 @@ pub enum Command {
     ClearLayout {
         view: ViewId,
     },
-    PickBoard(BoardRef),
+    PickBoard(BoardKey),
     ShowPicker,
     /// Re-run startup after the user fixed authentication.
     Retry,

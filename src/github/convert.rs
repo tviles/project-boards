@@ -120,7 +120,7 @@ pub fn view_from_wire(v: &Value, fields: &[Field]) -> View {
 }
 
 /// Decodes a `ProjectSchemaFields` object.
-pub fn project_from_wire(v: &Value, board: &BoardRef) -> Result<Project, BackendError> {
+pub fn project_from_wire(v: &Value, board: &BoardKey) -> Result<Project, BackendError> {
     let id = v["id"]
         .as_str()
         .ok_or_else(|| BackendError::Decode("project has no id".into()))?;
@@ -352,10 +352,7 @@ pub fn summary_from_wire(v: &Value) -> Option<ProjectSummary> {
     let number = v["number"].as_u64()? as u32;
     Some(ProjectSummary {
         id: ProjectId::new(v["id"].as_str()?),
-        board: BoardRef {
-            owner: owner.to_string(),
-            number,
-        },
+        board: BoardKey::github(owner, number),
         title: str_of(&v["title"]),
         closed: v["closed"].as_bool().unwrap_or(false),
     })
@@ -444,7 +441,7 @@ pub(crate) mod tests {
         })
     }
 
-    fn board() -> BoardRef {
+    fn board() -> BoardKey {
         "tviles/3".parse().unwrap()
     }
 

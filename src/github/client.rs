@@ -53,7 +53,7 @@ impl Github {
         Ok(response)
     }
 
-    pub async fn resolve_project(&self, board: &BoardRef) -> Result<Project, BackendError> {
+    pub async fn resolve_project(&self, board: &GithubBoard) -> Result<Project, BackendError> {
         let body = queries::ResolveProject::build_query(queries::resolve_project::Variables {
             owner: board.owner.clone(),
             number: i64::from(board.number),
@@ -68,13 +68,13 @@ impl Github {
                     kind: Some("NOT_FOUND".into()),
                 }])
             })?;
-        convert::project_from_wire(node, board)
+        convert::project_from_wire(node, &BoardKey::Github(board.clone()))
     }
 
     pub async fn fetch_project(
         &self,
         id: &ProjectId,
-        board: &BoardRef,
+        board: &BoardKey,
     ) -> Result<Project, BackendError> {
         let body = queries::ProjectSchema::build_query(queries::project_schema::Variables {
             id: id.0.clone(),
@@ -280,7 +280,10 @@ mod tests {
             json!({"user": {"projectV2": project_json()}, "organization": null}),
         );
         let p = gh(t.clone())
-            .resolve_project(&"tviles/3".parse().unwrap())
+            .resolve_project(&GithubBoard {
+                owner: "tviles".into(),
+                number: 3,
+            })
             .await
             .unwrap();
         assert_eq!(p.id.as_str(), "PVT_1");
@@ -298,7 +301,10 @@ mod tests {
         );
         assert!(
             gh(t)
-                .resolve_project(&"acme/3".parse().unwrap())
+                .resolve_project(&GithubBoard {
+                    owner: "acme".into(),
+                    number: 3
+                })
                 .await
                 .is_ok()
         );
@@ -312,7 +318,10 @@ mod tests {
             json!({"user": {"projectV2": null}, "organization": null}),
         );
         let err = gh(t)
-            .resolve_project(&"tviles/99".parse().unwrap())
+            .resolve_project(&GithubBoard {
+                owner: "tviles".into(),
+                number: 99,
+            })
             .await
             .unwrap_err();
         assert!(err.to_string().contains("tviles/99"));

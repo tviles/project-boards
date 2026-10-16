@@ -2,7 +2,7 @@
 
 use crate::fsutil::write_atomic;
 use crate::herdr::cli::{HerdrCli, pane_exists};
-use crate::model::BoardRef;
+use crate::model::BoardKey;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -31,18 +31,18 @@ impl PaneRegistry {
         )
     }
 
-    pub fn lookup(&self, board: &BoardRef) -> Option<String> {
+    pub fn lookup(&self, board: &BoardKey) -> Option<String> {
         self.read().get(&board.to_string()).cloned()
     }
 
-    pub fn register(&self, board: &BoardRef, pane: &str) -> std::io::Result<()> {
+    pub fn register(&self, board: &BoardKey, pane: &str) -> std::io::Result<()> {
         let mut map = self.read();
         map.insert(board.to_string(), pane.to_string());
         self.write(&map)
     }
 
     /// Removes the record only if it still points at `pane`.
-    pub fn unregister(&self, board: &BoardRef, pane: &str) -> std::io::Result<()> {
+    pub fn unregister(&self, board: &BoardKey, pane: &str) -> std::io::Result<()> {
         let mut map = self.read();
         if map.get(&board.to_string()).map(String::as_str) == Some(pane) {
             map.remove(&board.to_string());
@@ -52,7 +52,7 @@ impl PaneRegistry {
     }
 
     /// The live pane showing `board`. A record whose pane is gone is discarded.
-    pub fn live_pane(&self, cli: &dyn HerdrCli, board: &BoardRef) -> Option<String> {
+    pub fn live_pane(&self, cli: &dyn HerdrCli, board: &BoardKey) -> Option<String> {
         let pane = self.lookup(board)?;
         match pane_exists(cli, &pane) {
             Ok(true) => Some(pane),
@@ -78,7 +78,7 @@ mod tests {
     fn live_pane_keeps_live_records_and_drops_stale_ones() {
         let dir = tempfile::tempdir().unwrap();
         let reg = PaneRegistry::new(dir.path());
-        let (a, b): (BoardRef, BoardRef) =
+        let (a, b): (BoardKey, BoardKey) =
             ("tviles/1".parse().unwrap(), "tviles/2".parse().unwrap());
         reg.register(&a, "p1").unwrap();
         reg.register(&b, "p2").unwrap();
@@ -94,7 +94,7 @@ mod tests {
     fn unregister_ignores_a_record_owned_by_another_pane() {
         let dir = tempfile::tempdir().unwrap();
         let reg = PaneRegistry::new(dir.path());
-        let a: BoardRef = "tviles/1".parse().unwrap();
+        let a: BoardKey = "tviles/1".parse().unwrap();
         reg.register(&a, "p2").unwrap();
         reg.unregister(&a, "p1").unwrap();
         assert_eq!(reg.lookup(&a).as_deref(), Some("p2"));

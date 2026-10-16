@@ -6,13 +6,13 @@ use crate::config::Config;
 use crate::herdr::cli::{HerdrCli, OpenRequest, action_cwd, focus_plugin_pane, open_plugin_pane};
 use crate::herdr::env::PluginEnv;
 use crate::herdr::registry::PaneRegistry;
-use crate::model::{BoardRef, RepoSlug};
+use crate::model::{BoardKey, RepoSlug};
 use crate::state::State;
 use std::path::Path;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OpenArgs {
-    pub project: Option<BoardRef>,
+    pub project: Option<BoardKey>,
     pub placement: Option<Placement>,
     pub picker: bool,
 }
@@ -162,7 +162,7 @@ mod tests {
     fn focuses_the_existing_pane_for_a_remembered_board() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = State::default();
-        let board: BoardRef = "tviles/3".parse().unwrap();
+        let board: BoardKey = "tviles/3".parse().unwrap();
         state.remember_board(&"tviles/app".parse().unwrap(), &board);
         PaneRegistry::new(dir.path())
             .register(&board, "old7")

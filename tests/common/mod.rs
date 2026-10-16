@@ -16,9 +16,9 @@ fn testbed_toml() -> toml::Table {
         .unwrap()
 }
 
-pub fn testbed() -> (BoardRef, ProjectId) {
+pub fn testbed() -> (GithubBoard, ProjectId) {
     let t = testbed_toml();
-    let board = BoardRef {
+    let board = GithubBoard {
         owner: t["owner"].as_str().unwrap().into(),
         number: t["number"].as_integer().unwrap() as u32,
     };

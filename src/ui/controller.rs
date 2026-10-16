@@ -32,7 +32,7 @@ pub struct PaneOptions {
     pub config: Config,
     pub warnings: Vec<String>,
     pub repo: Option<RepoSlug>,
-    pub board: Option<BoardRef>,
+    pub board: Option<BoardKey>,
     pub picker: bool,
     /// The local UTC offset, read once before any thread starts (the `time` crate refuses
     /// to read it afterwards); "today" in date input and iterations is the date at this offset.
@@ -63,7 +63,7 @@ pub enum Input {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SyncJob {
     /// Resolve the board, then load every item.
-    Resolve(BoardRef),
+    Resolve(BoardKey),
     /// Refresh the schema and views, then load every item.
     Refresh(Project),
     Incremental {
@@ -177,7 +177,7 @@ pub struct Controller {
     herdr: Arc<dyn HerdrCli>,
     mode: IncrementalMode,
     scheduler: Scheduler,
-    board: Option<BoardRef>,
+    board: Option<BoardKey>,
     full_load_in_flight: bool,
     awaiting_repo_projects: bool,
     /// Bumped whenever the shown board changes, so late events of the old board are dropped.
@@ -236,7 +236,7 @@ impl Controller {
         }
     }
 
-    pub fn board(&self) -> Option<&BoardRef> {
+    pub fn board(&self) -> Option<&BoardKey> {
         self.board.as_ref()
     }
 
@@ -289,7 +289,7 @@ impl Controller {
     }
 
     /// Shows `board` in this pane, unless another live pane already shows it.
-    fn open_board(&mut self, board: BoardRef, now: Instant) -> Vec<Effect> {
+    fn open_board(&mut self, board: BoardKey, now: Instant) -> Vec<Effect> {
         let registry = PaneRegistry::new(&self.options.state_dir);
         let own = self.options.own_pane.clone();
         if let Some(other) = registry
@@ -787,7 +787,7 @@ mod tests {
         )
     }
 
-    fn board() -> BoardRef {
+    fn board() -> BoardKey {
         "tviles/3".parse().unwrap()
     }
 
@@ -925,7 +925,7 @@ mod tests {
         assert_eq!(failed.app.mode, Mode::Picker);
     }
 
-    fn set_override(dir: &Path, board: &BoardRef, view: &str, layout: Layout, github: Layout) {
+    fn set_override(dir: &Path, board: &BoardKey, view: &str, layout: Layout, github: Layout) {
         State::update(dir, |s| {
             s.set_layout_override(
                 board,
@@ -1500,7 +1500,7 @@ mod tests {
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
         c.start(Ok(()), t0);
         let old = c.generation();
-        let other: BoardRef = "tviles/4".parse().unwrap();
+        let other: BoardKey = "tviles/4".parse().unwrap();
         let effects = c.commands(vec![Command::PickBoard(other.clone())], t0);
         assert_eq!(effects, vec![sp(&c, SyncJob::Resolve(other.clone()))]);
         assert!(c.generation() > old);
@@ -1657,7 +1657,7 @@ mod tests {
         // One Enter, after idling: the idle poll starts on the old board, then the pick switches.
         let enter = Input::Key(crate::ui::fixtures::code(crossterm::event::KeyCode::Enter));
         let effects = c.handle(enter, t0 + Duration::from_secs(400));
-        let other: BoardRef = "tviles/4".parse().unwrap();
+        let other: BoardKey = "tviles/4".parse().unwrap();
         assert_eq!(effects.len(), 2, "{effects:?}");
         assert!(
             matches!(&effects[0], Effect::Spawn { job: SyncJob::Incremental { .. }, generation } if *generation == old)
@@ -2007,7 +2007,7 @@ mod tests {
     #[test]
     fn edits_pending_when_another_board_opens_are_logged_as_not_sent() {
         let dir = tempfile::tempdir().unwrap();
-        let other: BoardRef = "tviles/9".parse().unwrap();
+        let other: BoardKey = "tviles/9".parse().unwrap();
         let (mut c, t0) = opened(dir.path());
         submit(&mut c, set_status("a", "o_done"), t0);
         c.commands(vec![Command::PickBoard(other)], t0);
@@ -2021,7 +2021,7 @@ mod tests {
     #[test]
     fn opening_another_board_forgets_queued_edits() {
         let dir = tempfile::tempdir().unwrap();
-        let other: BoardRef = "tviles/9".parse().unwrap();
+        let other: BoardKey = "tviles/9".parse().unwrap();
         let mut other_snap = snapshot();
         other_snap.project.board = other.clone();
         save_cache(&cache_path(dir.path(), &other), &other_snap).unwrap();

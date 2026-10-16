@@ -8,12 +8,12 @@ use std::sync::Arc;
 
 const REC: &str = "tests/fixtures/recorded";
 
-fn testbed() -> (BoardRef, ProjectId) {
+fn testbed() -> (GithubBoard, ProjectId) {
     let t: toml::Table = std::fs::read_to_string("tests/testbed.toml")
         .unwrap()
         .parse()
         .unwrap();
-    let board = BoardRef {
+    let board = GithubBoard {
         owner: t["owner"].as_str().unwrap().into(),
         number: t["number"].as_integer().unwrap() as u32,
     };
@@ -122,9 +122,16 @@ async fn recorded_project_lists_decode() {
         .list_repo_projects(&"tviles/project-boards-testbed".parse().unwrap())
         .await
         .unwrap();
-    assert!(linked.iter().any(|p| p.board == board));
+    assert!(
+        linked
+            .iter()
+            .any(|p| p.board == BoardKey::Github(board.clone()))
+    );
     let all = gh.list_viewer_projects().await.unwrap();
-    assert!(all.iter().any(|p| p.board == board));
+    assert!(
+        all.iter()
+            .any(|p| p.board == BoardKey::Github(board.clone()))
+    );
 }
 
 fn values(item: &Item) -> Vec<&FieldValue> {

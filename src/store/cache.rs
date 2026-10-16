@@ -1,12 +1,12 @@
 use crate::fsutil::write_atomic;
-use crate::model::BoardRef;
+use crate::model::BoardKey;
 use crate::store::snapshot::BoardSnapshot;
 use std::path::{Path, PathBuf};
 
 /// Bump when `BoardSnapshot`'s serialized shape changes; older caches are discarded.
 pub const CACHE_VERSION: u32 = 3;
 
-pub fn cache_path(state_dir: &Path, board: &BoardRef) -> PathBuf {
+pub fn cache_path(state_dir: &Path, board: &BoardKey) -> PathBuf {
     state_dir
         .join("cache")
         .join(format!("{}.json", board.key()))

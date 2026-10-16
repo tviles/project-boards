@@ -1,4 +1,4 @@
-use crate::model::{BoardRef, ProjectSummary};
+use crate::model::{BoardKey, ProjectSummary};
 use crate::ui::text::truncate_to_width;
 use crate::ui::theme::Theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -20,7 +20,7 @@ pub struct PickerState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PickerOutcome {
     None,
-    Chosen(BoardRef),
+    Chosen(BoardKey),
     Cancel,
 }
 

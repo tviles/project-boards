@@ -22,7 +22,7 @@ fn main() -> ExitCode {
             let state = State::load(&env.state_dir);
             let project = match project
                 .as_deref()
-                .map(str::parse::<project_boards::model::BoardRef>)
+                .map(str::parse::<project_boards::model::BoardKey>)
                 .transpose()
             {
                 Ok(p) => p,
