@@ -121,8 +121,9 @@ query SeedLabels {
 }
 
 # One operation per kind of label, so no variable is ever null (Linear rejects a null colour).
-mutation SeedCreateLabelGroup($name: String!, $groupType: LabelGroupType!, $color: String!) {
-  issueLabelCreate(input: { name: $name, isGroup: true, groupType: $groupType, color: $color }) {
+# Single-select only: the testbed workspace refuses multi-select label groups.
+mutation SeedCreateLabelGroup($name: String!, $color: String!) {
+  issueLabelCreate(input: { name: $name, isGroup: true, groupType: singleSelect, color: $color }) {
     issueLabel {
       id
     }

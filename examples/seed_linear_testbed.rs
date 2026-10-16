@@ -204,7 +204,6 @@ fn label_color(name: &str) -> String {
         "Bug" => "#eb5757",
         "Feature" => "#bb87fc",
         "Chore" => "#95a2b3",
-        "Area" => "#26b5ce",
         "UI" => "#4cb782",
         "API" => "#f2c94c",
         "Docs" => "#f2994a",
@@ -215,25 +214,22 @@ fn label_color(name: &str) -> String {
 
 /// How a new label hangs in the tree.
 enum NewLabel {
-    Group { single_select: bool },
-    Child { parent_id: String },
+    /// A single-select group (the workspace refuses multi-select ones).
+    Group,
+    Child {
+        parent_id: String,
+    },
     Loose,
 }
 
 async fn create_label(linear: &Linear, name: &str, kind: NewLabel) -> String {
-    use seed_create_label_group::LabelGroupType;
     let (name, color) = (name.to_string(), label_color(name));
     let d = match kind {
-        NewLabel::Group { single_select } => {
+        NewLabel::Group => {
             run(
                 linear,
                 &SeedCreateLabelGroup::build_query(seed_create_label_group::Variables {
                     name,
-                    group_type: if single_select {
-                        LabelGroupType::singleSelect
-                    } else {
-                        LabelGroupType::multiSelect
-                    },
                     color,
                 }),
                 "create label group",
@@ -586,7 +582,8 @@ async fn main() {
     }
     let states_b = state_list(&states_b_raw);
 
-    // 4. Labels: groups first, then their children (matched by group), then the loose label.
+    // 4. Labels: the "Type" group first (single-select), its children (matched by group, a
+    // parentless default label is moved in), then the loose labels UI, API, Docs, good first issue.
     let data = run(
         &linear,
         &SeedLabels::build_query(seed_labels::Variables {}),
@@ -597,23 +594,13 @@ async fn main() {
     let mut labels_created = 0;
     let mut labels_moved = 0;
     let mut label_ids: HashMap<&str, String> = HashMap::new();
-    let groups: [(&str, bool, [&str; 3]); 2] = [
-        ("Type", true, ["Bug", "Feature", "Chore"]),
-        ("Area", false, ["UI", "API", "Docs"]),
-    ];
-    for (group, single, children) in groups {
+    {
+        let (group, children) = ("Type", ["Bug", "Feature", "Chore"]);
         let group_id = match find_label(&existing, group, None, true) {
             Some(id) => id,
             None => {
                 labels_created += 1;
-                create_label(
-                    &linear,
-                    group,
-                    NewLabel::Group {
-                        single_select: single,
-                    },
-                )
-                .await
+                create_label(&linear, group, NewLabel::Group).await
             }
         };
         for child in children {
@@ -648,15 +635,16 @@ async fn main() {
             label_ids.insert(child, id);
         }
     }
-    let loose = "good first issue";
-    let id = match find_label(&existing, loose, None, false) {
-        Some(id) => id,
-        None => {
-            labels_created += 1;
-            create_label(&linear, loose, NewLabel::Loose).await
-        }
-    };
-    label_ids.insert(loose, id);
+    for loose in ["UI", "API", "Docs", "good first issue"] {
+        let id = match find_label(&existing, loose, None, false) {
+            Some(id) => id,
+            None => {
+                labels_created += 1;
+                create_label(&linear, loose, NewLabel::Loose).await
+            }
+        };
+        label_ids.insert(loose, id);
+    }
 
     // 5. The project, in both teams.
     let data = run(
@@ -978,7 +966,6 @@ mod tests {
             "Bug",
             "Feature",
             "Chore",
-            "Area",
             "UI",
             "API",
             "Docs",
