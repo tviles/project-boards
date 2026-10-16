@@ -1627,7 +1627,7 @@ impl App {
     /// Whether the view's own GitHub filter already shows archived items.
     pub(crate) fn view_shows_archived(&self) -> bool {
         self.current_view()
-            .is_some_and(|v| archived_token(&v.filter).is_some())
+            .is_some_and(|v| archived_token(v.filter.github_query()).is_some())
     }
 
     /// "Show archived items" in the action menu: toggles `is:archived` in the session filter,
@@ -2984,7 +2984,7 @@ mod tests {
 
     fn board_app(filter: &str, ids: &[&str]) -> App {
         let f = filter.to_string();
-        let mut a = app_edited(|s| s.project.views[1].filter = f);
+        let mut a = app_edited(|s| s.project.views[1].filter = f.into());
         let board = crate::model::ViewId::new("V_board");
         a.select_view(&board);
         a.on_sync(SyncEvent::ViewIds {

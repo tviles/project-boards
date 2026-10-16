@@ -100,7 +100,7 @@ pub fn view_from_wire(v: &Value, fields: &[Field]) -> View {
         number: v["number"].as_u64().unwrap_or(0) as u32,
         name: str_of(&v["name"]),
         layout: Layout::from_api(v["layout"].as_str().unwrap_or("")),
-        filter: str_of(&v["filter"]),
+        filter: str_of(&v["filter"]).into(),
         visible_fields: field_ids(v, "visibleFields", fields),
         group_by: field_ids(v, "groupByFields", fields),
         vertical_group_by: field_ids(v, "verticalGroupByFields", fields),
@@ -494,7 +494,7 @@ pub(crate) mod tests {
         let p = project_from_wire(&project_json(), &board()).unwrap();
         let v1 = &p.views[0];
         assert_eq!(v1.layout, Layout::Table);
-        assert_eq!(v1.filter, "");
+        assert_eq!(v1.filter, "".into());
         assert_eq!(
             v1.visible_fields,
             vec![FieldId::new("F_title"), FieldId::new("F_status")]
@@ -509,7 +509,7 @@ pub(crate) mod tests {
         );
         let v2 = &p.views[1];
         assert_eq!(
-            (v2.layout, v2.filter.as_str()),
+            (v2.layout, v2.filter.github_query()),
             (Layout::Board, "label:bug")
         );
         assert_eq!(v2.column_field(&p.fields).unwrap().name, "Status");

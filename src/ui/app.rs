@@ -321,7 +321,7 @@ impl App {
     fn filter_for(&self, view: &View) -> String {
         match self.extra_filter.get(&view.id) {
             Some(extra) => format!("{} {extra}", view.filter).trim().to_string(),
-            None => view.filter.clone(),
+            None => view.filter.github_query().to_string(),
         }
     }
 

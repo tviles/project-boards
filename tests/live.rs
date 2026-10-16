@@ -41,7 +41,12 @@ async fn resolve() {
         "View 1 should report its group-by (Sprint); empty means the API does not expose groupByFields"
     );
     assert_eq!(
-        p.views.iter().find(|v| v.name == "Bugs").unwrap().filter,
+        p.views
+            .iter()
+            .find(|v| v.name == "Bugs")
+            .unwrap()
+            .filter
+            .github_query(),
         "label:bug"
     );
 }
