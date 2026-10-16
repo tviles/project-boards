@@ -2690,6 +2690,7 @@ mod tests {
             id: OptionId::new("o_dup"),
             name: "Todo".into(),
             color: crate::model::OptionColor::Blue,
+            kind: None,
         });
         let mut a = app_with(snap);
         a.select_view(&crate::model::ViewId::new("V_board"));

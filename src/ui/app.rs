@@ -1287,6 +1287,7 @@ mod tests {
                     id: OptionId::new(format!("o_empty{i}")),
                     name: name.into(),
                     color: OptionColor::Gray,
+                    kind: None,
                 },
             );
         }

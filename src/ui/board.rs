@@ -842,6 +842,7 @@ mod tests {
             id: OptionId::new("o_dup"),
             name: first.name.clone(),
             color: first.color,
+            kind: None,
         });
         let status = field(&p, "Status").clone();
         let all = items();
@@ -894,6 +895,7 @@ mod tests {
                         id: OptionId::new(id),
                         name: name.into(),
                         color: OptionColor::Purple,
+                        kind: None,
                     },
                 );
             }

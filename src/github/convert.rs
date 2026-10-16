@@ -44,6 +44,7 @@ fn options(v: &Value) -> Vec<SelectOption> {
                     id: OptionId::new(str_of(&o["id"])),
                     name: str_of(&o["name"]),
                     color: OptionColor::from_api(o["color"].as_str().unwrap_or("")),
+                    kind: None,
                 })
                 .collect()
         })

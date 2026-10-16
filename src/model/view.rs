@@ -105,6 +105,7 @@ mod tests {
                     id: OptionId::new("o"),
                     name: "x".into(),
                     color: OptionColor::Gray,
+                    kind: None,
                 }],
             },
         }

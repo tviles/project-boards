@@ -93,6 +93,7 @@ mod tests {
             id: OptionId::new(id),
             name: id.into(),
             color: OptionColor::Gray,
+            kind: None,
         };
         Field {
             id: FieldId::new("P"),

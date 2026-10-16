@@ -14,6 +14,7 @@ fn opt(id: &str, name: &str, color: OptionColor) -> SelectOption {
         id: OptionId::new(id),
         name: name.into(),
         color,
+        kind: None,
     }
 }
 
