@@ -1,3 +1,4 @@
+use crate::backend::Backend;
 use crate::github::Github;
 use crate::github::token::resolve_token_from_system;
 use crate::github::transport::HttpTransport;
@@ -203,7 +204,7 @@ async fn drive(
 /// controller generation the job was spawned under, so late events of a previous board are
 /// dropped by `Controller::handle`.
 struct Runner {
-    gh: Arc<Github>,
+    backend: Arc<Backend>,
     tx: mpsc::UnboundedSender<Tagged>,
     max_items: usize,
 }
@@ -284,9 +285,11 @@ fn start(
 ) -> Vec<Effect> {
     match resolve_token_from_system(settings.gh_user.as_deref()) {
         Ok(token) => {
-            let gh = Arc::new(Github::new(Arc::new(HttpTransport::new(token.value))));
+            let backend = Arc::new(Backend::Github(Github::new(Arc::new(HttpTransport::new(
+                token.value,
+            )))));
             *runner = Some(Runner {
-                gh,
+                backend,
                 tx: tx.clone(),
                 max_items: settings.max_items,
             });
@@ -307,7 +310,7 @@ impl Runner {
                 }
             }
         });
-        let s = Syncer::new(self.gh.clone(), jtx, self.max_items, INCREMENTAL_MODE);
+        let s = Syncer::new(self.backend.clone(), jtx, self.max_items);
         tokio::spawn(async move {
             match job {
                 SyncJob::Resolve(board) => {

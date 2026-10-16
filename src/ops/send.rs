@@ -1,5 +1,6 @@
 //! Carries an op to GitHub: which mutation, with which ids, and what came back.
 
+use crate::backend::Backend;
 use crate::error::BackendError;
 use crate::github::Github;
 use crate::model::{ContentId, FieldId, FieldValue, ItemId, ProjectId};
@@ -47,9 +48,23 @@ async fn create(
     })
 }
 
-/// Sends `op` and reports what GitHub confirmed. Ops on the same item must not overlap; the
-/// queue (ops::queue) makes sure of that.
-pub async fn send(gh: &Github, project: &ProjectId, op: &Op) -> Result<Confirmed, BackendError> {
+/// Sends `op` to the board's provider and reports what it confirmed. Ops on the same item
+/// must not overlap; the queue (ops::queue) makes sure of that.
+pub async fn send(
+    backend: &Backend,
+    project: &ProjectId,
+    op: &Op,
+) -> Result<Confirmed, BackendError> {
+    match backend {
+        Backend::Github(gh) => send_github(gh, project, op).await,
+    }
+}
+
+pub(crate) async fn send_github(
+    gh: &Github,
+    project: &ProjectId,
+    op: &Op,
+) -> Result<Confirmed, BackendError> {
     match op {
         Op::SetField { item, field, value } => gh
             .set_field_value(project, item, field, value)
@@ -173,18 +188,18 @@ mod tests {
             value: FieldValue::Text("x".into()),
         };
         assert!(
-            matches!(send(&gh, &p, &set).await, Ok(Confirmed::Item(i)) if i.id.as_str() == "PVTI_1")
+            matches!(send_github(&gh, &p, &set).await, Ok(Confirmed::Item(i)) if i.id.as_str() == "PVTI_1")
         );
         let clear = Op::ClearField {
             item: item.clone(),
             field: FieldId::new("F_notes"),
         };
         assert!(matches!(
-            send(&gh, &p, &clear).await,
+            send_github(&gh, &p, &clear).await,
             Ok(Confirmed::Item(_))
         ));
         let reorder = Op::Reorder { item, after: None };
-        assert_eq!(send(&gh, &p, &reorder).await, Ok(Confirmed::Applied));
+        assert_eq!(send_github(&gh, &p, &reorder).await, Ok(Confirmed::Applied));
         let names: Vec<String> = t
             .requests()
             .iter()
@@ -256,7 +271,7 @@ mod tests {
         ];
         for op in &ops {
             assert_eq!(
-                send(&gh, &p, op).await,
+                send_github(&gh, &p, op).await,
                 Ok(Confirmed::Applied),
                 "{}",
                 op.name()
@@ -380,7 +395,7 @@ mod tests {
         ];
         for op in &ops {
             assert_eq!(
-                send(&gh, &p, op).await,
+                send_github(&gh, &p, op).await,
                 Ok(Confirmed::Applied),
                 "{}",
                 op.name()
@@ -446,7 +461,7 @@ mod tests {
                 (FieldId::new("F_notes"), FieldValue::Text("x".into())),
             ],
         };
-        match send(&gh, &ProjectId::new("P"), &op).await {
+        match send_github(&gh, &ProjectId::new("P"), &op).await {
             Ok(Confirmed::Created {
                 temp,
                 item,
@@ -520,7 +535,7 @@ mod tests {
             presets: vec![],
         };
         assert!(matches!(
-            send(&gh, &p, &draft).await,
+            send_github(&gh, &p, &draft).await,
             Ok(Confirmed::Created { refused, .. }) if refused.is_empty()
         ));
         let existing = Op::Create {
@@ -529,7 +544,7 @@ mod tests {
             presets: vec![],
         };
         assert!(matches!(
-            send(&gh, &p, &existing).await,
+            send_github(&gh, &p, &existing).await,
             Ok(Confirmed::Created { .. })
         ));
         let convert = Op::Convert {
@@ -540,15 +555,15 @@ mod tests {
             },
         };
         assert!(matches!(
-            send(&gh, &p, &convert).await,
+            send_github(&gh, &p, &convert).await,
             Ok(Confirmed::Item(_))
         ));
         assert_eq!(
-            send(&gh, &p, &Op::Archive { item: item.clone() }).await,
+            send_github(&gh, &p, &Op::Archive { item: item.clone() }).await,
             Ok(Confirmed::Applied)
         );
         assert_eq!(
-            send(&gh, &p, &Op::Remove { item }).await,
+            send_github(&gh, &p, &Op::Remove { item }).await,
             Ok(Confirmed::Applied)
         );
     }
@@ -565,7 +580,7 @@ mod tests {
             item: ItemId::new("PVTI_1"),
         };
         assert_eq!(
-            send(&gh, &ProjectId::new("P"), &op).await,
+            send_github(&gh, &ProjectId::new("P"), &op).await,
             Ok(Confirmed::Applied)
         );
     }
@@ -603,7 +618,7 @@ mod tests {
             t.push_error("AddItemById", error.clone());
             let gh = Github::new(t.clone());
             assert_eq!(
-                send(&gh, &ProjectId::new("P"), &new_issue_op()).await,
+                send_github(&gh, &ProjectId::new("P"), &new_issue_op()).await,
                 Ok(Confirmed::NotAdded {
                     issue: "I_new".into(),
                     error
@@ -624,7 +639,7 @@ mod tests {
         t.push_error("CreateIssue", BackendError::Network("reset".into()));
         let gh = Github::new(t.clone());
         assert_eq!(
-            send(&gh, &ProjectId::new("P"), &new_issue_op()).await,
+            send_github(&gh, &ProjectId::new("P"), &new_issue_op()).await,
             Err(BackendError::Network("reset".into()))
         );
         let t = Arc::new(FixtureTransport::new());
@@ -638,7 +653,11 @@ mod tests {
             },
             presets: vec![(FieldId::new("F_notes"), FieldValue::Text("x".into()))],
         };
-        assert!(send(&gh, &ProjectId::new("P"), &draft).await.is_err());
+        assert!(
+            send_github(&gh, &ProjectId::new("P"), &draft)
+                .await
+                .is_err()
+        );
         assert_eq!(t.requests().len(), 1, "no presets for an item never made");
     }
 
@@ -680,7 +699,8 @@ mod tests {
                 (FieldId::new("F_size"), FieldValue::Number(3.0)),
             ],
         };
-        let Ok(Confirmed::Created { refused, .. }) = send(&gh, &ProjectId::new("P"), &op).await
+        let Ok(Confirmed::Created { refused, .. }) =
+            send_github(&gh, &ProjectId::new("P"), &op).await
         else {
             panic!("expected Created")
         };
@@ -691,5 +711,24 @@ mod tests {
             BackendError::MissingPermission { .. }
         ));
         assert_eq!(t.requests().len(), 4, "the draft and all three presets");
+    }
+
+    #[tokio::test]
+    async fn send_dispatches_to_the_boards_backend() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push(
+            "UpdateItemPosition",
+            json!({"updateProjectV2ItemPosition": {"clientMutationId": null}}),
+        );
+        let backend = crate::backend::Backend::Github(Github::new(t.clone()));
+        let op = Op::Reorder {
+            item: ItemId::new("PVTI_1"),
+            after: None,
+        };
+        assert_eq!(
+            send(&backend, &ProjectId::new("P"), &op).await,
+            Ok(Confirmed::Applied)
+        );
+        assert_eq!(t.requests()[0].operation_name, "UpdateItemPosition");
     }
 }

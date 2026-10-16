@@ -1804,6 +1804,24 @@ mod tests {
     }
 
     #[test]
+    fn a_linear_resolve_failure_shows_the_linear_setup_text() {
+        let mut a = app();
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::Resolve,
+            error: BackendError::NoCredentials {
+                provider: Provider::Linear,
+            },
+        });
+        assert_eq!(a.mode, Mode::Setup);
+        assert!(
+            a.setup
+                .as_deref()
+                .unwrap()
+                .contains("No Linear API key found")
+        );
+    }
+
+    #[test]
     fn late_view_ids_for_an_old_filter_are_dropped() {
         let mut a = app();
         let list = |id: &str| ViewList {
