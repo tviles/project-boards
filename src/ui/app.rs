@@ -76,11 +76,11 @@ pub enum Command {
     },
     Refresh,
     SaveLastView(ViewId),
-    /// The user chose `layout` for `view`, whose own layout on GitHub is `github_layout`.
+    /// The user chose `layout` for `view`, whose own layout on GitHub is `server_layout`.
     SaveLayout {
         view: ViewId,
         layout: Layout,
-        github_layout: Layout,
+        server_layout: Layout,
     },
     /// The user is back on GitHub's layout for `view`: forget the choice.
     ClearLayout {
@@ -870,7 +870,7 @@ impl App {
                                 Command::SaveLayout {
                                     view: view.id,
                                     layout: next,
-                                    github_layout: view.layout,
+                                    server_layout: view.layout,
                                 }
                             };
                             self.restore_selection();
@@ -1371,7 +1371,7 @@ mod tests {
             vec![Command::SaveLayout {
                 view: ViewId::new("V_table"),
                 layout: Layout::Board,
-                github_layout: Layout::Table,
+                server_layout: Layout::Table,
             }]
         );
         let cmds = a.handle_key(key('L'));

@@ -600,7 +600,7 @@ impl Controller {
                 .project()
                 .and_then(|p| p.views.iter().find(|v| v.id == id));
             match view {
-                Some(v) if v.layout != o.github_layout => stale.push((id, v.name.clone())),
+                Some(v) if v.layout != o.server_layout => stale.push((id, v.name.clone())),
                 _ => {
                     keep.insert(id, o.layout);
                 }
@@ -708,7 +708,7 @@ impl Controller {
                 Command::SaveLayout {
                     view,
                     layout,
-                    github_layout,
+                    server_layout,
                 } => {
                     if let Some(board) = self.board.clone()
                         && let Err(e) = State::update(&self.options.state_dir, |s| {
@@ -717,7 +717,7 @@ impl Controller {
                                 &view,
                                 LayoutOverride {
                                     layout,
-                                    github_layout,
+                                    server_layout,
                                 },
                             )
                         })
@@ -932,7 +932,7 @@ mod tests {
                 &ViewId::new(view),
                 LayoutOverride {
                     layout,
-                    github_layout: github,
+                    server_layout: github,
                 },
             )
         })
@@ -983,7 +983,7 @@ mod tests {
                 ViewId::new("V_table"),
                 LayoutOverride {
                     layout: Layout::Board,
-                    github_layout: Layout::Table
+                    server_layout: Layout::Table
                 }
             )]
         );
