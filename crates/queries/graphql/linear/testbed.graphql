@@ -9,3 +9,184 @@ query TestbedViewer {
     }
   }
 }
+
+query SeedTeams {
+  teams(first: 10) {
+    nodes {
+      id
+      key
+      name
+    }
+  }
+}
+
+mutation SeedRenameTeam($id: String!, $name: String!, $key: String!) {
+  teamUpdate(id: $id, input: { name: $name, key: $key }) {
+    success
+  }
+}
+
+mutation SeedCreateTeam($name: String!, $key: String!) {
+  teamCreate(input: { name: $name, key: $key }) {
+    team {
+      id
+    }
+  }
+}
+
+mutation SeedTeamSettings($id: String!, $cycles: Boolean!, $estimation: String!) {
+  teamUpdate(
+    id: $id
+    input: { cyclesEnabled: $cycles, cycleDuration: 1, upcomingCycleCount: 2, issueEstimationType: $estimation }
+  ) {
+    success
+  }
+}
+
+query SeedTeamDetails($id: String!) {
+  team(id: $id) {
+    states(first: 20) {
+      nodes {
+        id
+        name
+        type
+      }
+    }
+    cycles(first: 10) {
+      nodes {
+        id
+        number
+        startsAt
+        endsAt
+      }
+    }
+  }
+}
+
+mutation SeedRenameState($id: String!, $name: String!) {
+  workflowStateUpdate(id: $id, input: { name: $name }) {
+    success
+  }
+}
+
+query SeedLabels {
+  issueLabels(first: 100) {
+    nodes {
+      id
+      name
+      isGroup
+      parent {
+        id
+      }
+    }
+  }
+}
+
+mutation SeedCreateLabel($name: String!, $isGroup: Boolean!, $groupType: LabelGroupType, $parentId: String, $color: String) {
+  issueLabelCreate(input: { name: $name, isGroup: $isGroup, groupType: $groupType, parentId: $parentId, color: $color }) {
+    issueLabel {
+      id
+    }
+  }
+}
+
+query SeedProjects {
+  projects(first: 50) {
+    nodes {
+      id
+      name
+    }
+  }
+}
+
+mutation SeedCreateProject($name: String!, $teamIds: [String!]!) {
+  projectCreate(input: { name: $name, teamIds: $teamIds }) {
+    project {
+      id
+    }
+  }
+}
+
+query SeedIssues($teamId: ID!) {
+  issues(filter: { team: { id: { eq: $teamId } } }, first: 250, includeArchived: true) {
+    nodes {
+      id
+      title
+      archivedAt
+    }
+  }
+}
+
+mutation SeedCreateIssue(
+  $teamId: String!
+  $title: String!
+  $description: String
+  $stateId: String
+  $priority: Int
+  $estimate: Int
+  $dueDate: TimelessDate
+  $labelIds: [String!]
+  $assigneeId: String
+  $projectId: String
+  $cycleId: String
+  $parentId: String
+) {
+  issueCreate(
+    input: {
+      teamId: $teamId
+      title: $title
+      description: $description
+      stateId: $stateId
+      priority: $priority
+      estimate: $estimate
+      dueDate: $dueDate
+      labelIds: $labelIds
+      assigneeId: $assigneeId
+      projectId: $projectId
+      cycleId: $cycleId
+      parentId: $parentId
+    }
+  ) {
+    issue {
+      id
+      identifier
+    }
+  }
+}
+
+mutation SeedArchiveIssue($id: String!) {
+  issueArchive(id: $id) {
+    success
+  }
+}
+
+mutation SeedMarkDuplicate($issueId: String!, $relatedIssueId: String!) {
+  issueRelationCreate(input: { issueId: $issueId, relatedIssueId: $relatedIssueId, type: duplicate }) {
+    success
+  }
+}
+
+query SeedViews {
+  customViews(first: 50) {
+    nodes {
+      id
+      name
+    }
+  }
+}
+
+mutation SeedCreateTeamBugsView($name: String!, $teamId: String!) {
+  customViewCreate(
+    input: { name: $name, teamId: $teamId, shared: true, filterData: { labels: { name: { eq: "Bug" } } } }
+  ) {
+    success
+  }
+}
+
+mutation SeedCreateOpenView($name: String!) {
+  customViewCreate(
+    input: { name: $name, shared: true, filterData: { state: { type: { nin: ["completed", "canceled", "duplicate"] } } } }
+  ) {
+    success
+  }
+}

@@ -103,5 +103,24 @@ pub mod linear {
         )*};
     }
 
-    linear_operation!(TestbedViewer);
+    linear_operation!(
+        TestbedViewer,
+        SeedTeams,
+        SeedRenameTeam,
+        SeedCreateTeam,
+        SeedTeamSettings,
+        SeedTeamDetails,
+        SeedRenameState,
+        SeedLabels,
+        SeedCreateLabel,
+        SeedProjects,
+        SeedCreateProject,
+        SeedIssues,
+        SeedCreateIssue,
+        SeedArchiveIssue,
+        SeedMarkDuplicate,
+        SeedViews,
+        SeedCreateTeamBugsView,
+        SeedCreateOpenView,
+    );
 }
