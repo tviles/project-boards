@@ -205,7 +205,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("state.json"),
-            r#"{"layout_overrides": {"acme/3/V1": {"layout": "board", "server_layout": "table"}}}"#,
+            r#"{"layout_overrides": {"acme/3/V1": {"layout": "board", "github_layout": "table"}}}"#,
         )
         .unwrap();
         let board = BoardKey::github("acme", 3);
