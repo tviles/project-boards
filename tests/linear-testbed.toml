@@ -1,0 +1,6 @@
+# The Linear testbed workspace for phase 0 and the live suite. Invented names only; the
+# key is never here (PB_LINEAR_TESTBED_KEY or the Keychain item project-boards-linear-testbed).
+url_key = "project-boards-linear-testbed"
+team_a = "TBA"
+team_b = "TBB"
+project = "Testbed project"

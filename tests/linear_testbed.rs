@@ -67,3 +67,10 @@ fn raw_responses_expose_error_codes_and_headers() {
     assert_eq!(raw.header("X-Complexity"), Some("2301"));
     assert!(raw.data().is_null());
 }
+
+#[test]
+fn the_checked_in_testbed_file_parses_and_has_invented_team_keys() {
+    let tb = testbed();
+    assert_eq!((tb.team_a.as_str(), tb.team_b.as_str()), ("TBA", "TBB"));
+    assert_eq!(tb.url_key, "project-boards-linear-testbed");
+}
