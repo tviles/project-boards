@@ -1,0 +1,11 @@
+# Phase 0 only: the testbed guard, the seed program and the probes. Built with the `live`
+# feature; the app never sends these.
+
+query TestbedViewer {
+  viewer {
+    id
+    organization {
+      urlKey
+    }
+  }
+}

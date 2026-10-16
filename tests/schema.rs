@@ -57,3 +57,31 @@ fn schema_has_everything_we_use() {
         assert!(schema.contains(needle), "schema is missing `{needle}`");
     }
 }
+
+/// What the Linear backend relies on in Linear's published schema (spec section 9).
+const LINEAR_REQUIRED: &[&str] = &[
+    "type Issue implements",
+    "identifier: String!",
+    "type CustomView implements",
+    "type ViewPreferencesValues",
+    "type WorkflowState implements",
+    "enum LabelGroupType",
+    "enum PaginationOrderBy",
+    "type IssueConnection",
+    "issueCreate(",
+    "issueUpdate(",
+    "customViews(",
+    "rateLimitStatus: RateLimitPayload!",
+];
+
+#[test]
+fn linear_schema_has_everything_we_use() {
+    let schema = std::fs::read_to_string("crates/queries/graphql/linear/schema.graphql")
+        .expect("Linear schema present");
+    for needle in LINEAR_REQUIRED {
+        assert!(
+            schema.contains(needle),
+            "Linear schema is missing `{needle}`"
+        );
+    }
+}

@@ -106,3 +106,11 @@ Pivot 2026-10-06T16:12:06Z; items updated at or after it: 7
 Filter write returned String("label:bug -status:Done") (round trip exact: true)
 
 Group-by and sort are not in UpdateProjectV2ViewInput in schema 0.1.0-dev; confirm by checking the schema copy for `groupBy` inside that input.
+
+## Linear (phase 0 for the Linear backend)
+
+Schema: `crates/queries/graphql/linear/schema.graphql`, fetched 2026-10-16 from linear/linear master (53325 lines). Probes ran against the testbed workspace only (`tests/linear-testbed.toml`); nothing here comes from any other workspace.
+
+| # | Question | Answer | Consequence |
+|---|---|---|---|
+| L10 | Can `graphql_client` 0.16 build an operation with an `IssueFilter` variable from Linear's schema? | Yes, once the module declares the extra custom-scalar aliases the filter types reach: `TimelessDateOrDuration`, `Duration` and `JSONObject` (plus `JSON`) as `String`. Without them the first error is ``error[E0425]: cannot find type `Duration` in module `super` ``. No measurable build cost: `project-boards-queries` with `--features live` built in 6.9 s without the probe and 6.0 s with it (single timed builds, warm dependencies) | Plan 2 can send built-in tab filters as `IssueFilter` variables; it must add those scalar aliases to the `linear` module when it does. No need for raw requests with a validated twin |
