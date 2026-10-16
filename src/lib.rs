@@ -4,6 +4,7 @@ pub mod board_choice;
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod error;
 pub mod fsutil;
 pub mod github;
 pub mod herdr;
