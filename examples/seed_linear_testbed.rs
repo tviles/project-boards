@@ -71,14 +71,49 @@ fn date_in(days: i64) -> String {
 /// A cycle as read from the API: id, start and end.
 type CycleSpan = (String, OffsetDateTime, OffsetDateTime);
 
-/// The cycle that contains `now` and the first one that starts after it.
-fn pick_cycles(cycles: &[CycleSpan], now: OffsetDateTime) -> Option<(String, String)> {
-    let current = cycles.iter().find(|(_, s, e)| *s <= now && now < *e)?;
-    let next = cycles
+/// The active cycle and the earliest future cycle that starts after `now`. Independent of
+/// the order the API lists them in.
+fn pick_cycles(
+    active: Option<&CycleSpan>,
+    future: &[CycleSpan],
+    now: OffsetDateTime,
+) -> Option<(String, String)> {
+    let current = active?;
+    let next = future
         .iter()
-        .filter(|(_, s, _)| *s > now)
+        .filter(|(id, s, _)| *s > now && *id != current.0)
         .min_by_key(|(_, s, _)| *s)?;
     Some((current.0.clone(), next.0.clone()))
+}
+
+/// A cycle object from the API; a date that does not parse is an error, not a missing cycle.
+fn parse_span(c: &Value) -> Result<CycleSpan, String> {
+    let at = |k: &str| {
+        c[k].as_str()
+            .and_then(|t| OffsetDateTime::parse(t, &Rfc3339).ok())
+            .ok_or_else(|| "cycle dates did not parse".to_string())
+    };
+    Ok((str_of(c, "id"), at("startsAt")?, at("endsAt")?))
+}
+
+/// What to do about one child label of a group.
+#[derive(Debug, PartialEq)]
+enum LabelPlan {
+    /// Already under the group.
+    Found(String),
+    /// A parentless label of that name exists: move it under the group.
+    Move(String),
+    Create,
+}
+
+fn plan_child_label(existing: &[Value], name: &str, group_id: &str) -> LabelPlan {
+    if let Some(id) = find_label(existing, name, Some(group_id), false) {
+        LabelPlan::Found(id)
+    } else if let Some(id) = find_label(existing, name, None, false) {
+        LabelPlan::Move(id)
+    } else {
+        LabelPlan::Create
+    }
 }
 
 /// A workflow state of the given type, preferring Linear's own name for it (so "Duplicate"
@@ -433,23 +468,54 @@ async fn main() {
         None => create_team(&linear, "Testbed B", &tb.team_b, &mut teams_changed).await,
     };
 
-    // 2. Team settings: the same values every run.
-    for (id, cycles, estimation, what) in [
-        (&team_a, true, "fibonacci", "team A settings"),
-        (&team_b, false, "notUsed", "team B settings"),
-    ] {
+    // 2. Team settings. TBA's cycles are enabled with a start date of now the first time only
+    // (so the first cycle is current), and never re-sent once cycles are on.
+    let a_state = run(
+        &linear,
+        &SeedTeamCycleState::build_query(seed_team_cycle_state::Variables { id: team_a.clone() }),
+        "team A cycle state",
+    )
+    .await;
+    if a_state["team"]["cyclesEnabled"].as_bool() == Some(true) {
         let d = run(
             &linear,
             &SeedTeamSettings::build_query(seed_team_settings::Variables {
-                id: id.clone(),
-                cycles,
-                estimation: estimation.into(),
+                id: team_a.clone(),
+                cycles: true,
+                estimation: "fibonacci".into(),
             }),
-            what,
+            "team A settings",
         )
         .await;
-        expect_success(&d, "teamUpdate", what);
+        expect_success(&d, "teamUpdate", "team A settings");
+    } else {
+        let start = OffsetDateTime::now_utc()
+            .replace_time(time::Time::MIDNIGHT)
+            .format(&Rfc3339)
+            .unwrap_or_else(|e| fail(&format!("cycle start date: {e}")));
+        let d = run(
+            &linear,
+            &SeedEnableTeamCycles::build_query(seed_enable_team_cycles::Variables {
+                id: team_a.clone(),
+                start,
+                estimation: "fibonacci".into(),
+            }),
+            "enable team A cycles",
+        )
+        .await;
+        expect_success(&d, "teamUpdate", "enable team A cycles");
     }
+    let d = run(
+        &linear,
+        &SeedTeamSettings::build_query(seed_team_settings::Variables {
+            id: team_b.clone(),
+            cycles: false,
+            estimation: "notUsed".into(),
+        }),
+        "team B settings",
+    )
+    .await;
+    expect_success(&d, "teamUpdate", "team B settings");
 
     // 3. TBB's "In Progress" state renamed "Doing" (skipped once renamed).
     let details =
@@ -488,6 +554,7 @@ async fn main() {
     .await;
     let existing = nodes(&data, &["issueLabels"]);
     let mut labels_created = 0;
+    let mut labels_moved = 0;
     let mut label_ids: HashMap<&str, String> = HashMap::new();
     let groups: [(&str, bool, [&str; 3]); 2] = [
         ("Type", true, ["Bug", "Feature", "Chore"]),
@@ -502,9 +569,23 @@ async fn main() {
             }
         };
         for child in children {
-            let id = match find_label(&existing, child, Some(&group_id), false) {
-                Some(id) => id,
-                None => {
+            let id = match plan_child_label(&existing, child, &group_id) {
+                LabelPlan::Found(id) => id,
+                LabelPlan::Move(id) => {
+                    let d = run(
+                        &linear,
+                        &SeedMoveLabel::build_query(seed_move_label::Variables {
+                            id: id.clone(),
+                            parent_id: group_id.clone(),
+                        }),
+                        "move label",
+                    )
+                    .await;
+                    expect_success(&d, "issueLabelUpdate", "move label");
+                    labels_moved += 1;
+                    id
+                }
+                LabelPlan::Create => {
                     labels_created += 1;
                     create_label(&linear, child, false, None, Some(group_id.clone())).await
                 }
@@ -529,12 +610,14 @@ async fn main() {
         "projects",
     )
     .await;
+    let mut projects_created = 0;
     let project_id = match nodes(&data, &["projects"])
         .iter()
         .find(|p| p["name"].as_str() == Some(tb.project.as_str()))
     {
         Some(p) => str_of(p, "id"),
         None => {
+            projects_created += 1;
             let d = run(
                 &linear,
                 &SeedCreateProject::build_query(seed_create_project::Variables {
@@ -550,14 +633,23 @@ async fn main() {
 
     // 6. Cycles on TBA (Linear creates them itself): stop before any issue if they are absent.
     let details_a = run(&linear, &details(&team_a), "team A details").await;
-    let spans: Vec<CycleSpan> = nodes(&details_a, &["team", "cycles"])
+    let cycles = run(
+        &linear,
+        &SeedCycles::build_query(seed_cycles::Variables { id: team_a.clone() }),
+        "team A cycles",
+    )
+    .await;
+    let active = match &cycles["team"]["activeCycle"] {
+        Value::Null => None,
+        c => Some(parse_span(c).unwrap_or_else(|e| fail(&e))),
+    };
+    let future: Vec<CycleSpan> = nodes(&cycles, &["team", "cycles"])
         .iter()
-        .filter_map(|c| {
-            let at = |k: &str| OffsetDateTime::parse(c[k].as_str()?, &Rfc3339).ok();
-            Some((str_of(c, "id"), at("startsAt")?, at("endsAt")?))
-        })
+        .map(|c| parse_span(c).unwrap_or_else(|e| fail(&e)))
         .collect();
-    let Some((current_cycle, next_cycle)) = pick_cycles(&spans, OffsetDateTime::now_utc()) else {
+    let Some((current_cycle, next_cycle)) =
+        pick_cycles(active.as_ref(), &future, OffsetDateTime::now_utc())
+    else {
         println!("cycles not created yet; run the seed again in a minute");
         std::process::exit(2);
     };
@@ -731,7 +823,7 @@ async fn main() {
     }
 
     println!(
-        "teams ok ({teams_changed} changed), {labels_created} labels created, {issues_created} issues created, {relations_created} duplicate relations, {issues_archived} issues archived, {views_created} views created"
+        "teams ok ({teams_changed} changed), {labels_created} labels created, {labels_moved} labels moved, {projects_created} projects created, {issues_created} issues created, {relations_created} duplicate relations, {issues_archived} issues archived, {views_created} views created"
     );
 }
 
@@ -753,36 +845,62 @@ mod tests {
     }
 
     #[test]
-    fn picks_the_current_and_the_next_cycle() {
+    fn picks_the_active_and_the_earliest_future_cycle_in_any_list_order() {
         let now = datetime!(2026-10-16 12:00 UTC);
-        let cycles = [
-            span(
-                "past",
-                datetime!(2026-10-02 0:00 UTC),
-                datetime!(2026-10-09 0:00 UTC),
-            ),
+        let active = span(
+            "now",
+            datetime!(2026-10-12 0:00 UTC),
+            datetime!(2026-10-19 0:00 UTC),
+        );
+        let future = [
             span(
                 "later",
-                datetime!(2026-10-23 0:00 UTC),
-                datetime!(2026-10-30 0:00 UTC),
-            ),
-            span(
-                "now",
-                datetime!(2026-10-12 0:00 UTC),
-                datetime!(2026-10-19 0:00 UTC),
+                datetime!(2026-10-26 0:00 UTC),
+                datetime!(2026-11-02 0:00 UTC),
             ),
             span(
                 "next",
                 datetime!(2026-10-19 0:00 UTC),
-                datetime!(2026-10-23 0:00 UTC),
+                datetime!(2026-10-26 0:00 UTC),
             ),
         ];
         assert_eq!(
-            pick_cycles(&cycles, now),
+            pick_cycles(Some(&active), &future, now),
             Some(("now".into(), "next".into()))
         );
-        assert_eq!(pick_cycles(&cycles[..2], now), None);
-        assert_eq!(pick_cycles(&[], now), None);
+        assert_eq!(pick_cycles(None, &future, now), None);
+        assert_eq!(pick_cycles(Some(&active), &[], now), None);
+    }
+
+    #[test]
+    fn cycle_dates_that_do_not_parse_are_an_error() {
+        let ok = serde_json::json!({"id": "c", "startsAt": "2026-10-12T00:00:00.000Z", "endsAt": "2026-10-19T00:00:00.000Z"});
+        assert!(parse_span(&ok).is_ok());
+        let bad = serde_json::json!({"id": "c", "startsAt": "tomorrow", "endsAt": "2026-10-19T00:00:00.000Z"});
+        assert_eq!(parse_span(&bad), Err("cycle dates did not parse".into()));
+    }
+
+    #[test]
+    fn a_parentless_label_is_moved_into_its_group_and_a_moved_one_is_found() {
+        let label = |id: &str, name: &str, group: bool, parent: Option<&str>| {
+            serde_json::json!({"id": id, "name": name, "isGroup": group,
+                "parent": parent.map(|p| serde_json::json!({"id": p}))})
+        };
+        let mut existing = vec![
+            label("g", "Type", true, None),
+            label("b", "Bug", false, None),
+            label("i", "Improvement", false, None),
+        ];
+        assert_eq!(
+            plan_child_label(&existing, "Bug", "g"),
+            LabelPlan::Move("b".into())
+        );
+        assert_eq!(plan_child_label(&existing, "Chore", "g"), LabelPlan::Create);
+        existing[1] = label("b", "Bug", false, Some("g"));
+        assert_eq!(
+            plan_child_label(&existing, "Bug", "g"),
+            LabelPlan::Found("b".into())
+        );
     }
 
     #[test]

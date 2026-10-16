@@ -52,14 +52,52 @@ query SeedTeamDetails($id: String!) {
         type
       }
     }
-    cycles(first: 10) {
+  }
+}
+
+query SeedTeamCycleState($id: String!) {
+  team(id: $id) {
+    cyclesEnabled
+  }
+}
+
+# First enabling only: cycleEnabledStartDate makes the first cycle start now, and must not be
+# sent again once cycles are on.
+mutation SeedEnableTeamCycles($id: String!, $start: DateTime!, $estimation: String!) {
+  teamUpdate(
+    id: $id
+    input: {
+      cyclesEnabled: true
+      cycleDuration: 1
+      upcomingCycleCount: 2
+      cycleEnabledStartDate: $start
+      issueEstimationType: $estimation
+    }
+  ) {
+    success
+  }
+}
+
+query SeedCycles($id: String!) {
+  team(id: $id) {
+    activeCycle {
+      id
+      startsAt
+      endsAt
+    }
+    cycles(first: 10, filter: { isFuture: { eq: true } }) {
       nodes {
         id
-        number
         startsAt
         endsAt
       }
     }
+  }
+}
+
+mutation SeedMoveLabel($id: String!, $parentId: String!) {
+  issueLabelUpdate(id: $id, input: { parentId: $parentId }) {
+    success
   }
 }
 
