@@ -3,7 +3,6 @@ use crate::github::Github;
 use crate::github::token::resolve_token_from_system;
 use crate::github::transport::HttpTransport;
 use crate::herdr::cli::{HerdrCli, ProcessHerdr};
-use crate::sync::INCREMENTAL_MODE;
 use crate::sync::syncer::Syncer;
 use crate::ui::chrome;
 use crate::ui::controller::{Controller, Effect, Input, PaneOptions, SyncJob};
@@ -119,7 +118,12 @@ async fn event_loop(
     if let Err(e) = crate::ui::editor::clear_stale(&edits, crate::ui::editor::pid_alive) {
         tracing::warn!(error = %e, "could not clear old editor files");
     }
-    let mut controller = Controller::new(options, herdr, INCREMENTAL_MODE, Instant::now());
+    let mut controller = Controller::new(
+        options,
+        herdr,
+        crate::backend::GITHUB_PROFILE.incremental,
+        Instant::now(),
+    );
     let result = drive(terminal, &mut controller, tx, rx, &settings, signals).await;
     // Every exit path (Exit effect, SIGTERM/SIGHUP, a failed draw) unregisters the pane.
     controller.release();

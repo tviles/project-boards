@@ -16,21 +16,35 @@ pub fn cache_path(state_dir: &Path, board: &BoardKey) -> PathBuf {
 /// The cached snapshot, or `None` when missing, unreadable or from another cache version.
 pub fn load_cache(path: &Path) -> Option<BoardSnapshot> {
     let text = std::fs::read_to_string(path).ok()?;
+    // Older versions have other shapes; judge the version before parsing the rest.
+    if let Some(found) = cache_version(&text)
+        && found != CACHE_VERSION
+    {
+        tracing::info!(
+            found,
+            expected = CACHE_VERSION,
+            "discarding cache from another version"
+        );
+        return None;
+    }
     match serde_json::from_str::<BoardSnapshot>(&text) {
-        Ok(s) if s.version == CACHE_VERSION => Some(s),
-        Ok(s) => {
-            tracing::info!(
-                found = s.version,
-                expected = CACHE_VERSION,
-                "discarding cache from another version"
-            );
-            None
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, path = %path.display(), "discarding unreadable cache");
+        Ok(s) => Some(s),
+        Err(_) => {
+            // The parse error can quote cached text, so it is not logged.
+            tracing::warn!(path = %path.display(), "discarding unreadable cache");
             None
         }
     }
+}
+
+fn cache_version(text: &str) -> Option<u32> {
+    #[derive(serde::Deserialize)]
+    struct Version {
+        version: u32,
+    }
+    serde_json::from_str::<Version>(text)
+        .ok()
+        .map(|v| v.version)
 }
 
 pub fn save_cache(path: &Path, snapshot: &BoardSnapshot) -> std::io::Result<()> {
@@ -62,12 +76,22 @@ mod tests {
     }
 
     #[test]
-    fn a_version_3_cache_is_discarded() {
+    fn a_version_3_cache_in_the_old_shape_is_discarded() {
         let dir = tempfile::tempdir().unwrap();
         let path = cache_path(dir.path(), &"acme/3".parse().unwrap());
-        let mut s = BoardSnapshot::new(project());
-        s.version = 3;
-        save_cache(&path, &s).unwrap();
+        // A 0.3 file: board as a map, `repo` instead of `container`, string view filters.
+        let old = r#"{
+            "version": 3,
+            "project": {
+                "id": "P1",
+                "title": "Example",
+                "board": {"owner": "acme", "number": 3},
+                "views": [{"id": "V1", "name": "Open", "filter": "is:open"}]
+            },
+            "items": [{"id": "I1", "number": 1, "title": "Example", "repo": "acme/app"}]
+        }"#;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, old).unwrap();
         assert_eq!(load_cache(&path), None);
         assert_eq!(CACHE_VERSION, 4);
     }

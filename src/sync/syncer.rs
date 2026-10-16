@@ -54,7 +54,7 @@ impl Syncer {
     }
 
     fn fail(&self, task: SyncTask, error: BackendError) {
-        tracing::warn!(task = task.kind(), %error, "sync task failed");
+        tracing::warn!(task = task.kind(), error = error.kind(), "sync task failed");
         self.send(SyncEvent::Failed { task, error });
     }
 
