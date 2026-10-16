@@ -28,7 +28,7 @@
 
 ## Executing this plan
 
-- **Sandbox:** run every cargo command with `CARGO_HOME=$TMPDIR/cargo-home` (writes to `~/.cargo` are blocked) and allow `crates.io`, `index.crates.io` and `static.crates.io`. Commands below show it. `gh`, the seed program and the probes need Tyler's tokens or keys and run outside the sandbox: only Tyler runs them (marked **(Tyler)**).
+- **Sandbox:** run every cargo command with `CARGO_HOME=$TMPDIR/cargo-home` (writes to `~/.cargo` are blocked) and allow `crates.io`, `index.crates.io` and `static.crates.io`. Commands below show it. `gh`, the seed program and the probes need Tyler's tokens or keys and run outside the sandbox: Tyler runs `gh`; the controller runs the seed program and the probes with the sandbox disabled for that one command, after Tyler approves the prompt (Decision 15). Steps only Tyler can do are marked **(Tyler)**.
 - **Plan code is a strong draft, not compiled.** Fix compile and API errors inside the task freely. If a fix changes a name, signature or type listed under the task's **Produces**, update every later task in this plan that uses it, in the same commit, and say so in the commit message.
 - **Branches and PRs:** each slice is a branch off `main`, opened as a PR into `main` by Tyler and merged by him with `--merge`. Never push to `main`. `git push` needs the sandbox disabled (credential helper); push only after Tyler says so.
 
@@ -37,7 +37,7 @@
   | A: neutral error | `linear` (already holds the spec and this plan) | 1–2 | now |
   | B: model generalised | `linear-model`, off `main` after A merges | 3–7 | after A |
   | C: backend seam | `linear-backend`, off `main` after B merges | 8 | after B |
-  | P0: Linear phase 0 | `linear-phase0`, off `main` | 9–14 | any time; Tasks 11–14 need Tyler's testbed workspace |
+  | P0: Linear phase 0 | `linear-phase0`, off `main` | 9–14 | any time; the testbed exists (Decision 16); Task 13 needs Tyler in the web app |
 
 - Before each PR: run the full check, then `git log --oneline main..HEAD` to confirm only that slice's commits are on the branch. Check the PR's CI run before reporting a PR ready to merge (CI runs on PRs and `main`, on Linux).
 - Steps marked **(ask first)** publish to GitHub or touch the testbed workspace; confirm with Tyler before running them.
@@ -53,7 +53,7 @@ Spec sections 3–5 and the brainstorming answers: one `BackendError`; `BoardKey
 1. **Two plans.** This plan covers spec slices 1–3 and phase 0. Plan 2 (slices 4–7) is written after the probes, against measured facts (Tyler, 2026-10-16).
 2. **Moved to plan 2, because nothing would use them yet:** the filter evaluator (spec slice 4), credentials per provider and the setup-screen change (spec slice 3), and the `EditContext` read-only reason (spec slice 3). Each has its first user in the Linear client or wiring.
 3. **`SyncProfile` holds pages and the incremental mode only** (`full_page`, `poll_page`, `incremental`). The recent window and the in-flight limit affect edits only; Linear has none until 0.5, so they stay constants (`store::RECENT_WINDOW`, `ops::queue::MAX_IN_FLIGHT`) and move into the profile in the 0.5 plan.
-4. **`BackendError`'s shape.** `NoCredentials`, `Unauthorized` and `MissingPermission` carry the provider, and their GitHub texts are unchanged word for word. `RateLimited { retry_after_secs }`, `Api(Vec<GraphqlErrorEntry>)`, `Network(String)` and `Decode(String)` carry no provider: they stay one-to-one with today's variants, so the rename is mechanical. Three texts lose the word "GitHub" and **need Tyler's approval**:
+4. **`BackendError`'s shape.** `NoCredentials`, `Unauthorized` and `MissingPermission` carry the provider, and their GitHub texts are unchanged word for word. `RateLimited { retry_after_secs }`, `Api(Vec<GraphqlErrorEntry>)`, `Network(String)` and `Decode(String)` carry no provider: they stay one-to-one with today's variants, so the rename is mechanical. Three texts lose the word "GitHub" (approved by Tyler, 2026-10-16):
    - "rate limited by GitHub; retry in Ns" becomes "rate limited; retry in Ns";
    - "GitHub returned an error: …" becomes "the server returned an error: …" (the toast fallback "GitHub returned an error" in `ui/app/edit.rs` is untouched until plan 2 changes UI wording);
    - "could not decode GitHub's response: …" becomes "could not decode the response: …".
@@ -68,6 +68,8 @@ Spec sections 3–5 and the brainstorming answers: one `BackendError`; `BoardKey
 12. **Linear cannot create cycles through the API** (`cycleCreate` is deprecated: "Cycle creation is not supported"). The seed enables cycles on team A and lets Linear create them.
 13. **The seed renames the workspace's first team** to "Testbed A" (`TBA`) instead of creating a third team: the Free plan allows two teams, and Linear creates one at sign-up.
 14. **Probe L10 is added to the spec's list:** whether `graphql_client` 0.16 can generate an operation with an `IssueFilter` variable from Linear's schema. Fallback: send such operations as raw requests whose text is still checked by a validated twin operation (decided in plan 2).
+15. **The controller runs the seed and the probes** (Tyler, 2026-10-16), with the sandbox disabled for that one command (Keychain and `api.linear.app`), after Tyler approves the permission prompt. The key is read by the program, never by the controller.
+16. **The testbed exists** (Tyler, 2026-10-16): workspace "Project Boards Linear Testbed", URL key `project-boards-linear-testbed`, one sign-up team with key `PRO` (the seed renames it to `TBA`). The key is in the Keychain item `project-boards-linear-testbed`. The linear-server MCP in the controller's session is connected to this workspace; before any write through it, the controller checks `get_workspace` returns this URL key.
 
 ## Review Focus
 
@@ -1841,7 +1843,7 @@ use linear_testbed::*;
 fn bed() -> Testbed {
     testbed_from(
         r#"
-        url_key = "pb-testbed-qx7"
+        url_key = "example-testbed"
         team_a = "TBA"
         team_b = "TBB"
         project = "Testbed project"
@@ -1873,7 +1875,7 @@ fn the_testbed_key_comes_from_its_own_variable_then_its_own_keychain_item() {
 #[test]
 fn another_workspace_is_refused_without_naming_it() {
     let tb = bed();
-    assert_eq!(check_workspace("pb-testbed-qx7", &tb), Ok(()));
+    assert_eq!(check_workspace("example-testbed", &tb), Ok(()));
     let err = check_workspace("my-real-company", &tb).unwrap_err();
     assert!(!err.contains("my-real-company"), "{err}");
     assert!(err.contains("stopping"), "{err}");
@@ -2112,28 +2114,13 @@ git add tests/common/linear_testbed.rs tests/linear_testbed.rs
 git commit -m "test: Linear testbed tooling with a workspace guard and its own key"
 ```
 
-### Task 11 (Tyler): the testbed workspace and key
+### Task 11: the testbed config
 
 **Files:**
 - Create: `tests/linear-testbed.toml`
 - Test: `tests/linear_testbed.rs`
 
-No code until Tyler has done Step 1.
-
-- [ ] **Step 1 (Tyler): create the workspace**
-
-1. Signed in to Linear, open the workspace menu (top left) → "Create or join a workspace" → create a workspace.
-   - Name: an invented one, e.g. `PB Testbed`.
-   - URL: an invented key with no personal or company name in it, e.g. `pb-testbed-` plus four random letters. **Write it down: it goes into the repository.**
-   - Plan: Free. Skip invitations and integrations.
-2. Leave the team Linear creates at sign-up as it is; the seed program renames it to "Testbed A" (`TBA`).
-3. In the new workspace: Settings → Security & access → Personal API keys → New key, named `project-boards testbed`, with full access. Copy it once.
-4. Store it in the Keychain (it prompts for the key; nothing lands in your shell history):
-   ```
-   security add-generic-password -s project-boards-linear-testbed -a "$USER" -w
-   ```
-5. Do **not** put this key in `LINEAR_API_KEY`, and do not use a key from any other workspace.
-6. Tell the controller the URL key from item 1.
+Tyler created the workspace and stored its key on 2026-10-16 (Decision 16); this task only records it.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -2144,7 +2131,7 @@ Add to `tests/linear_testbed.rs`:
 fn the_checked_in_testbed_file_parses_and_has_invented_team_keys() {
     let tb = testbed();
     assert_eq!((tb.team_a.as_str(), tb.team_b.as_str()), ("TBA", "TBB"));
-    assert!(tb.url_key.starts_with("pb-testbed-"), "{}", tb.url_key);
+    assert_eq!(tb.url_key, "project-boards-linear-testbed");
 }
 ```
 
@@ -2156,13 +2143,11 @@ Expected: FAIL (file missing).
 ```toml
 # The Linear testbed workspace for phase 0 and the live suite. Invented names only; the
 # key is never here (PB_LINEAR_TESTBED_KEY or the Keychain item project-boards-linear-testbed).
-url_key = "<the URL key Tyler gave>"
+url_key = "project-boards-linear-testbed"
 team_a = "TBA"
 team_b = "TBB"
 project = "Testbed project"
 ```
-
-If Tyler's URL key does not start with `pb-testbed-`, change the test's prefix to match it.
 
 - [ ] **Step 4: Run the test and commit**
 
@@ -2396,7 +2381,7 @@ Expected: builds.
 ```rust
 //! Seeds the Linear testbed workspace (tests/linear-testbed.toml). Idempotent: run it again
 //! and it only adds what is missing. Refuses to run against any other workspace.
-//! Run (Tyler): cargo run --example seed_linear_testbed
+//! Run: cargo run --example seed_linear_testbed
 
 #[path = "../tests/common/linear_testbed.rs"]
 mod linear_testbed;
@@ -2572,10 +2557,12 @@ git add crates/queries examples/seed_linear_testbed.rs
 git commit -m "test: idempotent seed program for the Linear testbed"
 ```
 
-- [ ] **Step 5 (Tyler, ask first): run the seed**
+- [ ] **Step 5 (controller, ask first): run the seed**
 
-```
-! cargo run --example seed_linear_testbed
+Run it with the sandbox disabled for this one command (it reads the Keychain item and calls `api.linear.app`); Tyler approves the prompt. Use the normal `CARGO_HOME` here, or `CARGO_HOME=$TMPDIR/cargo-home` if the build cache is there:
+
+```bash
+CARGO_HOME=$TMPDIR/cargo-home cargo run --example seed_linear_testbed
 ```
 
 Expected: "testbed workspace confirmed", then counts. Exit status 2 means Linear has not created cycles yet: wait a minute and run it again. Running it a second time must print zero created for everything. If `customViewCreate` failed, keep its error codes for L4.
@@ -2805,7 +2792,7 @@ Fix any field the schema names differently (the compiler says which). Build with
 ```rust
 //! Phase 0 probes L1-L9 against the Linear testbed (tests/linear-testbed.toml). Prints a
 //! Markdown report for docs/phase0-findings.md. Refuses to run against any other workspace.
-//! Run (Tyler): cargo run --example probe_linear
+//! Run: cargo run --example probe_linear
 
 #[path = "../tests/common/linear_testbed.rs"]
 mod linear_testbed;
@@ -2868,13 +2855,15 @@ git add crates/queries examples/probe_linear.rs
 git commit -m "test: Linear phase 0 probes L1-L9"
 ```
 
-- [ ] **Step 4 (Tyler, ask first): run the probes**
+- [ ] **Step 4 (controller, ask first): run the probes**
 
-```
-! cargo run --example probe_linear > $TMPDIR/linear-probes.md; cat $TMPDIR/linear-probes.md
+With the sandbox disabled for this one command; Tyler approves the prompt:
+
+```bash
+CARGO_HOME=$TMPDIR/cargo-home cargo run --example probe_linear > $TMPDIR/linear-probes.md; cat $TMPDIR/linear-probes.md
 ```
 
-Tyler pastes the report into the session (or tells the controller its path).
+After the run, the controller may check the results through the linear-server MCP (read-only), after confirming `get_workspace` is the testbed.
 
 - [ ] **Step 5: Write the findings**
 
