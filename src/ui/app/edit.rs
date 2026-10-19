@@ -2367,7 +2367,7 @@ mod tests {
         a.select_view(&board);
         a.on_sync(SyncEvent::ViewIds {
             view: board,
-            filter: "-status:\"In Progress\"".into(),
+            query: ListQuery::github("-status:\"In Progress\""),
             list: crate::store::ViewList {
                 ids: ["a", "c", "d", "e"]
                     .iter()
@@ -2612,7 +2612,7 @@ mod tests {
         a.select_view(&board);
         a.on_sync(SyncEvent::ViewIds {
             view: board,
-            filter: "-status:\"In Progress\"".into(),
+            query: ListQuery::github("-status:\"In Progress\""),
             list: crate::store::ViewList {
                 ids: ["a", "c", "d", "e"]
                     .iter()
@@ -2651,7 +2651,7 @@ mod tests {
         a.select_view(&board);
         a.on_sync(SyncEvent::ViewIds {
             view: board,
-            filter: "-status:\"In Progress\"".into(),
+            query: ListQuery::github("-status:\"In Progress\""),
             list: crate::store::ViewList {
                 ids: ["a", "b", "c", "d", "e"]
                     .iter()
@@ -2788,7 +2788,7 @@ mod tests {
         a.select_view(&board);
         a.on_sync(SyncEvent::ViewIds {
             view: board.clone(),
-            filter: "-status:Done".into(),
+            query: ListQuery::github("-status:Done"),
             list: list(&["a", "b", "c", "e"]),
         });
         a.handle_key(code(KeyCode::Home));
@@ -2820,7 +2820,7 @@ mod tests {
         a.select_view(&board);
         a.on_sync(SyncEvent::ViewIds {
             view: board.clone(),
-            filter: "-status:Done".into(),
+            query: ListQuery::github("-status:Done"),
             list: list(&["a", "b", "c", "e"]),
         });
         assert_eq!(a.marks(), ItemMarks::default());
@@ -2867,7 +2867,7 @@ mod tests {
         a.select_view(&bugs);
         a.on_sync(SyncEvent::ViewIds {
             view: bugs.clone(),
-            filter: "label:bug".into(),
+            query: ListQuery::github("label:bug"),
             list: list(&["a"]),
         });
         a.handle_key(key('>'));
@@ -2877,7 +2877,7 @@ mod tests {
         );
         a.on_sync(SyncEvent::ViewIds {
             view: bugs.clone(),
-            filter: "label:bug".into(),
+            query: ListQuery::github("label:bug"),
             list: list(&[]),
         });
         let ids: Vec<String> = a
@@ -2903,13 +2903,13 @@ mod tests {
         a.select_view(&bugs);
         a.on_sync(SyncEvent::ViewIds {
             view: bugs.clone(),
-            filter: "label:bug".into(),
+            query: ListQuery::github("label:bug"),
             list: list(&["a"]),
         });
         a.handle_key(key('>'));
         a.on_sync(SyncEvent::ViewIds {
             view: bugs,
-            filter: "label:bug".into(),
+            query: ListQuery::github("label:bug"),
             list: list(&[]),
         });
         assert_eq!(a.handle_key(key('r')), vec![Command::Refresh]);
@@ -2989,7 +2989,7 @@ mod tests {
         a.select_view(&board);
         a.on_sync(SyncEvent::ViewIds {
             view: board,
-            filter: filter.into(),
+            query: ListQuery::github(filter),
             list: list(ids),
         });
         a
@@ -3025,7 +3025,7 @@ mod tests {
         a.submit(OpKind::SetField, set_status("a", "o_done", "Done"));
         a.on_sync(SyncEvent::ViewIds {
             view: crate::model::ViewId::new("V_board"),
-            filter: "-status:Done".into(),
+            query: ListQuery::github("-status:Done"),
             list: list(&["b", "c", "e"]),
         });
         assert!(column_titles(&a).contains(&"Done (filtered)".to_string()));
@@ -4540,7 +4540,7 @@ mod tests {
         a.handle_key(code(KeyCode::Enter));
         a.on_sync(SyncEvent::ViewIds {
             view: crate::model::ViewId::new("V_table"),
-            filter: "is:archived".into(),
+            query: ListQuery::github("is:archived"),
             list: list(&["a"]),
         });
         assert_eq!(selected(&a), "a");
@@ -4718,7 +4718,7 @@ mod tests {
         let cmds = a.toggle_archived();
         assert_eq!(a.effective_filter(), "is:archived");
         assert!(
-            matches!(&cmds[..], [Command::FetchViewIds { filter, .. }] if filter == "is:archived")
+            matches!(&cmds[..], [Command::FetchViewIds { query, .. }] if query == &ListQuery::github("is:archived"))
         );
         a.toggle_archived();
         assert_eq!(a.effective_filter(), "");
@@ -4853,7 +4853,7 @@ mod tests {
         a.select_view(&bugs);
         a.on_sync(SyncEvent::ViewIds {
             view: bugs.clone(),
-            filter: "label:bug".into(),
+            query: ListQuery::github("label:bug"),
             list: list(&["a"]),
         });
         a.on_edited(
@@ -4862,7 +4862,7 @@ mod tests {
         );
         a.on_sync(SyncEvent::ViewIds {
             view: bugs,
-            filter: "label:bug".into(),
+            query: ListQuery::github("label:bug"),
             list: list(&["a"]),
         });
         assert_eq!(a.selected_item().unwrap().id.as_str(), "local:1");

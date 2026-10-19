@@ -6,8 +6,8 @@ pub mod syncer;
 use crate::error::BackendError;
 use crate::github::transport::RateInfo;
 use crate::model::{
-    ContentHit, Item, ItemDetail, ItemId, Project, ProjectSummary, PushableRepos, RepoCandidates,
-    RepoRef, RepoSlug, ViewId,
+    ContentHit, Item, ItemDetail, ItemId, ListQuery, Project, ProjectSummary, PushableRepos,
+    RepoCandidates, RepoRef, RepoSlug, ViewId,
 };
 use crate::ops::{Confirmed, OpId};
 use crate::store::{StoreUpdate, ViewList};
@@ -92,8 +92,8 @@ pub enum SyncEvent {
     },
     ViewIds {
         view: ViewId,
-        /// The filter this list answers; stale answers are dropped by the App.
-        filter: String,
+        /// The request this list answers; stale answers are dropped by the App.
+        query: ListQuery,
         list: ViewList,
     },
     Hydrated(Vec<Item>),

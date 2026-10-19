@@ -1,7 +1,7 @@
 //! Runs fetches and reports results as events; never touches the store.
 
 use crate::backend::{Backend, SyncProfile};
-use crate::error::BackendError;
+use crate::error::{BackendError, GraphqlErrorEntry};
 use crate::model::*;
 use crate::store::ViewList;
 use crate::sync::{SyncEvent, SyncTask, incremental_query, search_query};
@@ -206,7 +206,7 @@ impl Syncer {
         &self,
         project: &ProjectId,
         view: &ViewId,
-        filter: &str,
+        query: &ListQuery,
         known: &HashSet<ItemId>,
         hydrate: bool,
     ) {
@@ -214,7 +214,17 @@ impl Syncer {
         let mut after = None;
         let (total, truncated) = loop {
             let page = match &*self.backend {
-                Backend::Github(gh) => gh.fetch_view_ids_page(project, filter, after.take()).await,
+                Backend::Github(gh) => match &query.filter {
+                    ViewFilter::Github(text) => {
+                        gh.fetch_view_ids_page(project, text, after.take()).await
+                    }
+                    ViewFilter::LinearView { .. } | ViewFilter::Linear(_) => {
+                        Err(BackendError::Api(vec![GraphqlErrorEntry {
+                            message: "this list does not belong to a GitHub board".into(),
+                            kind: None,
+                        }]))
+                    }
+                },
             };
             match page {
                 Ok(page) => {
@@ -237,7 +247,7 @@ impl Syncer {
             .collect();
         self.send(SyncEvent::ViewIds {
             view: view.clone(),
-            filter: filter.to_string(),
+            query: query.clone(),
             list: ViewList {
                 ids,
                 total,
@@ -557,14 +567,14 @@ mod tests {
         s.view_ids(
             &ProjectId::new("P"),
             &ViewId::new("V"),
-            "label:bug",
+            &ListQuery::github("label:bug"),
             &known,
             true,
         )
         .await;
         let events = drain(&mut rx);
         assert!(
-            matches!(&events[0], SyncEvent::ViewIds { filter, list, .. } if filter == "label:bug" && list.ids.len() == 2 && !list.truncated)
+            matches!(&events[0], SyncEvent::ViewIds { query, list, .. } if query == &ListQuery::github("label:bug") && list.ids.len() == 2 && !list.truncated)
         );
         assert!(matches!(&events[1], SyncEvent::Hydrated(items) if items[0].id.as_str() == "new"));
         assert_eq!(t.requests()[1].variables["ids"], json!(["new"]));
@@ -582,13 +592,40 @@ mod tests {
         s.view_ids(
             &ProjectId::new("P"),
             &ViewId::new("V"),
-            "label:bug",
+            &ListQuery::github("label:bug"),
             &HashSet::new(),
             false,
         )
         .await;
         assert_eq!(drain(&mut rx).len(), 1);
         assert_eq!(t.requests().len(), 1, "no HydrateItems request");
+    }
+
+    #[tokio::test]
+    async fn a_linear_list_fails_on_a_github_board() {
+        let (t, s, mut rx) = setup(2000);
+        let query = ListQuery {
+            filter: ViewFilter::LinearView {
+                id: "cv1".into(),
+                hide_closed: false,
+            },
+            include_archived: false,
+        };
+        s.view_ids(
+            &ProjectId::new("P"),
+            &ViewId::new("V"),
+            &query,
+            &HashSet::new(),
+            true,
+        )
+        .await;
+        let events = drain(&mut rx);
+        assert!(matches!(
+            &events[..],
+            [SyncEvent::Failed { task: SyncTask::ViewIds(_), error }]
+                if error.to_string().contains("this list does not belong to a GitHub board")
+        ));
+        assert!(t.requests().is_empty());
     }
 
     #[tokio::test]

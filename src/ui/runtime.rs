@@ -335,10 +335,10 @@ impl Runner {
                 SyncJob::ViewIds {
                     project,
                     view,
-                    filter,
+                    query,
                     known,
                     hydrate,
-                } => s.view_ids(&project, &view, &filter, &known, hydrate).await,
+                } => s.view_ids(&project, &view, &query, &known, hydrate).await,
                 SyncJob::Detail { item, before } => s.detail(&item, before).await,
                 SyncJob::RepoProjects(repo) => s.repo_projects(&repo).await,
                 SyncJob::Projects(repo) => s.projects(repo.as_ref()).await,

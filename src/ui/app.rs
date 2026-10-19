@@ -60,7 +60,7 @@ pub enum EditPurpose {
 pub enum Command {
     FetchViewIds {
         view: ViewId,
-        filter: String,
+        query: ListQuery,
     },
     LoadDetail {
         item: ItemId,
@@ -325,6 +325,24 @@ impl App {
         }
     }
 
+    /// The list request for `view`, or `None` when the view shows every item. Today's
+    /// GitHub rule: the effective filter text decides. A Linear board lists by the view's
+    /// own filter.
+    pub fn list_query(&self, view: &View) -> Option<ListQuery> {
+        let linear = self
+            .project()
+            .is_some_and(|p| p.board.provider() == Provider::Linear);
+        if linear {
+            (!view.filter.is_everything()).then(|| ListQuery {
+                filter: view.filter.clone(),
+                include_archived: false,
+            })
+        } else {
+            let text = self.filter_for(view);
+            (!text.trim().is_empty()).then(|| ListQuery::github(text))
+        }
+    }
+
     /// Sets (or, when empty, clears) the current view's local filter and refetches the
     /// view's ids for the new effective filter.
     fn set_extra_filter(&mut self, extra: &str) -> Vec<Command> {
@@ -339,6 +357,7 @@ impl App {
             self.extra_filter.insert(view.id.clone(), extra.to_string());
         }
         let filter = self.effective_filter();
+        let query = self.list_query(&view);
         if filter == before {
             // Nothing changed: keep the cached list and the cursor.
             return self.revalidate_view().into_iter().collect();
@@ -349,13 +368,12 @@ impl App {
         self.table_selected = 0;
         self.board_sel = BoardSelection::default();
         self.sync_selected_id();
-        if filter.is_empty() {
-            Vec::new()
-        } else {
-            vec![Command::FetchViewIds {
+        match query {
+            Some(query) => vec![Command::FetchViewIds {
                 view: view.id,
-                filter,
-            }]
+                query,
+            }],
+            None => Vec::new(),
         }
     }
 
@@ -393,8 +411,7 @@ impl App {
     pub fn view_items(&self) -> Option<Vec<&Item>> {
         let snap = self.snapshot()?;
         let view = self.current_view()?;
-        let filter = self.effective_filter();
-        let mut items: Vec<&Item> = if filter.trim().is_empty() {
+        let mut items: Vec<&Item> = if self.list_query(view).is_none() {
             snap.all_items()
                 .into_iter()
                 .filter(|i| !i.archived)
@@ -500,21 +517,21 @@ impl App {
     /// A request for the current view's ids, when it has a filter and no list yet.
     pub fn view_needs_ids(&self) -> Option<Command> {
         let view = self.current_view()?;
-        let filter = self.effective_filter();
+        let query = self.list_query(view)?;
         let missing = !self.snapshot()?.views.contains_key(&view.id);
-        (!filter.trim().is_empty() && missing).then(|| Command::FetchViewIds {
+        missing.then(|| Command::FetchViewIds {
             view: view.id.clone(),
-            filter,
+            query,
         })
     }
 
     /// A request for the current view's ids whenever it has a filter, cached list or not.
     pub fn revalidate_view(&self) -> Option<Command> {
         let view = self.current_view()?;
-        let filter = self.effective_filter();
-        (!filter.trim().is_empty()).then(|| Command::FetchViewIds {
+        let query = self.list_query(view)?;
+        Some(Command::FetchViewIds {
             view: view.id.clone(),
-            filter,
+            query,
         })
     }
 
@@ -966,18 +983,19 @@ impl App {
         }
     }
 
-    /// The filter a view currently applies, looked up by id.
-    fn filter_of(&self, id: &ViewId) -> Option<String> {
+    /// The list request a view currently makes, looked up by id: `None` for an unknown
+    /// view, `Some(None)` for one that lists everything.
+    fn query_of(&self, id: &ViewId) -> Option<Option<ListQuery>> {
         let view = self.project()?.views.iter().find(|v| &v.id == id)?;
-        Some(self.filter_for(view))
+        Some(self.list_query(view))
     }
 
     pub fn on_sync(&mut self, event: SyncEvent) -> Vec<Command> {
-        // A late answer for a filter that has since changed must not replace the list.
-        if let SyncEvent::ViewIds { view, filter, .. } = &event
+        // A late answer for a request that has since changed must not replace the list.
+        if let SyncEvent::ViewIds { view, query, .. } = &event
             && self
-                .filter_of(view)
-                .is_some_and(|current| &current != filter)
+                .query_of(view)
+                .is_some_and(|current| current.as_ref() != Some(query))
         {
             return Vec::new();
         }
@@ -1245,7 +1263,7 @@ mod tests {
         let cmds = a.handle_key(code(KeyCode::Tab));
         assert!(cmds.contains(&Command::FetchViewIds {
             view: ViewId::new("V_bugs"),
-            filter: "label:bug".into()
+            query: ListQuery::github("label:bug")
         }));
         assert!(a.view_items().is_none(), "filtered view has no ids yet");
     }
@@ -1323,7 +1341,7 @@ mod tests {
         a.select_view(&ViewId::new("V_board"));
         a.on_sync(SyncEvent::ViewIds {
             view: ViewId::new("V_board"),
-            filter: "-status:Done,\"In Progress\"".into(),
+            query: ListQuery::github("-status:Done,\"In Progress\""),
             list: ViewList {
                 ids: vec![ItemId::new("a"), ItemId::new("c"), ItemId::new("e")],
                 total: 3,
@@ -1418,13 +1436,13 @@ mod tests {
             cmds,
             vec![Command::FetchViewIds {
                 view: ViewId::new("V_table"),
-                filter: "label:bug".into()
+                query: ListQuery::github("label:bug")
             }]
         );
         assert_eq!(a.effective_filter(), "label:bug");
         a.on_sync(SyncEvent::ViewIds {
             view: ViewId::new("V_table"),
-            filter: "label:bug".into(),
+            query: ListQuery::github("label:bug"),
             list: ViewList {
                 ids: vec![ItemId::new("a")],
                 total: 1,
@@ -1452,7 +1470,7 @@ mod tests {
         let fetch = |filter: &str| {
             vec![Command::FetchViewIds {
                 view: bugs.clone(),
-                filter: filter.into(),
+                query: ListQuery::github(filter),
             }]
         };
         assert_eq!(cmds, fetch("label:bug assignee:x"));
@@ -1491,7 +1509,7 @@ mod tests {
             a.handle_key(key('x')),
             vec![Command::FetchViewIds {
                 view: bugs,
-                filter: "label:bug".into()
+                query: ListQuery::github("label:bug")
             }]
         );
         assert_eq!(a.extra_filter(), None);
@@ -1516,7 +1534,7 @@ mod tests {
         a.handle_key(code(KeyCode::Enter));
         let ids = |filter: &str, id: &str| SyncEvent::ViewIds {
             view: bugs.clone(),
-            filter: filter.into(),
+            query: ListQuery::github(filter),
             list: ViewList {
                 ids: vec![ItemId::new(id)],
                 total: 1,
@@ -1527,6 +1545,82 @@ mod tests {
         assert!(a.view_items().is_none(), "stale list dropped");
         a.on_sync(ids("label:bug assignee:x", "c"));
         assert_eq!(selected_id(&a), "c");
+    }
+
+    fn linear_app() -> (App, ViewId, ViewId) {
+        let mut snap = snapshot();
+        let mut view = snap.project.views[0].clone();
+        snap.project.board = "linear:team:t1".parse().unwrap();
+        view.id = ViewId::new("V_all");
+        view.name = "All issues".into();
+        view.filter = ViewFilter::Linear(serde_json::json!({}));
+        let mut bugs = view.clone();
+        bugs.id = ViewId::new("V_bugs");
+        bugs.name = "Bugs".into();
+        bugs.filter = ViewFilter::LinearView {
+            id: "cv1".into(),
+            hide_closed: false,
+        };
+        snap.project.views = vec![view, bugs];
+        let app = App::new(
+            Box::new(MemoryStore::new(Some(snap))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        (app, ViewId::new("V_all"), ViewId::new("V_bugs"))
+    }
+
+    #[test]
+    fn linear_views_ask_for_lists_by_their_view_filter() {
+        let (mut a, all, bugs) = linear_app();
+        a.select_view(&all);
+        let cmds = a.switch_view(true);
+        let bugs_filter = ViewFilter::LinearView {
+            id: "cv1".into(),
+            hide_closed: false,
+        };
+        assert!(cmds.contains(&Command::FetchViewIds {
+            view: bugs.clone(),
+            query: ListQuery {
+                filter: bugs_filter,
+                include_archived: false,
+            },
+        }));
+        let cmds = a.switch_view(true);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Command::FetchViewIds { .. }))
+        );
+        let expected = a.snapshot().unwrap().all_items().len()
+            - a.snapshot()
+                .unwrap()
+                .all_items()
+                .iter()
+                .filter(|i| i.archived)
+                .count();
+        assert_eq!(a.view_items().unwrap().len(), expected);
+    }
+
+    #[test]
+    fn a_stale_list_answer_is_dropped() {
+        let (mut a, _, bugs) = linear_app();
+        a.on_sync(SyncEvent::ViewIds {
+            view: bugs.clone(),
+            query: ListQuery {
+                filter: ViewFilter::LinearView {
+                    id: "other".into(),
+                    hide_closed: false,
+                },
+                include_archived: false,
+            },
+            list: ViewList {
+                ids: vec![ItemId::new("a")],
+                total: 1,
+                truncated: false,
+            },
+        });
+        assert!(!a.snapshot().unwrap().views.contains_key(&bugs));
     }
 
     #[test]
@@ -1712,12 +1806,12 @@ mod tests {
         };
         a.on_sync(SyncEvent::ViewIds {
             view: ViewId::new("V_bugs"),
-            filter: "label:bug".into(),
+            query: ListQuery::github("label:bug"),
             list,
         });
         let fetch = Command::FetchViewIds {
             view: ViewId::new("V_bugs"),
-            filter: "label:bug".into(),
+            query: ListQuery::github("label:bug"),
         };
         a.handle_key(code(KeyCode::Tab));
         assert!(
@@ -1845,12 +1939,12 @@ mod tests {
         a.handle_key(code(KeyCode::Enter));
         a.on_sync(SyncEvent::ViewIds {
             view: table.clone(),
-            filter: "label:x".into(),
+            query: ListQuery::github("label:x"),
             list: list("b"),
         });
         a.on_sync(SyncEvent::ViewIds {
             view: table,
-            filter: "label:bug".into(),
+            query: ListQuery::github("label:bug"),
             list: list("a"),
         });
         let ids: Vec<_> = a
@@ -1873,7 +1967,7 @@ mod tests {
         };
         a.on_sync(SyncEvent::ViewIds {
             view: ViewId::new("V_bugs"),
-            filter: "label:bug".into(),
+            query: ListQuery::github("label:bug"),
             list,
         });
         a.handle_key(key('f'));

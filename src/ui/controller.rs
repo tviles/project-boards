@@ -73,7 +73,7 @@ pub enum SyncJob {
     ViewIds {
         project: ProjectId,
         view: ViewId,
-        filter: String,
+        query: ListQuery,
         known: HashSet<ItemId>,
         hydrate: bool,
     },
@@ -652,12 +652,12 @@ impl Controller {
         let mut effects = Vec::new();
         for cmd in cmds {
             match cmd {
-                Command::FetchViewIds { view, filter } => {
+                Command::FetchViewIds { view, query } => {
                     if let Some(s) = self.app.snapshot() {
                         effects.push(self.spawn(SyncJob::ViewIds {
                             project: s.project.id.clone(),
                             view,
-                            filter,
+                            query,
                             known: s.items.keys().cloned().collect(),
                             hydrate: !self.full_load_in_flight,
                         }));
@@ -1077,7 +1077,7 @@ mod tests {
         .unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
         let effects = c.start(Ok(()), t0);
-        assert!(effects.iter().any(|e| matches!(e, Effect::Spawn { job: SyncJob::ViewIds { hydrate: false, filter, .. }, .. } if filter == "label:bug")));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Spawn { job: SyncJob::ViewIds { hydrate: false, query, .. }, .. } if query == &ListQuery::github("label:bug"))));
         let effects = c.handle(
             Input::Sync {
                 generation: c.generation(),
@@ -1588,7 +1588,7 @@ mod tests {
             &c,
             SyncEvent::ViewIds {
                 view: view.clone(),
-                filter,
+                query: ListQuery::github(filter),
                 list: crate::store::snapshot::ViewList {
                     ids: vec![],
                     total: 0,
