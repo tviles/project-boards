@@ -11,9 +11,9 @@ use std::path::Path;
 pub struct LayoutOverride {
     pub layout: Layout,
     /// The view's own layout on the server when the choice was made. When the server's
-    /// layout later differs, the choice is stale and dropped. Older state files call it
-    /// `github_layout`.
-    #[serde(alias = "github_layout")]
+    /// layout later differs, the choice is stale and dropped. The file keeps the name
+    /// `github_layout` so earlier versions can still read it; `server_layout` is accepted too.
+    #[serde(rename = "github_layout", alias = "server_layout")]
     pub server_layout: Layout,
 }
 
@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn an_old_layout_override_still_loads_and_saves_under_the_new_name() {
+    fn an_old_layout_override_loads_and_saves_in_the_old_form() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("state.json"),
@@ -221,11 +221,31 @@ mod tests {
         s.save(dir.path()).unwrap();
         let text = std::fs::read_to_string(dir.path().join("state.json")).unwrap();
         assert!(
-            text.contains("server_layout") && !text.contains("github_layout"),
+            text.contains("github_layout") && !text.contains("server_layout"),
             "{text}"
         );
         // A Linear board's overrides never pick up a GitHub board's, or the other way round.
         let team: BoardKey = "linear:team:t1".parse().unwrap();
         assert!(s.layout_overrides_for(&team).is_empty());
+    }
+
+    #[test]
+    fn a_layout_override_written_as_server_layout_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("state.json"),
+            r#"{"layout_overrides": {"acme/3/V1": {"layout": "board", "server_layout": "table"}}}"#,
+        )
+        .unwrap();
+        let board = BoardKey::github("acme", 3);
+        let expected = LayoutOverride {
+            layout: Layout::Board,
+            server_layout: Layout::Table,
+        };
+        let s = State::load(dir.path());
+        assert_eq!(
+            s.layout_overrides_for(&board),
+            vec![(ViewId::new("V1"), expected)]
+        );
     }
 }

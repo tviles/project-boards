@@ -1,11 +1,10 @@
 //! Runs fetches and reports results as events; never touches the store.
 
+use crate::backend::{Backend, SyncProfile};
 use crate::error::BackendError;
-use crate::github::Github;
-use crate::github::client::{FULL_PAGE, POLL_PAGE};
 use crate::model::*;
 use crate::store::ViewList;
-use crate::sync::{IncrementalMode, SyncEvent, SyncTask, incremental_query, search_query};
+use crate::sync::{SyncEvent, SyncTask, incremental_query, search_query};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -19,24 +18,34 @@ fn now_rfc3339() -> String {
 /// Runs fetches and reports results as events. Each method is one unit of work the runtime
 /// spawns; none of them touch the store directly.
 pub struct Syncer {
-    gh: Arc<Github>,
+    backend: Arc<Backend>,
     tx: mpsc::UnboundedSender<SyncEvent>,
     max_items: usize,
-    mode: IncrementalMode,
+    profile: SyncProfile,
 }
 
 impl Syncer {
     pub fn new(
-        gh: Arc<Github>,
+        backend: Arc<Backend>,
         tx: mpsc::UnboundedSender<SyncEvent>,
         max_items: usize,
-        mode: IncrementalMode,
+    ) -> Self {
+        let profile = backend.profile();
+        Self::with_profile(backend, tx, max_items, profile)
+    }
+
+    /// `new` with another profile: tests of other incremental modes.
+    pub fn with_profile(
+        backend: Arc<Backend>,
+        tx: mpsc::UnboundedSender<SyncEvent>,
+        max_items: usize,
+        profile: SyncProfile,
     ) -> Self {
         Self {
-            gh,
+            backend,
             tx,
             max_items,
-            mode,
+            profile,
         }
     }
 
@@ -45,14 +54,14 @@ impl Syncer {
     }
 
     fn fail(&self, task: SyncTask, error: BackendError) {
-        tracing::warn!(task = task.kind(), %error, "sync task failed");
+        tracing::warn!(task = task.kind(), error = error.kind(), "sync task failed");
         self.send(SyncEvent::Failed { task, error });
     }
 
     pub async fn resolve(&self, board: &BoardKey) -> Option<Project> {
-        let result = match board {
-            BoardKey::Github(b) => self.gh.resolve_project(b).await,
-            other => Err(BackendError::NoCredentials {
+        let result = match (&*self.backend, board) {
+            (Backend::Github(gh), BoardKey::Github(b)) => gh.resolve_project(b).await,
+            (_, other) => Err(BackendError::NoCredentials {
                 provider: other.provider(),
             }),
         };
@@ -70,7 +79,10 @@ impl Syncer {
 
     /// `false` after a failure (already reported as `Failed { Resolve }`); the job must stop.
     pub async fn refresh_project(&self, project: &Project) -> bool {
-        match self.gh.fetch_project(&project.id, &project.board).await {
+        let result = match &*self.backend {
+            Backend::Github(gh) => gh.fetch_project(&project.id, &project.board).await,
+        };
+        match result {
             Ok(p) => {
                 self.send(SyncEvent::Project(p));
                 true
@@ -88,11 +100,13 @@ impl Syncer {
         let mut items: Vec<Item> = Vec::new();
         let mut after: Option<String> = None;
         let (total, truncated) = loop {
-            match self
-                .gh
-                .fetch_items_page(project, "", FULL_PAGE, after.take())
-                .await
-            {
+            let page = match &*self.backend {
+                Backend::Github(gh) => {
+                    gh.fetch_items_page(project, "", self.profile.full_page, after.take())
+                        .await
+                }
+            };
+            match page {
                 Ok(page) => {
                     let total = page.total;
                     items.extend(page.nodes.iter().cloned());
@@ -119,18 +133,18 @@ impl Syncer {
             truncated,
         });
         self.send(SyncEvent::Access {
-            scopes: self.gh.scopes(),
+            scopes: self.backend.scopes(),
         });
-        self.send(SyncEvent::Rate(self.gh.rate()));
+        self.send(SyncEvent::Rate(self.backend.rate()));
     }
 
     /// Sends one edit and always reports exactly one `OpDone`, even if the send panics (it runs
     /// in its own task). The log names the op, the item and the kind of error, never GitHub's
     /// text, titles or values.
     pub async fn mutate(&self, id: crate::ops::OpId, project: &ProjectId, op: &crate::ops::Op) {
-        let (gh, project_id, sent) = (self.gh.clone(), project.clone(), op.clone());
+        let (backend, project_id, sent) = (self.backend.clone(), project.clone(), op.clone());
         let joined =
-            tokio::spawn(async move { crate::ops::send::send(&gh, &project_id, &sent).await })
+            tokio::spawn(async move { crate::ops::send::send(&backend, &project_id, &sent).await })
                 .await;
         let result = joined
             .unwrap_or_else(|_| Err(BackendError::Network("the edit failed unexpectedly".into())));
@@ -138,24 +152,26 @@ impl Syncer {
             tracing::warn!(op = op.name(), item = %op.item(), error = e.kind(), "edit failed");
         }
         self.send(SyncEvent::OpDone { id, result });
-        self.send(SyncEvent::Rate(self.gh.rate()));
+        self.send(SyncEvent::Rate(self.backend.rate()));
     }
 
     /// Items updated since `since`. Returns false when the mode has no incremental filter, so
     /// the caller runs a full load instead.
     pub async fn incremental(&self, project: &ProjectId, since: &str) -> bool {
-        let Some(query) = incremental_query(self.mode, since) else {
+        let Some(query) = incremental_query(self.profile.incremental, since) else {
             return false;
         };
         let started = now_rfc3339();
         let mut items = Vec::new();
         let mut after = None;
         loop {
-            match self
-                .gh
-                .fetch_items_page(project, &query, POLL_PAGE, after.take())
-                .await
-            {
+            let page = match &*self.backend {
+                Backend::Github(gh) => {
+                    gh.fetch_items_page(project, &query, self.profile.poll_page, after.take())
+                        .await
+                }
+            };
+            match page {
                 Ok(page) => {
                     items.extend(page.nodes);
                     match page.next {
@@ -180,7 +196,7 @@ impl Syncer {
             items,
             fetched_at: started,
         });
-        self.send(SyncEvent::Rate(self.gh.rate()));
+        self.send(SyncEvent::Rate(self.backend.rate()));
         true
     }
 
@@ -197,11 +213,10 @@ impl Syncer {
         let mut ids: Vec<ItemId> = Vec::new();
         let mut after = None;
         let (total, truncated) = loop {
-            match self
-                .gh
-                .fetch_view_ids_page(project, filter, after.take())
-                .await
-            {
+            let page = match &*self.backend {
+                Backend::Github(gh) => gh.fetch_view_ids_page(project, filter, after.take()).await,
+            };
+            match page {
                 Ok(page) => {
                     let total = page.total;
                     ids.extend(page.nodes);
@@ -233,7 +248,10 @@ impl Syncer {
             return;
         }
         for chunk in missing.chunks(100) {
-            match self.gh.hydrate_items(chunk).await {
+            let result = match &*self.backend {
+                Backend::Github(gh) => gh.hydrate_items(chunk).await,
+            };
+            match result {
                 Ok(items) => self.send(SyncEvent::Hydrated(items)),
                 Err(e) => return self.fail(SyncTask::Hydrate, e),
             }
@@ -243,7 +261,10 @@ impl Syncer {
     /// The item's body, comments and links. `before` loads the comments older than a cursor.
     pub async fn detail(&self, item: &ItemId, before: Option<String>) {
         let older = before.is_some();
-        match self.gh.fetch_item_detail(item, before).await {
+        let result = match &*self.backend {
+            Backend::Github(gh) => gh.fetch_item_detail(item, before).await,
+        };
+        match result {
             Ok(detail) => self.send(SyncEvent::Detail {
                 item: item.clone(),
                 detail,
@@ -255,7 +276,10 @@ impl Syncer {
 
     /// The boards linked to `repo`, for the startup decision.
     pub async fn repo_projects(&self, repo: &RepoSlug) {
-        match self.gh.list_repo_projects(repo).await {
+        let result = match &*self.backend {
+            Backend::Github(gh) => gh.list_repo_projects(repo).await,
+        };
+        match result {
             Ok(list) => self.send(SyncEvent::RepoProjects(list)),
             Err(e) => self.fail(SyncTask::Projects, e),
         }
@@ -264,13 +288,21 @@ impl Syncer {
     /// Boards for the picker: the repo's linked boards first, then every board the viewer can see.
     pub async fn projects(&self, linked: Option<&RepoSlug>) {
         let linked_list = match linked {
-            Some(repo) => match self.gh.list_repo_projects(repo).await {
-                Ok(l) => l,
-                Err(e) => return self.fail(SyncTask::Projects, e),
-            },
+            Some(repo) => {
+                let result = match &*self.backend {
+                    Backend::Github(gh) => gh.list_repo_projects(repo).await,
+                };
+                match result {
+                    Ok(l) => l,
+                    Err(e) => return self.fail(SyncTask::Projects, e),
+                }
+            }
             None => Vec::new(),
         };
-        match self.gh.list_viewer_projects().await {
+        let result = match &*self.backend {
+            Backend::Github(gh) => gh.list_viewer_projects().await,
+        };
+        match result {
             Ok(all) => self.send(SyncEvent::Projects(crate::board_choice::picker_candidates(
                 all,
                 &linked_list,
@@ -280,7 +312,10 @@ impl Syncer {
     }
 
     pub async fn candidates(&self, repo: &RepoSlug) {
-        match self.gh.repo_candidates(repo).await {
+        let result = match &*self.backend {
+            Backend::Github(gh) => gh.repo_candidates(repo).await,
+        };
+        match result {
             Ok(candidates) => self.send(SyncEvent::Candidates {
                 repo: repo.clone(),
                 candidates,
@@ -290,14 +325,20 @@ impl Syncer {
     }
 
     pub async fn repos(&self) {
-        match self.gh.pushable_repos().await {
+        let result = match &*self.backend {
+            Backend::Github(gh) => gh.pushable_repos().await,
+        };
+        match result {
             Ok(list) => self.send(SyncEvent::Repos(list)),
             Err(e) => self.fail(SyncTask::Repos, e),
         }
     }
 
     pub async fn lookup_repo(&self, slug: &RepoSlug) {
-        match self.gh.lookup_repo(slug).await {
+        let result = match &*self.backend {
+            Backend::Github(gh) => gh.lookup_repo(slug).await,
+        };
+        match result {
             Ok(repo) => self.send(SyncEvent::RepoFound {
                 slug: slug.clone(),
                 repo,
@@ -308,13 +349,14 @@ impl Syncer {
 
     /// A pasted issue or pull request URL is looked up directly; anything else is searched.
     pub async fn search(&self, query: &str, scope: &[RepoSlug]) {
-        let result = match parse_content_url(query) {
-            Some((repo, number)) => self
-                .gh
-                .content_by_number(&repo, number)
-                .await
-                .map(|hit| hit.into_iter().collect()),
-            None => self.gh.search_content(&search_query(query, scope)).await,
+        let result = match &*self.backend {
+            Backend::Github(gh) => match parse_content_url(query) {
+                Some((repo, number)) => gh
+                    .content_by_number(&repo, number)
+                    .await
+                    .map(|hit| hit.into_iter().collect()),
+                None => gh.search_content(&search_query(query, scope)).await,
+            },
         };
         match result {
             Ok(hits) => self.send(SyncEvent::SearchResults {
@@ -329,8 +371,10 @@ impl Syncer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::Github;
     use crate::github::convert::tests::item_json;
     use crate::github::fixture::FixtureTransport;
+    use crate::sync::IncrementalMode;
     use serde_json::json;
 
     fn page(ids: &[&str], total: usize, next: Option<&str>) -> serde_json::Value {
@@ -354,11 +398,14 @@ mod tests {
     ) {
         let t = Arc::new(FixtureTransport::new());
         let (tx, rx) = mpsc::unbounded_channel();
-        let syncer = Syncer::new(
-            Arc::new(Github::new(t.clone())),
+        let syncer = Syncer::with_profile(
+            Arc::new(Backend::Github(Github::new(t.clone()))),
             tx,
             max,
-            IncrementalMode::DateTime,
+            SyncProfile {
+                incremental: IncrementalMode::DateTime,
+                ..crate::backend::GITHUB_PROFILE
+            },
         );
         (t, syncer, rx)
     }
@@ -601,11 +648,14 @@ mod tests {
     async fn incremental_unsupported_returns_false_without_requests() {
         let t = Arc::new(FixtureTransport::new());
         let (tx, _rx) = mpsc::unbounded_channel();
-        let s = Syncer::new(
-            Arc::new(Github::new(t.clone())),
+        let s = Syncer::with_profile(
+            Arc::new(Backend::Github(Github::new(t.clone()))),
             tx,
             2000,
-            IncrementalMode::Unsupported,
+            SyncProfile {
+                incremental: IncrementalMode::Unsupported,
+                ..crate::backend::GITHUB_PROFILE
+            },
         );
         assert!(
             !s.incremental(&ProjectId::new("P"), "2026-10-01T00:00:00Z")
@@ -716,11 +766,14 @@ mod tests {
     #[tokio::test]
     async fn a_panicking_send_still_reports_one_op_done() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let s = Syncer::new(
-            Arc::new(Github::new(Arc::new(Panicking))),
+        let s = Syncer::with_profile(
+            Arc::new(Backend::Github(Github::new(Arc::new(Panicking)))),
             tx,
             2000,
-            IncrementalMode::DateTime,
+            SyncProfile {
+                incremental: IncrementalMode::DateTime,
+                ..crate::backend::GITHUB_PROFILE
+            },
         );
         let op = crate::ops::Op::ClearField {
             item: ItemId::new("PVTI_1"),
@@ -741,5 +794,26 @@ mod tests {
             })
             .count();
         assert_eq!(dones, 1);
+    }
+
+    #[tokio::test]
+    async fn a_linear_board_without_linear_fails_as_missing_credentials() {
+        let (t, s, mut rx) = setup(2000);
+        let team: BoardKey = "linear:team:t1".parse().unwrap();
+        assert_eq!(s.resolve(&team).await, None);
+        let events = drain(&mut rx);
+        assert!(matches!(
+            events.as_slice(),
+            [SyncEvent::Failed {
+                task: SyncTask::Resolve,
+                error: BackendError::NoCredentials {
+                    provider: Provider::Linear
+                },
+            }]
+        ));
+        assert!(
+            t.requests().is_empty(),
+            "nothing is sent for a Linear board"
+        );
     }
 }
