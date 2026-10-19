@@ -18,6 +18,9 @@ pub struct Config {
     /// The `gh` account whose token to use (`gh auth token --user <gh_user>`) when neither
     /// GH_TOKEN nor GITHUB_TOKEN is set. Unset: the active `gh` account.
     pub gh_user: Option<String>,
+    /// Program and arguments (run without a shell) that print the Linear API key, used when
+    /// LINEAR_API_KEY is not set, e.g. `["security", "find-generic-password", "-w", "-s", "linear"]`.
+    pub linear_api_key_command: Option<Vec<String>>,
 }
 
 impl Default for Config {
@@ -31,6 +34,7 @@ impl Default for Config {
             placement: Placement::Tab,
             keys: BTreeMap::new(),
             gh_user: None,
+            linear_api_key_command: None,
         }
     }
 }
@@ -124,6 +128,16 @@ pub fn load_config(dir: &Path) -> (Config, Vec<String>) {
             ));
         }
     }
+    if let Some(argv) = config.linear_api_key_command.take() {
+        if argv
+            .first()
+            .is_some_and(|program| !program.trim().is_empty())
+        {
+            config.linear_api_key_command = Some(argv);
+        } else {
+            warnings.push("linear_api_key_command ignored: it must name a program".into());
+        }
+    }
     (config, warnings)
 }
 
@@ -150,6 +164,26 @@ mod tests {
             let (c, w) = with(&format!("gh_user = {bad:?}"));
             assert_eq!(c.gh_user, None, "{bad}");
             assert_eq!(w.len(), 1, "{bad}");
+        }
+    }
+
+    #[test]
+    fn linear_key_command_is_read_and_an_empty_one_is_dropped() {
+        let (c, w) = with("linear_api_key_command = [\"pass\", \"show\", \"linear\"]");
+        assert_eq!(
+            c.linear_api_key_command,
+            Some(vec!["pass".into(), "show".into(), "linear".into()])
+        );
+        assert!(w.is_empty());
+        assert_eq!(with("").0.linear_api_key_command, None);
+        for bad in ["[]", "[\"\"]", "[\"  \", \"x\"]"] {
+            let (c, w) = with(&format!("linear_api_key_command = {bad}"));
+            assert_eq!(c.linear_api_key_command, None, "{bad}");
+            assert_eq!(
+                w,
+                vec!["linear_api_key_command ignored: it must name a program".to_string()],
+                "{bad}"
+            );
         }
     }
 

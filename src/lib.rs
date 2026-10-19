@@ -9,6 +9,7 @@ pub mod error;
 pub mod fsutil;
 pub mod github;
 pub mod herdr;
+pub mod linear;
 pub mod logging;
 pub mod model;
 pub mod ops;
