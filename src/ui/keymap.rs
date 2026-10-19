@@ -166,7 +166,7 @@ impl Action {
             Action::ToggleLayout => "switch table / board",
             Action::Open => "open item detail, collapse group, follow link",
             Action::Search => "quick search",
-            Action::Filter => "add a filter on top of the view's GitHub filter",
+            Action::Filter => "add a filter on top of the view's own filter",
             Action::ClearFilter => "clear the local filter",
             Action::Refresh => "refresh now",
             Action::OpenBrowser => "open in the browser",
@@ -402,6 +402,14 @@ mod tests {
 
     fn ev(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn the_filter_help_names_no_provider() {
+        assert_eq!(
+            Action::Filter.description(),
+            "add a filter on top of the view's own filter"
+        );
     }
 
     #[test]

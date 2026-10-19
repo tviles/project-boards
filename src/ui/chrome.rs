@@ -907,6 +907,26 @@ mod tests {
     }
 
     #[test]
+    fn a_linear_filter_prompt_has_no_github_prefix() {
+        let mut snap = snapshot();
+        snap.project.board = "linear:team:t1".parse().unwrap();
+        snap.project.views[2].filter = crate::model::ViewFilter::LinearView {
+            id: "cv1".into(),
+            hide_closed: false,
+        };
+        let mut a = App::new(
+            Box::new(MemoryStore::new(Some(snap))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        a.select_view(&crate::model::ViewId::new("V_bugs"));
+        a.handle_key(key('f'));
+        a.handle_key(key('z'));
+        let screen = render_to_string(60, 10, |f| draw(f, &mut a));
+        assert_eq!(screen.lines().last().unwrap(), "filter: z");
+    }
+
+    #[test]
     fn overflowing_tabs_scroll_to_keep_the_current_tab_and_layout_visible() {
         let mut snap = snapshot();
         let template = snap.project.views[0].clone();
