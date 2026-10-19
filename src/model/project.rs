@@ -1,5 +1,5 @@
 use crate::model::field::{Field, FieldKind, find_field};
-use crate::model::ids::{BoardRef, FieldId, ProjectId, ViewId};
+use crate::model::ids::{BoardKey, FieldId, ProjectId, ViewId};
 use crate::model::view::View;
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +12,7 @@ pub enum OwnerKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub id: ProjectId,
-    pub board: BoardRef,
+    pub board: BoardKey,
     pub owner_kind: OwnerKind,
     pub title: String,
     pub url: String,
@@ -46,7 +46,7 @@ impl Project {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectSummary {
     pub id: ProjectId,
-    pub board: BoardRef,
+    pub board: BoardKey,
     pub title: String,
     pub closed: bool,
 }

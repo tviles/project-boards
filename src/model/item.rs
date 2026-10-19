@@ -181,10 +181,23 @@ pub struct ContentFields {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContentRef {
-    /// `owner/name`
-    pub repo: String,
+    /// `owner/name` on GitHub; the team key on Linear.
+    pub container: String,
     pub number: u32,
+    /// How people refer to the item when it is not `#number` (Linear: `ENG-123`). GitHub
+    /// leaves it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     pub url: String,
+}
+
+impl ContentRef {
+    /// `ENG-123`, `#12`, or `None` before the item has a number.
+    pub fn label(&self) -> Option<String> {
+        self.key
+            .clone()
+            .or_else(|| (self.number > 0).then(|| format!("#{}", self.number)))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -265,11 +278,11 @@ impl Item {
         crate::model::caps::is_placeholder(&self.id)
     }
 
-    /// What names the item in headings: `#12`, `new` while GitHub is still creating it, or
-    /// `Draft`.
+    /// What names the item in headings: `#12` or `ENG-123`, `new` while it is still being
+    /// created, or `Draft`.
     pub fn ref_label(&self) -> String {
-        match self.number() {
-            Some(n) => format!("#{n}"),
+        match self.reference().and_then(ContentRef::label) {
+            Some(label) => label,
             None if self.is_placeholder() => "new".into(),
             None => "Draft".into(),
         }
@@ -349,8 +362,9 @@ pub(crate) mod tests {
             id: ItemId::new(id),
             content: ItemContent::Issue {
                 reference: ContentRef {
-                    repo: "tviles/t".into(),
+                    container: "tviles/t".into(),
                     number,
+                    key: None,
                     url: format!("https://github.com/tviles/t/issues/{number}"),
                 },
                 title: title.into(),
@@ -481,6 +495,19 @@ pub(crate) mod tests {
         );
         assert_eq!(item.assignees(), ["tviles"]);
         assert_eq!(item.label_names(), ["bug"]);
+    }
+
+    #[test]
+    fn a_reference_key_names_the_item_when_set() {
+        let mut item = issue("I_1", 123, "x");
+        if let ItemContent::Issue { reference, .. } = &mut item.content {
+            reference.container = "ENG".into();
+            reference.key = Some("ENG-123".into());
+        }
+        assert_eq!(item.ref_label(), "ENG-123");
+        let plain = issue("I_2", 7, "y");
+        assert_eq!(plain.reference().unwrap().label().as_deref(), Some("#7"));
+        assert_eq!(issue("local:3", 0, "z").reference().unwrap().label(), None);
     }
 
     #[test]

@@ -205,6 +205,7 @@ mod tests {
                         id: OptionId::new(*o),
                         name: (*o).into(),
                         color: OptionColor::Gray,
+                        kind: None,
                     })
                     .collect(),
             },

@@ -44,6 +44,7 @@ fn options(v: &Value) -> Vec<SelectOption> {
                     id: OptionId::new(str_of(&o["id"])),
                     name: str_of(&o["name"]),
                     color: OptionColor::from_api(o["color"].as_str().unwrap_or("")),
+                    kind: None,
                 })
                 .collect()
         })
@@ -99,7 +100,7 @@ pub fn view_from_wire(v: &Value, fields: &[Field]) -> View {
         number: v["number"].as_u64().unwrap_or(0) as u32,
         name: str_of(&v["name"]),
         layout: Layout::from_api(v["layout"].as_str().unwrap_or("")),
-        filter: str_of(&v["filter"]),
+        filter: str_of(&v["filter"]).into(),
         visible_fields: field_ids(v, "visibleFields", fields),
         group_by: field_ids(v, "groupByFields", fields),
         vertical_group_by: field_ids(v, "verticalGroupByFields", fields),
@@ -120,7 +121,7 @@ pub fn view_from_wire(v: &Value, fields: &[Field]) -> View {
 }
 
 /// Decodes a `ProjectSchemaFields` object.
-pub fn project_from_wire(v: &Value, board: &BoardRef) -> Result<Project, BackendError> {
+pub fn project_from_wire(v: &Value, board: &BoardKey) -> Result<Project, BackendError> {
     let id = v["id"]
         .as_str()
         .ok_or_else(|| BackendError::Decode("project has no id".into()))?;
@@ -302,8 +303,9 @@ fn content_from_wire(c: &Value) -> ItemContent {
         return ItemContent::Redacted;
     }
     let reference = || ContentRef {
-        repo: str_of(&c["repository"]["nameWithOwner"]),
+        container: str_of(&c["repository"]["nameWithOwner"]),
         number: c["number"].as_u64().unwrap_or(0) as u32,
+        key: None,
         url: str_of(&c["url"]),
     };
     match typename(c) {
@@ -352,10 +354,7 @@ pub fn summary_from_wire(v: &Value) -> Option<ProjectSummary> {
     let number = v["number"].as_u64()? as u32;
     Some(ProjectSummary {
         id: ProjectId::new(v["id"].as_str()?),
-        board: BoardRef {
-            owner: owner.to_string(),
-            number,
-        },
+        board: BoardKey::github(owner, number),
         title: str_of(&v["title"]),
         closed: v["closed"].as_bool().unwrap_or(false),
     })
@@ -444,7 +443,7 @@ pub(crate) mod tests {
         })
     }
 
-    fn board() -> BoardRef {
+    fn board() -> BoardKey {
         "tviles/3".parse().unwrap()
     }
 
@@ -495,7 +494,7 @@ pub(crate) mod tests {
         let p = project_from_wire(&project_json(), &board()).unwrap();
         let v1 = &p.views[0];
         assert_eq!(v1.layout, Layout::Table);
-        assert_eq!(v1.filter, "");
+        assert_eq!(v1.filter, "".into());
         assert_eq!(
             v1.visible_fields,
             vec![FieldId::new("F_title"), FieldId::new("F_status")]
@@ -510,7 +509,7 @@ pub(crate) mod tests {
         );
         let v2 = &p.views[1];
         assert_eq!(
-            (v2.layout, v2.filter.as_str()),
+            (v2.layout, v2.filter.github_query()),
             (Layout::Board, "label:bug")
         );
         assert_eq!(v2.column_field(&p.fields).unwrap().name, "Status");

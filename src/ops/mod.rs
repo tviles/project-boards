@@ -229,8 +229,9 @@ fn placeholder(temp: &ItemId, new: &NewItem, presets: &[(FieldId, FieldValue)]) 
         },
         NewItem::Issue { repo, title, .. } => ItemContent::Issue {
             reference: ContentRef {
-                repo: repo.slug.to_string(),
+                container: repo.slug.to_string(),
                 number: 0,
+                key: None,
                 url: String::new(),
             },
             title: title.clone(),
@@ -238,8 +239,9 @@ fn placeholder(temp: &ItemId, new: &NewItem, presets: &[(FieldId, FieldValue)]) 
         },
         NewItem::Existing { hit } => {
             let reference = ContentRef {
-                repo: hit.repo.clone(),
+                container: hit.repo.clone(),
                 number: hit.number,
+                key: None,
                 url: String::new(),
             };
             let state = if hit.open {
@@ -1070,8 +1072,9 @@ mod tests {
         let id = ItemId::new("a");
         s.items.get_mut(&id).unwrap().content = ItemContent::PullRequest {
             reference: crate::model::ContentRef {
-                repo: "o/r".into(),
+                container: "o/r".into(),
                 number: 9,
+                key: None,
                 url: "u".into(),
             },
             title: "pr".into(),

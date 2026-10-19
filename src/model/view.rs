@@ -2,6 +2,51 @@ use crate::model::field::{Field, find_field};
 use crate::model::ids::{FieldId, ViewId};
 use serde::{Deserialize, Serialize};
 
+/// What decides a view's items.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ViewFilter {
+    /// GitHub filter syntax, sent as `items(query:)`.
+    Github(String),
+    /// A Linear custom view by id; Linear applies its stored filter (`customView.issues`).
+    LinearView(String),
+    /// A Linear `IssueFilter`, built in code for the built-in tabs.
+    Linear(serde_json::Value),
+}
+
+impl ViewFilter {
+    /// The GitHub query text; empty for Linear filters.
+    pub fn github_query(&self) -> &str {
+        match self {
+            Self::Github(q) => q,
+            Self::LinearView(_) | Self::Linear(_) => "",
+        }
+    }
+}
+
+impl Default for ViewFilter {
+    fn default() -> Self {
+        Self::Github(String::new())
+    }
+}
+
+impl From<&str> for ViewFilter {
+    fn from(q: &str) -> Self {
+        Self::Github(q.to_string())
+    }
+}
+
+impl From<String> for ViewFilter {
+    fn from(q: String) -> Self {
+        Self::Github(q)
+    }
+}
+
+impl std::fmt::Display for ViewFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.github_query())
+    }
+}
+
 /// Serialized as `"table"`, `"board"`, `"roadmap"`; the capitalised names are accepted so
 /// caches written before the rename still load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,7 +89,7 @@ pub struct View {
     pub number: u32,
     pub name: String,
     pub layout: Layout,
-    pub filter: String,
+    pub filter: ViewFilter,
     pub visible_fields: Vec<FieldId>,
     pub group_by: Vec<FieldId>,
     pub vertical_group_by: Vec<FieldId>,
@@ -105,6 +150,7 @@ mod tests {
                     id: OptionId::new("o"),
                     name: "x".into(),
                     color: OptionColor::Gray,
+                    kind: None,
                 }],
             },
         }
@@ -116,7 +162,7 @@ mod tests {
             number: 1,
             name: "v".into(),
             layout: Layout::Board,
-            filter: String::new(),
+            filter: ViewFilter::default(),
             visible_fields: vec![],
             group_by: vec![],
             vertical_group_by: vertical.iter().map(|s| FieldId::new(*s)).collect(),
@@ -143,5 +189,31 @@ mod tests {
         assert_eq!(Layout::from_api("ROADMAP_LAYOUT"), Layout::Roadmap);
         assert_eq!(Layout::from_api("TABLE_LAYOUT"), Layout::Table);
         assert_eq!(Layout::from_api("FUTURE"), Layout::Table);
+    }
+
+    #[test]
+    fn view_filters_convert_from_text_and_show_only_github_queries() {
+        let f: ViewFilter = "label:bug -status:Done".into();
+        assert_eq!(f, ViewFilter::Github("label:bug -status:Done".into()));
+        assert_eq!(f.to_string(), "label:bug -status:Done");
+        assert_eq!(f.github_query(), "label:bug -status:Done");
+        assert_eq!(ViewFilter::default(), ViewFilter::Github(String::new()));
+        let view = ViewFilter::LinearView("cv1".into());
+        let built = ViewFilter::Linear(serde_json::json!({"assignee": {"isMe": {"eq": true}}}));
+        assert_eq!(view.github_query(), "");
+        assert_eq!(built.to_string(), "");
+    }
+
+    #[test]
+    fn view_filters_round_trip_through_the_cache() {
+        for f in [
+            ViewFilter::Github("is:open".into()),
+            ViewFilter::LinearView("cv1".into()),
+            ViewFilter::Linear(serde_json::json!({"state": {"type": {"nin": ["canceled"]}}})),
+        ] {
+            let back: ViewFilter =
+                serde_json::from_str(&serde_json::to_string(&f).unwrap()).unwrap();
+            assert_eq!(back, f);
+        }
     }
 }

@@ -76,17 +76,17 @@ pub enum Command {
     },
     Refresh,
     SaveLastView(ViewId),
-    /// The user chose `layout` for `view`, whose own layout on GitHub is `github_layout`.
+    /// The user chose `layout` for `view`, whose own layout on GitHub is `server_layout`.
     SaveLayout {
         view: ViewId,
         layout: Layout,
-        github_layout: Layout,
+        server_layout: Layout,
     },
     /// The user is back on GitHub's layout for `view`: forget the choice.
     ClearLayout {
         view: ViewId,
     },
-    PickBoard(BoardRef),
+    PickBoard(BoardKey),
     ShowPicker,
     /// Re-run startup after the user fixed authentication.
     Retry,
@@ -321,7 +321,7 @@ impl App {
     fn filter_for(&self, view: &View) -> String {
         match self.extra_filter.get(&view.id) {
             Some(extra) => format!("{} {extra}", view.filter).trim().to_string(),
-            None => view.filter.clone(),
+            None => view.filter.github_query().to_string(),
         }
     }
 
@@ -677,14 +677,14 @@ impl App {
                 let repo = self
                     .detail_item()
                     .and_then(|i| i.reference())
-                    .map(|r| r.repo.clone());
+                    .map(|r| r.container.clone());
                 let Some(repo) = repo else { return Vec::new() };
                 let on_board = self.snapshot().and_then(|s| {
                     s.items
                         .values()
                         .find(|i| {
                             i.reference()
-                                .is_some_and(|r| r.repo == repo && r.number == n)
+                                .is_some_and(|r| r.container == repo && r.number == n)
                         })
                         .map(|i| i.id.clone())
                 });
@@ -870,7 +870,7 @@ impl App {
                                 Command::SaveLayout {
                                     view: view.id,
                                     layout: next,
-                                    github_layout: view.layout,
+                                    server_layout: view.layout,
                                 }
                             };
                             self.restore_selection();
@@ -1287,6 +1287,7 @@ mod tests {
                     id: OptionId::new(format!("o_empty{i}")),
                     name: name.into(),
                     color: OptionColor::Gray,
+                    kind: None,
                 },
             );
         }
@@ -1371,7 +1372,7 @@ mod tests {
             vec![Command::SaveLayout {
                 view: ViewId::new("V_table"),
                 layout: Layout::Board,
-                github_layout: Layout::Table,
+                server_layout: Layout::Table,
             }]
         );
         let cmds = a.handle_key(key('L'));

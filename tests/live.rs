@@ -41,7 +41,12 @@ async fn resolve() {
         "View 1 should report its group-by (Sprint); empty means the API does not expose groupByFields"
     );
     assert_eq!(
-        p.views.iter().find(|v| v.name == "Bugs").unwrap().filter,
+        p.views
+            .iter()
+            .find(|v| v.name == "Bugs")
+            .unwrap()
+            .filter
+            .github_query(),
         "label:bug"
     );
 }
@@ -105,9 +110,16 @@ async fn projects() {
     let (board, _) = testbed();
     let gh = github("projects");
     let linked = gh.list_repo_projects(&testbed_repo()).await.unwrap();
-    assert!(linked.iter().any(|p| p.board == board));
+    assert!(
+        linked
+            .iter()
+            .any(|p| p.board == BoardKey::Github(board.clone()))
+    );
     let all = gh.list_viewer_projects().await.unwrap();
-    assert!(all.iter().any(|p| p.board == board));
+    assert!(
+        all.iter()
+            .any(|p| p.board == BoardKey::Github(board.clone()))
+    );
     if recording() {
         keep_only_testbed_project(&board);
     }
@@ -115,7 +127,7 @@ async fn projects() {
 
 /// The project lists are recorded from a real account, so they name every board it can see.
 /// Fixtures are committed to a public repository: rewrite them to hold only the testbed.
-fn keep_only_testbed_project(board: &BoardRef) {
+fn keep_only_testbed_project(board: &GithubBoard) {
     let dir = std::path::Path::new("tests/fixtures/recorded/projects");
     let is_testbed = |n: &serde_json::Value| {
         n["number"] == board.number && n["owner"]["login"] == board.owner.as_str()

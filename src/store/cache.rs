@@ -1,12 +1,13 @@
 use crate::fsutil::write_atomic;
-use crate::model::BoardRef;
+use crate::model::BoardKey;
 use crate::store::snapshot::BoardSnapshot;
 use std::path::{Path, PathBuf};
 
 /// Bump when `BoardSnapshot`'s serialized shape changes; older caches are discarded.
-pub const CACHE_VERSION: u32 = 3;
+/// 4: board keys as strings, `ContentRef.container` and `key`, option kinds, view filters.
+pub const CACHE_VERSION: u32 = 4;
 
-pub fn cache_path(state_dir: &Path, board: &BoardRef) -> PathBuf {
+pub fn cache_path(state_dir: &Path, board: &BoardKey) -> PathBuf {
     state_dir
         .join("cache")
         .join(format!("{}.json", board.key()))
@@ -58,6 +59,17 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "the cache holds private board content");
         }
+    }
+
+    #[test]
+    fn a_version_3_cache_is_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = cache_path(dir.path(), &"acme/3".parse().unwrap());
+        let mut s = BoardSnapshot::new(project());
+        s.version = 3;
+        save_cache(&path, &s).unwrap();
+        assert_eq!(load_cache(&path), None);
+        assert_eq!(CACHE_VERSION, 4);
     }
 
     #[test]

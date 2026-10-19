@@ -370,7 +370,7 @@ impl App {
     /// The repository whose users, labels and milestones `item` can take.
     pub fn candidate_repo(&self, item: &Item) -> Option<RepoSlug> {
         match item.reference() {
-            Some(r) => r.repo.parse().ok(),
+            Some(r) => r.container.parse().ok(),
             None => self.draft_repo(),
         }
     }
@@ -1627,7 +1627,7 @@ impl App {
     /// Whether the view's own GitHub filter already shows archived items.
     pub(crate) fn view_shows_archived(&self) -> bool {
         self.current_view()
-            .is_some_and(|v| archived_token(&v.filter).is_some())
+            .is_some_and(|v| archived_token(v.filter.github_query()).is_some())
     }
 
     /// "Show archived items" in the action menu: toggles `is:archived` in the session filter,
@@ -2690,6 +2690,7 @@ mod tests {
             id: OptionId::new("o_dup"),
             name: "Todo".into(),
             color: crate::model::OptionColor::Blue,
+            kind: None,
         });
         let mut a = app_with(snap);
         a.select_view(&crate::model::ViewId::new("V_board"));
@@ -2983,7 +2984,7 @@ mod tests {
 
     fn board_app(filter: &str, ids: &[&str]) -> App {
         let f = filter.to_string();
-        let mut a = app_edited(|s| s.project.views[1].filter = f);
+        let mut a = app_edited(|s| s.project.views[1].filter = f.into());
         let board = crate::model::ViewId::new("V_board");
         a.select_view(&board);
         a.on_sync(SyncEvent::ViewIds {
@@ -4342,8 +4343,9 @@ mod tests {
         let b = snap.items.get_mut(&ItemId::new("b")).unwrap();
         b.content = crate::model::ItemContent::PullRequest {
             reference: crate::model::ContentRef {
-                repo: "tviles/t".into(),
+                container: "tviles/t".into(),
                 number: 2,
+                key: None,
                 url: "u".into(),
             },
             title: "Add iteration columns".into(),

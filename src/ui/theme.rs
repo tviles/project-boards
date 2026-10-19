@@ -46,6 +46,14 @@ impl Theme {
             OptionColor::Red => Color::Red,
             OptionColor::Pink => Color::LightMagenta,
             OptionColor::Purple => Color::Magenta,
+            OptionColor::Hex(rgb) => {
+                let (r, g, b) = ((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
+                if self.truecolor {
+                    Color::Rgb(r, g, b)
+                } else {
+                    Color::Indexed(nearest_256((r, g, b)))
+                }
+            }
             OptionColor::Unknown => Color::Reset,
         })
     }
@@ -263,5 +271,21 @@ mod tests {
         let no_color = env(&[("NO_COLOR", "1"), ("COLORTERM", "truecolor")]);
         assert_eq!(no_color.label("d73a4a"), Style::default());
         assert_eq!(Theme::plain().label("d73a4a"), Style::default());
+    }
+
+    #[test]
+    fn hex_options_are_exact_with_truecolor_and_nearest_otherwise() {
+        let truecolor = Theme::from_env(|k| (k == "COLORTERM").then(|| "truecolor".to_string()));
+        assert_eq!(
+            truecolor.option(OptionColor::Hex(0xff0000)).fg,
+            Some(Color::Rgb(255, 0, 0))
+        );
+        let plain = Theme::from_env(|_| None);
+        assert_eq!(
+            plain.option(OptionColor::Hex(0xff0000)).fg,
+            Some(Color::Indexed(196))
+        );
+        let none = Theme::from_env(|k| (k == "NO_COLOR").then(|| "1".to_string()));
+        assert_eq!(none.option(OptionColor::Hex(0xff0000)).fg, None);
     }
 }

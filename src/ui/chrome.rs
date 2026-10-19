@@ -436,7 +436,9 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
         ]),
         Mode::Filter => {
             let mut spans = vec![Span::styled("filter: ", app.theme.accent())];
-            let github = app.current_view().map_or("", |v| v.filter.trim());
+            let github = app
+                .current_view()
+                .map_or("", |v| v.filter.github_query().trim());
             if !github.is_empty() {
                 // The GitHub filter still applies: show it dimmed, cut to leave room to type.
                 let room = (area.width as usize / 2)
@@ -874,7 +876,7 @@ mod tests {
 
         // A long GitHub filter is cut so the typed text keeps its room.
         let mut snap = snapshot();
-        snap.project.views[2].filter = format!("label:bug {}", "-label:wontfix ".repeat(10));
+        snap.project.views[2].filter = format!("label:bug {}", "-label:wontfix ".repeat(10)).into();
         let mut b = App::new(
             Box::new(MemoryStore::new(Some(snap))),
             Keymap::defaults(),

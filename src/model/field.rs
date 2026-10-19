@@ -11,6 +11,7 @@ pub enum OptionColor {
     Red,
     Pink,
     Purple,
+    Hex(u32),
     Unknown,
 }
 
@@ -28,6 +29,56 @@ impl OptionColor {
             _ => Self::Unknown,
         }
     }
+
+    /// A hex colour (`#rrggbb`, `rrggbb`, `#rgb`, `rgb`), as Linear sends; anything else is
+    /// `Unknown`.
+    pub fn from_hex(value: &str) -> Self {
+        let h = value.strip_prefix('#').unwrap_or(value);
+        if !h.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Self::Unknown;
+        }
+        let full = match h.len() {
+            6 => h.to_string(),
+            3 => h.chars().flat_map(|c| [c, c]).collect(),
+            _ => return Self::Unknown,
+        };
+        u32::from_str_radix(&full, 16).map_or(Self::Unknown, Self::Hex)
+    }
+}
+
+/// What a Linear workflow state means; GitHub options have none. Declared in workflow order,
+/// which is the column order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OptionKind {
+    Triage,
+    Backlog,
+    Unstarted,
+    Started,
+    Completed,
+    Canceled,
+    Duplicate,
+}
+
+impl OptionKind {
+    /// Linear's `WorkflowState.type`; `None` for a type this build does not know.
+    pub fn from_linear(value: &str) -> Option<Self> {
+        Some(match value {
+            "triage" => Self::Triage,
+            "backlog" => Self::Backlog,
+            "unstarted" => Self::Unstarted,
+            "started" => Self::Started,
+            "completed" => Self::Completed,
+            "canceled" => Self::Canceled,
+            "duplicate" => Self::Duplicate,
+            _ => return None,
+        })
+    }
+
+    /// Whether an issue in a state of this kind counts as closed.
+    pub fn is_closed(self) -> bool {
+        matches!(self, Self::Completed | Self::Canceled | Self::Duplicate)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -35,6 +86,9 @@ pub struct SelectOption {
     pub id: OptionId,
     pub name: String,
     pub color: OptionColor,
+    /// The workflow state's kind (Linear); `None` for GitHub options.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<OptionKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -253,6 +307,7 @@ mod tests {
             id: OptionId::new(id),
             name: name.into(),
             color: OptionColor::Blue,
+            kind: None,
         }
     }
 
@@ -355,5 +410,63 @@ mod tests {
             })
         );
         assert_eq!(f.value_for_bucket("zz"), None);
+    }
+
+    #[test]
+    fn hex_colours_parse_with_or_without_hash() {
+        assert_eq!(OptionColor::from_hex("#5e6ad2"), OptionColor::Hex(0x5e6ad2));
+        assert_eq!(OptionColor::from_hex("5E6AD2"), OptionColor::Hex(0x5e6ad2));
+        assert_eq!(OptionColor::from_hex("#fff"), OptionColor::Hex(0xffffff));
+        for bad in ["", "#", "#12", "zzzzzz", "#1234567"] {
+            assert_eq!(OptionColor::from_hex(bad), OptionColor::Unknown, "{bad}");
+        }
+    }
+
+    #[test]
+    fn state_kinds_map_from_linear_and_sort_in_workflow_order() {
+        use OptionKind::*;
+        let names = [
+            "triage",
+            "backlog",
+            "unstarted",
+            "started",
+            "completed",
+            "canceled",
+            "duplicate",
+        ];
+        let kinds: Vec<_> = names
+            .iter()
+            .map(|n| OptionKind::from_linear(n).unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                Triage, Backlog, Unstarted, Started, Completed, Canceled, Duplicate
+            ]
+        );
+        let mut shuffled = vec![
+            Canceled, Triage, Started, Duplicate, Backlog, Completed, Unstarted,
+        ];
+        shuffled.sort();
+        assert_eq!(shuffled, kinds);
+        assert_eq!(OptionKind::from_linear("paused"), None);
+        assert!(Completed.is_closed() && Canceled.is_closed() && Duplicate.is_closed());
+        assert!(!Started.is_closed() && !Triage.is_closed());
+    }
+
+    #[test]
+    fn options_without_a_kind_read_and_write_as_before() {
+        let old = r#"{"id": "o1", "name": "Todo", "color": "Gray"}"#;
+        let o: SelectOption = serde_json::from_str(old).unwrap();
+        assert_eq!(o.kind, None);
+        assert!(!serde_json::to_string(&o).unwrap().contains("kind"));
+        let linear = SelectOption {
+            kind: Some(OptionKind::Started),
+            color: OptionColor::Hex(0xf2c94c),
+            ..o
+        };
+        let back: SelectOption =
+            serde_json::from_str(&serde_json::to_string(&linear).unwrap()).unwrap();
+        assert_eq!(back, linear);
     }
 }

@@ -215,7 +215,7 @@ pub fn build_doc(
         None => String::new(),
     }];
     if let Some(r) = item.reference() {
-        meta.push(r.repo.clone());
+        meta.push(r.container.clone());
     }
     meta.push(state_word(&item.content).to_string());
     if let Some(t) = state.detail.as_ref().and_then(|d| d.issue_type.clone()) {

@@ -98,15 +98,12 @@ impl BoardSnapshot {
 pub(crate) mod tests {
     use super::*;
     use crate::model::item::tests::issue;
-    use crate::model::{BoardRef, OwnerKind, ProjectId};
+    use crate::model::{BoardKey, OwnerKind, ProjectId};
 
     pub fn project() -> Project {
         Project {
             id: ProjectId::new("P"),
-            board: BoardRef {
-                owner: "tviles".into(),
-                number: 3,
-            },
+            board: BoardKey::github("tviles", 3),
             owner_kind: OwnerKind::User,
             title: "T".into(),
             url: "u".into(),

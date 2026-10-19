@@ -1,10 +1,10 @@
 //! Pure decisions for which board a pane opens (spec section 5, "Opening a board").
 
-use crate::model::{BoardRef, ProjectSummary, RepoSlug};
+use crate::model::{BoardKey, ProjectSummary, RepoSlug};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FirstStep {
-    Use(BoardRef),
+    Use(BoardKey),
     FetchRepoProjects(RepoSlug),
     PickAll,
 }
@@ -12,9 +12,9 @@ pub enum FirstStep {
 /// `--project` wins; `--picker` always picks; then the board remembered for the repo; then
 /// the repo's linked boards; with no repo, the picker.
 pub fn first_step(
-    explicit: Option<BoardRef>,
+    explicit: Option<BoardKey>,
     picker: bool,
-    remembered: Option<BoardRef>,
+    remembered: Option<BoardKey>,
     repo: Option<RepoSlug>,
 ) -> FirstStep {
     if let Some(b) = explicit {
@@ -34,7 +34,7 @@ pub fn first_step(
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AfterRepo {
-    Use(BoardRef),
+    Use(BoardKey),
     Pick(Vec<ProjectSummary>),
     PickAll,
 }
@@ -76,7 +76,7 @@ mod tests {
             closed,
         }
     }
-    fn b(s: &str) -> BoardRef {
+    fn b(s: &str) -> BoardKey {
         s.parse().unwrap()
     }
     fn r() -> RepoSlug {

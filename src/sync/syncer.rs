@@ -49,8 +49,14 @@ impl Syncer {
         self.send(SyncEvent::Failed { task, error });
     }
 
-    pub async fn resolve(&self, board: &BoardRef) -> Option<Project> {
-        match self.gh.resolve_project(board).await {
+    pub async fn resolve(&self, board: &BoardKey) -> Option<Project> {
+        let result = match board {
+            BoardKey::Github(b) => self.gh.resolve_project(b).await,
+            other => Err(BackendError::NoCredentials {
+                provider: other.provider(),
+            }),
+        };
+        match result {
             Ok(p) => {
                 self.send(SyncEvent::Project(p.clone()));
                 Some(p)
