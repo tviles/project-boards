@@ -113,4 +113,72 @@ Schema: `crates/queries/graphql/linear/schema.graphql`, fetched 2026-10-16 from 
 
 | # | Question | Answer | Consequence |
 |---|---|---|---|
+| L1 | How soon after an edit does a poll or a read show it? | 0.2 s (updatedAt-filtered list with `includeArchived`), 0.4 s (single issue by id), 0.5 s (custom view issues): every path under 0.5 s on a small team, so Linear is effectively read-after-write consistent | Linear's recent window (0.5) can be short; polls can be trusted right after an edit. Plan 2 keeps a small window (a few seconds) as a margin, not a multi-minute one |
+| L2 | What does the full issue page cost, and what is the page size cap? | `X-Complexity` 18 for `first: 100` and for `first: 250`, with 19 issues returned each time; `first: 1000` is rejected with `INVALID_INPUT` (the cap lies between 250 and 1000). The reported complexity appears to follow the items returned rather than `first`; measured on a small team (19 issues), so it says little about a big board. Complexity remaining fell by about 18 per request from 3,000,000 | `SyncProfile.full_page` for Linear stays 100. Plan 2 re-measures cost on a larger board if needed, and never sends `first` above 250 |
+| L3 | Which strings do view settings use? | `layout`: `board`, `list`. `issueGrouping`: `workflowState`, `priority`, `assignee`, `none`. `issueSubGrouping`: `none`, `workflowState`. `viewOrdering`: `priority`, `manual`. `viewOrderingDirection`: `asc` or null (null when the ordering is not manual). `showCompletedIssues`: `all`, `none`. Settings are present for every view, workspace, team and project scoped | Plan 2 maps `layout` board/list to board/list; `issueGrouping` workflowState/priority/assignee/none to column or group keys; `issueSubGrouping` the same set; `viewOrdering` priority/manual to the sort. Unknown strings fall back to the list layout with no grouping |
+| L4 | Can custom view tabs ship, and are project-scoped views reachable? | `customViews` lists workspace and team views (6 here) but not "Probe project view", which lives inside the project. It is reachable through `Project.facets[].targetCustomView` (id, name, settings) and `customView(id).issues` returned its 17 issues | Custom view tabs ship for workspace and team views from `customViews`. Project-scoped views are reachable only through `Project.facets`; plan 2 reads them there when a project board is open |
+| L5 | Does a view's "hide completed" setting reach the issue list? | No. "Probe hide completed" has `showCompletedIssues: none`, yet `customView.issues` returned a completed issue (1 of 11, the same count as TBB's completed issues) | The client hides completed issues itself for views whose `showCompletedIssues` is `none` |
+| L6 | How do errors look? | Bad key: HTTP 401, `AUTHENTICATION_ERROR`. Unknown issue (random UUID or `ZZZ-99999`): HTTP 200 with `INPUT_ERROR` "Entity not found: Issue". A refused request (no permission) was not produced; the revoked-key case was not run. `RATELIMITED` is from Linear's documentation (HTTP 400), not measured | `BackendError` mapping: 401 or `AUTHENTICATION_ERROR` becomes `Unauthorized`; HTTP 200 with `INPUT_ERROR` (entity not found) becomes `Api`; `RATELIMITED` becomes `RateLimited` (retry seconds from the rate limit headers); `FORBIDDEN` (docs, unconfirmed) becomes `MissingPermission`; transport failures `Network`; undecodable bodies `Decode` |
+| L7 | Do polls see archivals and trash? | Yes. With `includeArchived: true`, a poll lists an archived issue (`archivedAt` set, `trashed` null) and a trashed issue (`trashed: true`, `archivedAt` set), both immediately and 10 s later | Polls see archivals and trash, so the periodic full refresh is only a safety net. The poll must pass `includeArchived: true` and treat `archivedAt` set or `trashed: true` as removal |
+| L8 | Where do a project board's teams come from? | `Project.teams` (TBA, TBB) matched the team keys found on the project's issues (TBA, TBB) | A project board's teams come from `Project.teams` (one query), no scan of issues needed |
+| L9 | Can `KEY-123` be looked up directly, and what limits search? | `issue(id: "TBA-1")` works with the identifier. `searchIssues` answered HTTP 200 with one result; no `X-RateLimit-Endpoint-*` header came back, so the documented 30 requests a minute limit is unconfirmed | Reference jumps look up `KEY-123` directly with `issue(id:)`. For 0.5, search is limited to the documented 30 a minute until a header confirms it, with one request per keystroke pause |
 | L10 | Can `graphql_client` 0.16 build an operation with an `IssueFilter` variable from Linear's schema? | Yes, once the module declares the extra custom-scalar aliases the filter types reach: `TimelessDateOrDuration`, `Duration` and `JSONObject` (plus `JSON`) as `String`. Without them the first error is ``error[E0425]: cannot find type `Duration` in module `super` ``. No measurable build cost: `project-boards-queries` with `--features live` built in 6.9 s without the probe and 6.0 s with it (single timed builds, warm dependencies) | Plan 2 can send built-in tab filters as `IssueFilter` variables; it must add those scalar aliases to the `linear` module when it does. No need for raw requests with a validated twin |
+
+### Seed observations
+
+- Linear's API cannot create cycles (`cycleCreate` is deprecated: "Cycle creation is not supported"). Enabling cycles with `cycleEnabledStartDate` set to today made cycle 1 current immediately. Consequence: tests and the seed rely on enabling cycles; the client never creates one.
+- This Free-plan workspace refuses multi-select label groups: `issueLabelCreate` with `groupType: multiSelect` returns `INPUT_ERROR` "multi-select issue label groups disabled"; single-select groups work. Consequence: the client must handle workspaces with and without multi-select groups; the testbed exercises single-select only.
+- A new workspace starts with parentless labels "Bug", "Feature" and "Improvement"; `issueLabelCreate` with a null `color` returns `INPUT_ERROR` "invalid color". Consequence: the client always sends a colour when creating labels.
+- `customViewCreate` works on the Free plan (two shared views were created through the API).
+
+### Probe report (2026-10-19)
+
+### L2: query cost of the issue page
+| first | status | X-Complexity | complexity remaining | nodes | error codes |
+|---|---|---|---|---|---|
+| 100 | 200 | 18 | 2999956 | 19 | none |
+| 250 | 200 | 18 | 2999938 | 19 | none |
+| 1000 | 200 | 18 | 2999920 | 0 | INVALID_INPUT |
+### L3/L4/L5: custom views
+ProbeViews: HTTP 200, 6 views, error codes: none
+| view | team | project-scoped | layout | issueGrouping | issueSubGrouping | viewOrdering | viewOrderingDirection | showCompletedIssues |
+|---|---|---|---|---|---|---|---|---|
+| Probe team board by status | TBB | no | board | workflowState | none | priority | null | none |
+| Probe hide completed | TBB | no | list | none | none | priority | null | none |
+| Probe board by priority | TBA | no | board | priority | none | manual | asc | all |
+| Probe list by assignee | TBA | no | list | assignee | workflowState | priority | null | all |
+| Testbed open | workspace | no | list | workflowState | none | priority | null | all |
+| Testbed A bugs | TBA | no | list | workflowState | none | priority | null | all |
+L4: "Probe project view" is NOT in the customViews list.
+L4: it IS reachable through Project.facets (team: workspace; layout board, issueGrouping workflowState, issueSubGrouping none, viewOrdering priority, viewOrderingDirection null, showCompletedIssues all); ProbeViewIssues on it returns 17 issues.
+L5: "Probe hide completed" returns 11 issues through ProbeViewIssues (first 100), of which 1 are completed; TBB has 11 issues in its first page, of which 1 are completed.
+### L6: errors
+- bad key, TestbedViewer: HTTP 401; codes: AUTHENTICATION_ERROR; first message: Authentication required, not authenticated
+- random UUID, ProbeIssue: HTTP 200; codes: INPUT_ERROR; first message: Entity not found: Issue
+- unknown identifier ZZZ-99999, ProbeIssue: HTTP 200; codes: INPUT_ERROR; first message: Entity not found: Issue
+- revoked key: not run (PB_LINEAR_REVOKED_KEY is not set)
+### L1: read-after-write delay
+Set TBA-1 priority 0 -> 1: HTTP 200; codes: none; first message: -; updatedAt returned: true
+| path | seen with the new priority after |
+|---|---|
+| a: updatedAt-filtered list (includeArchived) | 0.2 s |
+| b: single issue by id | 0.4 s |
+| c: "Probe board by priority" view issues | 0.5 s |
+Restored TBA-1 priority to 0; confirmed by a read: 0
+### L7: archive and trash in the polled list
+issueArchive: HTTP 200, success: true, codes: none
+issueDelete: HTTP 200, success: true, codes: none
+| when | issue | listed | archivedAt set | trashed |
+|---|---|---|---|---|
+| immediately | archived one | yes | true | null |
+| immediately | trashed one | yes | true | true |
+| after 10 s | archived one | yes | true | null |
+| after 10 s | trashed one | yes | true | true |
+### L8: a project's teams
+- project teams: TBA, TBB
+- team keys on its issues (first 100, 17 issues): TBA, TBB
+- they match: true
+### L9: identifier lookup and search
+- ProbeIssue("TBA-1"): works (HTTP 200, codes: none)
+- ProbeSearch(<seeded title>): HTTP 200, 1 results, codes: none
+- no header with `endpoint` in its name
