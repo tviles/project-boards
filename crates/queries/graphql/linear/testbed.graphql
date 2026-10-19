@@ -246,3 +246,190 @@ mutation SeedCreateOpenView($name: String!) {
     success
   }
 }
+
+# ---- Phase 0 probes (examples/probe_linear.rs) ----
+
+# The issue fields the Linear client will list (spec section 6); L2 measures their cost.
+query ProbeIssuePage($teamId: ID!, $first: Int!) {
+  issues(filter: { team: { id: { eq: $teamId } } }, first: $first, orderBy: updatedAt) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      id
+      identifier
+      number
+      title
+      url
+      priority
+      estimate
+      dueDate
+      sortOrder
+      prioritySortOrder
+      createdAt
+      updatedAt
+      completedAt
+      canceledAt
+      archivedAt
+      state {
+        id
+        name
+        type
+        color
+        position
+      }
+      team {
+        id
+        key
+      }
+      assignee {
+        id
+        displayName
+      }
+      cycle {
+        id
+        number
+        startsAt
+        endsAt
+      }
+      project {
+        id
+        name
+      }
+      parent {
+        id
+        identifier
+      }
+      labels(first: 10) {
+        nodes {
+          id
+          name
+          color
+          parent {
+            id
+            name
+            groupType
+          }
+        }
+      }
+    }
+  }
+}
+
+query ProbeIssue($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    priority
+    updatedAt
+    archivedAt
+    trashed
+  }
+}
+
+mutation ProbeSetPriority($id: String!, $priority: Int!) {
+  issueUpdate(id: $id, input: { priority: $priority }) {
+    issue {
+      updatedAt
+    }
+  }
+}
+
+query ProbeUpdatedSince($teamId: ID!, $since: DateTimeOrDuration!) {
+  issues(
+    filter: { team: { id: { eq: $teamId } }, updatedAt: { gt: $since } }
+    first: 50
+    orderBy: updatedAt
+    includeArchived: true
+  ) {
+    nodes {
+      id
+      priority
+      archivedAt
+      trashed
+    }
+  }
+}
+
+query ProbeViews {
+  customViews(first: 50) {
+    nodes {
+      id
+      name
+      shared
+      team {
+        key
+      }
+      viewPreferencesValues {
+        layout
+        issueGrouping
+        issueSubGrouping
+        viewOrdering
+        viewOrderingDirection
+        showCompletedIssues
+      }
+    }
+  }
+}
+
+query ProbeViewIssues($id: String!, $first: Int!) {
+  customView(id: $id) {
+    issues(first: $first) {
+      nodes {
+        id
+        priority
+        state {
+          type
+        }
+      }
+    }
+  }
+}
+
+mutation ProbeCreateIssue($teamId: String!, $title: String!) {
+  issueCreate(input: { teamId: $teamId, title: $title }) {
+    issue {
+      id
+    }
+  }
+}
+
+mutation ProbeArchive($id: String!) {
+  issueArchive(id: $id) {
+    success
+  }
+}
+
+mutation ProbeTrash($id: String!) {
+  issueDelete(id: $id) {
+    success
+  }
+}
+
+query ProbeProjectTeams($name: String!) {
+  projects(filter: { name: { eq: $name } }, first: 1) {
+    nodes {
+      teams(first: 10) {
+        nodes {
+          key
+        }
+      }
+      issues(first: 100) {
+        nodes {
+          team {
+            key
+          }
+        }
+      }
+    }
+  }
+}
+
+query ProbeSearch($term: String!) {
+  searchIssues(term: $term, first: 1) {
+    nodes {
+      id
+    }
+  }
+}

@@ -62,10 +62,23 @@ fn raw_responses_expose_error_codes_and_headers() {
         status: 400,
         headers: vec![("x-complexity".into(), "2301".into())],
         body: serde_json::json!({"errors": [{"message": "m", "extensions": {"code": "RATELIMITED"}}]}),
+        text: None,
     };
     assert_eq!(raw.error_codes(), ["RATELIMITED"]);
     assert_eq!(raw.header("X-Complexity"), Some("2301"));
     assert!(raw.data().is_null());
+}
+
+#[test]
+fn a_non_json_body_is_kept_as_text() {
+    let raw = Raw::from_body(502, vec![], b"<html>Bad gateway</html>");
+    assert_eq!(raw.status, 502);
+    assert!(raw.body.is_null());
+    assert_eq!(raw.text.as_deref(), Some("<html>Bad gateway</html>"));
+    assert!(raw.error_codes().is_empty());
+    let json = Raw::from_body(200, vec![], br#"{"data":{"a":1}}"#);
+    assert_eq!(json.text, None);
+    assert_eq!(json.data()["a"], 1);
 }
 
 #[test]

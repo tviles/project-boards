@@ -128,5 +128,16 @@ pub mod linear {
         SeedViews,
         SeedCreateTeamBugsView,
         SeedCreateOpenView,
+        ProbeIssuePage,
+        ProbeIssue,
+        ProbeSetPriority,
+        ProbeUpdatedSince,
+        ProbeViews,
+        ProbeViewIssues,
+        ProbeCreateIssue,
+        ProbeArchive,
+        ProbeTrash,
+        ProbeProjectTeams,
+        ProbeSearch,
     );
 }

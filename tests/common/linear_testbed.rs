@@ -118,9 +118,29 @@ pub struct Raw {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Value,
+    /// The body as text when it was not JSON (an error page); `None` for JSON bodies.
+    pub text: Option<String>,
 }
 
 impl Raw {
+    /// Parses a body as JSON; anything else is kept as (lossy) text, never dropped.
+    pub fn from_body(status: u16, headers: Vec<(String, String)>, bytes: &[u8]) -> Self {
+        match serde_json::from_slice(bytes) {
+            Ok(body) => Raw {
+                status,
+                headers,
+                body,
+                text: None,
+            },
+            Err(_) => Raw {
+                status,
+                headers,
+                body: Value::Null,
+                text: Some(String::from_utf8_lossy(bytes).into_owned()),
+            },
+        }
+    }
+
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -197,11 +217,10 @@ impl Linear {
             })
             .map(|(n, v)| (n.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
-        let body = response.json().await.unwrap_or(Value::Null);
-        Ok(Raw {
-            status,
-            headers,
-            body,
-        })
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| e.without_url().to_string())?;
+        Ok(Raw::from_body(status, headers, &bytes))
     }
 }
