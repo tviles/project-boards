@@ -45,6 +45,13 @@ impl BackendError {
             BackendError::Decode(_) => "Decode",
         }
     }
+
+    /// True for a board or item the server says does not exist or cannot be seen: an `Api`
+    /// error with a `NOT_FOUND` entry, the shape both providers' resolve returns.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, BackendError::Api(entries)
+            if entries.iter().any(|e| e.kind.as_deref() == Some("NOT_FOUND")))
+    }
 }
 
 fn no_credentials(provider: &Provider) -> String {
@@ -169,5 +176,40 @@ mod tests {
             "NoCredentials"
         );
         assert_eq!(BackendError::Decode("x".into()).kind(), "Decode");
+    }
+
+    #[test]
+    fn not_found_is_recognised_for_both_providers() {
+        let entry = |message: &str, kind: Option<&str>| GraphqlErrorEntry {
+            message: message.into(),
+            kind: kind.map(String::from),
+        };
+        // GitHub's resolve, and GitHub's own NOT_FOUND entries.
+        let github = BackendError::Api(vec![entry(
+            "project acme/3 was not found, or this token cannot see it",
+            Some("NOT_FOUND"),
+        )]);
+        assert!(github.is_not_found());
+        // Linear's resolve.
+        let linear = BackendError::Api(vec![
+            entry("other", Some("INPUT_ERROR")),
+            entry(
+                "board linear:team:TBA was not found, or this API key cannot see it",
+                Some("NOT_FOUND"),
+            ),
+        ]);
+        assert!(linear.is_not_found());
+        for other in [
+            BackendError::Api(vec![entry("Entity not found: Issue", Some("INPUT_ERROR"))]),
+            BackendError::Api(vec![entry("NOT_FOUND", None)]),
+            BackendError::Api(vec![]),
+            BackendError::Decode("NOT_FOUND".into()),
+            BackendError::MissingPermission {
+                provider: Provider::Linear,
+                needed: vec![],
+            },
+        ] {
+            assert!(!other.is_not_found(), "{other:?}");
+        }
     }
 }
