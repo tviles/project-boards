@@ -69,10 +69,13 @@ pub fn sort_items(items: &mut [&Item], specs: &[SortSpec], fields: &[Field]) {
                 return ord;
             }
         }
-        // Manual order (Linear) last; GitHub items have none, so stability keeps their order.
+        // Manual order (Linear) last, ascending; an item with one sorts before an item
+        // without (a total order). GitHub items have none, so stability keeps their order.
         match (ia.content_fields.sort_order, ib.content_fields.sort_order) {
-            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
-            _ => Ordering::Equal,
+            (Some(x), Some(y)) => x.total_cmp(&y),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
         }
     });
     for (slot, (_, item)) in items.iter_mut().zip(keyed) {
@@ -239,5 +242,29 @@ mod tests {
         let mut items = vec![&z, &x, &y];
         sort_items(&mut items, &[], &[]);
         assert_eq!(ids(&items), ["z", "x", "y"]);
+
+        let (a, n1, c, n2) = (
+            manual("a", Some(3.0), None),
+            manual("n1", None, None),
+            manual("c", Some(1.0), None),
+            manual("n2", None, None),
+        );
+        let mut items = vec![&a, &n1, &c, &n2];
+        sort_items(&mut items, &[], &[]);
+        assert_eq!(ids(&items), ["c", "a", "n1", "n2"]);
+
+        let spec = SortSpec {
+            field: FieldId::new("P"),
+            direction: SortDirection::Asc,
+        };
+        let (a, b, c, d) = (
+            manual("a", Some(3.0), Some("P1")),
+            manual("b", None, Some("P1")),
+            manual("c", Some(1.0), Some("P1")),
+            manual("d", None, Some("P0")),
+        );
+        let mut items = vec![&a, &b, &c, &d];
+        sort_items(&mut items, &[spec], &[priority()]);
+        assert_eq!(ids(&items), ["d", "c", "a", "b"]);
     }
 }

@@ -190,6 +190,7 @@ pub struct ContentFields {
     pub milestone: Option<crate::model::MilestoneRef>,
     /// Linear's manual order (`sortOrder`), ascending; a tie-break after the view's sorts.
     /// `None` for GitHub items.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_order: Option<f64>,
 }
 
@@ -392,6 +393,18 @@ pub(crate) mod tests {
                 ..ContentFields::default()
             },
         }
+    }
+
+    #[test]
+    fn an_absent_sort_order_is_not_serialized() {
+        let mut i = issue("a", 1, "A");
+        let json = serde_json::to_value(&i.content_fields).unwrap();
+        assert!(json.get("sort_order").is_none());
+        i.content_fields.sort_order = Some(2.5);
+        let json = serde_json::to_value(&i.content_fields).unwrap();
+        assert_eq!(json["sort_order"], 2.5);
+        let back: ContentFields = serde_json::from_value(json).unwrap();
+        assert_eq!(back.sort_order, Some(2.5));
     }
 
     #[test]
