@@ -175,11 +175,10 @@ pub fn custom_view(v: &Value, fields: &[Field], number: u32) -> Option<View> {
             "issueSubGroupingLabelGroupId",
             fields,
         );
-        (
-            Layout::Board,
-            vec![group.unwrap_or_else(|| FieldId::new(ids::STATUS))],
-            lane.into_iter().collect(),
-        )
+        let column = group.unwrap_or_else(|| FieldId::new(ids::STATUS));
+        // Lanes of the column field would repeat the columns.
+        let lane = lane.filter(|lane| *lane != column);
+        (Layout::Board, vec![column], lane.into_iter().collect())
     } else {
         (Layout::Table, Vec::new(), group.into_iter().collect())
     };
@@ -477,6 +476,29 @@ mod tests {
                 (
                     Board,
                     fids(&[ids::STATUS]),
+                    vec![],
+                    vec![],
+                    all_issues_fields(),
+                ),
+            ),
+            (
+                // The fallback column field is not also the lane field.
+                json!({"layout": "board", "issueGrouping": "assignee",
+                       "issueSubGrouping": "workflowState"}),
+                (
+                    Board,
+                    fids(&[ids::STATUS]),
+                    vec![],
+                    vec![],
+                    all_issues_fields(),
+                ),
+            ),
+            (
+                json!({"layout": "board", "issueGrouping": "priority",
+                       "issueSubGrouping": "priority"}),
+                (
+                    Board,
+                    fids(&[ids::PRIORITY]),
                     vec![],
                     vec![],
                     all_issues_fields(),

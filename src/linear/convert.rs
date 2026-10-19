@@ -131,7 +131,14 @@ fn priorities() -> Vec<SelectOption> {
     .collect()
 }
 
-const SINGLE_SELECT_GROUP: &str = "singleSelect";
+const MULTI_SELECT_GROUP: &str = "multiSelect";
+
+/// Whether a label group with `group_type` (`IssueLabel.groupType`) is single-select: every
+/// group is, except a `multiSelect` one ("Groups without a type use single-select
+/// behavior").
+pub(crate) fn is_single_select_group(group_type: Option<&str>) -> bool {
+    group_type != Some(MULTI_SELECT_GROUP)
+}
 
 /// One field per single-select label group, by group name, whose options are its labels.
 /// Other labels, multi-select groups' included, stay in Labels.
@@ -139,7 +146,9 @@ fn label_groups(schema: &Value) -> Vec<Field> {
     let labels = nodes(schema, "issueLabels");
     let mut groups: Vec<Field> = labels
         .iter()
-        .filter(|l| l["isGroup"].as_bool() == Some(true) && l["groupType"] == SINGLE_SELECT_GROUP)
+        .filter(|l| {
+            l["isGroup"].as_bool() == Some(true) && is_single_select_group(l["groupType"].as_str())
+        })
         .filter_map(|g| {
             let id = g["id"].as_str()?;
             let options = labels
@@ -233,6 +242,7 @@ pub(crate) mod tests {
     use serde_json::json;
 
     pub(crate) const TYPE_GROUP: &str = "lg-type";
+    const SIZE_GROUP: &str = "lg-size";
 
     pub(crate) fn tba() -> TeamInfo {
         TeamInfo {
@@ -265,11 +275,12 @@ pub(crate) mod tests {
         json!({
             "workflowStates": {"nodes": [
                 state("s-a-todo", "Todo", "unstarted", 0.0, "team-a"),
-                state("s-a-prog", "In Progress", "started", 1.0, "team-a"),
                 state("s-a-done", "Done", "completed", 2.0, "team-a"),
                 state("s-a-triage", "Triage", "triage", 0.0, "team-a"),
                 state("s-b-todo", "Todo", "unstarted", 0.0, "team-b"),
                 state("s-b-review", "Review", "started", 2.0, "team-b"),
+                // Listed after Review, same kind, earlier position: only position orders them.
+                state("s-a-prog", "In Progress", "started", 1.0, "team-a"),
                 state("s-b-done", "Done", "completed", 3.0, "team-b"),
                 state("s-b-paused", "Paused", "paused", 4.0, "team-b"),
             ]},
@@ -280,6 +291,10 @@ pub(crate) mod tests {
                 label("lg-area", "Area", Some("multiSelect"), None),
                 label("l-ui", "UI", None, Some("lg-area")),
                 label("l-docs", "docs", None, None),
+                // A group with no type behaves as single-select.
+                {"id": SIZE_GROUP, "name": "Size", "color": "#bec2c8", "isGroup": true,
+                 "groupType": null, "parent": null},
+                label("l-small", "Small", None, Some(SIZE_GROUP)),
             ]},
             "cycles": {"nodes": [
                 {"id": "c-now", "number": 2, "name": "Sprint Two",
@@ -331,6 +346,7 @@ pub(crate) mod tests {
                 "Priority",
                 "Assignees",
                 "Labels",
+                "Size",
                 "Type",
                 "Cycle",
                 "Estimate",
@@ -461,8 +477,19 @@ pub(crate) mod tests {
         let names: Vec<_> = options(group).iter().map(|o| o.name.as_str()).collect();
         assert_eq!(names, ["Bug", "Feature"]);
         assert_eq!(options(group)[0].id, OptionId::new("l-bug"));
+        let size = field(&fields, ids::group(SIZE_GROUP).as_str()).expect("untyped group");
+        assert_eq!(size.name, "Size");
+        let names: Vec<_> = options(size).iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, ["Small"]);
         assert!(field(&fields, ids::group("lg-area").as_str()).is_none());
         assert!(!fields.iter().any(|f| f.name == "Area"));
+    }
+
+    #[test]
+    fn only_multi_select_groups_are_not_single_select() {
+        assert!(is_single_select_group(Some("singleSelect")));
+        assert!(is_single_select_group(None));
+        assert!(!is_single_select_group(Some("multiSelect")));
     }
 
     #[test]
