@@ -1942,6 +1942,35 @@ mod tests {
     }
 
     #[test]
+    fn the_action_menu_on_linear_offers_browser_and_archived_only() {
+        let mut a = test_app();
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.project.board = "linear:team:t1".parse().unwrap();
+        snap.project.viewer_can_update = false;
+        snap.project.linear = Some(crate::model::LinearMeta {
+            url_key: "acme".into(),
+            viewer_id: "U_tviles".into(),
+            team_keys: vec!["TBA".into()],
+        });
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        assert!(a.handle_key(key(' ')).is_empty());
+        assert_eq!(
+            menu(&a),
+            [
+                ("Open in the browser".to_string(), "o".to_string()),
+                ("Show archived items".to_string(), String::new()),
+            ]
+        );
+        assert_eq!(a.edit_hints(), None);
+        a.handle_key(code(KeyCode::Esc));
+        assert!(a.handle_key(key('>')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Editing Linear boards arrives in 0.5")
+        );
+    }
+
+    #[test]
     fn nothing_to_do_with_the_item_leaves_only_the_boards_entries() {
         let mut a = test_app();
         let mut snap = a.snapshot().unwrap().clone();

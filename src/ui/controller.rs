@@ -702,8 +702,9 @@ impl Controller {
             tracing::warn!(error = %e, "could not clear stale layout choices");
         }
         self.app.status.flash = Some(format!(
-            "View '{}' layout changed on GitHub; local layout cleared",
-            stale[0].1
+            "View '{}' layout changed on {}; local layout cleared",
+            stale[0].1,
+            board.provider()
         ));
     }
 

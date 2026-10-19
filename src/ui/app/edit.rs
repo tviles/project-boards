@@ -582,6 +582,10 @@ impl App {
             viewer_can_update: self.project().is_some_and(|p| p.viewer_can_update),
             scopes: self.scopes.clone(),
             refused: self.refused_scopes.clone(),
+            provider: self
+                .project()
+                .map(|p| p.board.provider())
+                .unwrap_or_default(),
         }
     }
 

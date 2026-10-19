@@ -1,7 +1,9 @@
 //! The whole screen: header, view tabs, body (table, board, detail), status or input line,
 //! and the help, picker and setup overlays.
 
+use crate::backend::read_only_reason;
 use crate::model::Layout;
+use crate::model::Provider;
 use crate::ui::app::{App, LineKind, Mode, Popup};
 use crate::ui::board::render_board_with;
 use crate::ui::detail::{build_doc, render_detail};
@@ -222,7 +224,10 @@ impl Flag {
 /// The write flags in priority order (read-only, paused, saving), each in both forms.
 fn write_flag_forms(app: &App, now: std::time::Instant) -> Vec<Flag> {
     let mut flags = Vec::new();
-    if app.project().is_some_and(|p| !p.viewer_can_update) {
+    if app
+        .project()
+        .is_some_and(|p| !p.viewer_can_update || read_only_reason(p.board.provider()).is_some())
+    {
         flags.push(Flag::same("read-only".into()));
     } else if app.project().is_some() && !app.edit_context().has_project_scope() {
         flags.push(Flag {
@@ -281,7 +286,11 @@ fn fit_flags(flags: &[Flag], room: usize) -> String {
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let title = app
         .project()
-        .map(|p| format!("{} · {}", p.title, p.board))
+        .map(|p| match p.board.provider() {
+            // A Linear board's key is an internal id; the badge says where it lives.
+            Provider::Linear => format!("{} · {}", p.title, Provider::Linear),
+            Provider::Github => format!("{} · {}", p.title, p.board),
+        })
         .unwrap_or_else(|| "project-boards".into());
     let mut flags = write_flag_forms(app, std::time::Instant::now());
     if let Some((loaded, total)) = app.status.loading {
@@ -1023,6 +1032,30 @@ mod tests {
                 .unwrap()
                 .ends_with("read-only · stale")
         );
+    }
+
+    #[test]
+    fn a_linear_header_shows_the_badge_and_read_only() {
+        use crate::model::{LinearMeta, Provider};
+        let mut snap = snapshot();
+        snap.project.board = "linear:team:t1".parse().unwrap();
+        snap.project.viewer_can_update = false;
+        snap.project.linear = Some(LinearMeta {
+            url_key: "acme".into(),
+            viewer_id: "U_tviles".into(),
+            team_keys: vec!["TBA".into()],
+        });
+        assert_eq!(snap.project.board.provider(), Provider::Linear);
+        let mut a = App::new(
+            Box::new(MemoryStore::new(Some(snap))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        let screen = render_to_string(100, 12, |f| draw(f, &mut a));
+        let first = screen.lines().next().unwrap();
+        assert!(first.starts_with("Testbed · Linear"), "{first}");
+        assert!(first.ends_with("read-only"), "{first}");
+        insta::assert_snapshot!(screen);
     }
 
     fn flagged_app() -> App {
