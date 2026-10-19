@@ -1,0 +1,464 @@
+# Phase 0 only: the testbed guard, the seed program and the probes. Built with the `live`
+# feature; the app never sends these.
+
+query TestbedViewer {
+  viewer {
+    id
+    organization {
+      urlKey
+    }
+  }
+}
+
+query SeedTeams {
+  teams(first: 10) {
+    nodes {
+      id
+      key
+      name
+    }
+  }
+}
+
+mutation SeedRenameTeam($id: String!, $name: String!, $key: String!) {
+  teamUpdate(id: $id, input: { name: $name, key: $key }) {
+    success
+  }
+}
+
+mutation SeedCreateTeam($name: String!, $key: String!) {
+  teamCreate(input: { name: $name, key: $key }) {
+    team {
+      id
+    }
+  }
+}
+
+mutation SeedTeamSettings($id: String!, $cycles: Boolean!, $estimation: String!) {
+  teamUpdate(
+    id: $id
+    input: { cyclesEnabled: $cycles, cycleDuration: 1, upcomingCycleCount: 2, issueEstimationType: $estimation }
+  ) {
+    success
+  }
+}
+
+query SeedTeamDetails($id: String!) {
+  team(id: $id) {
+    states(first: 20) {
+      nodes {
+        id
+        name
+        type
+      }
+    }
+  }
+}
+
+query SeedTeamCycleState($id: String!) {
+  team(id: $id) {
+    cyclesEnabled
+  }
+}
+
+# First enabling only: cycleEnabledStartDate makes the first cycle start now, and must not be
+# sent again once cycles are on.
+mutation SeedEnableTeamCycles($id: String!, $start: DateTime!, $estimation: String!) {
+  teamUpdate(
+    id: $id
+    input: {
+      cyclesEnabled: true
+      cycleDuration: 1
+      upcomingCycleCount: 2
+      cycleEnabledStartDate: $start
+      issueEstimationType: $estimation
+    }
+  ) {
+    success
+  }
+}
+
+query SeedCycles($id: String!) {
+  team(id: $id) {
+    activeCycle {
+      id
+      startsAt
+      endsAt
+    }
+    cycles(first: 10, filter: { isFuture: { eq: true } }) {
+      nodes {
+        id
+        startsAt
+        endsAt
+      }
+    }
+  }
+}
+
+mutation SeedMoveLabel($id: String!, $parentId: String!) {
+  issueLabelUpdate(id: $id, input: { parentId: $parentId }) {
+    success
+  }
+}
+
+mutation SeedRenameState($id: String!, $name: String!) {
+  workflowStateUpdate(id: $id, input: { name: $name }) {
+    success
+  }
+}
+
+query SeedLabels {
+  issueLabels(first: 100) {
+    nodes {
+      id
+      name
+      isGroup
+      parent {
+        id
+      }
+    }
+  }
+}
+
+# One operation per kind of label, so no variable is ever null (Linear rejects a null colour).
+# Single-select only: the testbed workspace refuses multi-select label groups.
+mutation SeedCreateLabelGroup($name: String!, $color: String!) {
+  issueLabelCreate(input: { name: $name, isGroup: true, groupType: singleSelect, color: $color }) {
+    issueLabel {
+      id
+    }
+  }
+}
+
+mutation SeedCreateChildLabel($name: String!, $parentId: String!, $color: String!) {
+  issueLabelCreate(input: { name: $name, parentId: $parentId, color: $color }) {
+    issueLabel {
+      id
+    }
+  }
+}
+
+mutation SeedCreateLooseLabel($name: String!, $color: String!) {
+  issueLabelCreate(input: { name: $name, color: $color }) {
+    issueLabel {
+      id
+    }
+  }
+}
+
+query SeedProjects {
+  projects(first: 50) {
+    nodes {
+      id
+      name
+    }
+  }
+}
+
+mutation SeedCreateProject($name: String!, $teamIds: [String!]!) {
+  projectCreate(input: { name: $name, teamIds: $teamIds }) {
+    project {
+      id
+    }
+  }
+}
+
+query SeedIssues($teamId: ID!) {
+  issues(filter: { team: { id: { eq: $teamId } } }, first: 250, includeArchived: true) {
+    nodes {
+      id
+      title
+      archivedAt
+    }
+  }
+}
+
+mutation SeedCreateIssue(
+  $teamId: String!
+  $title: String!
+  $description: String
+  $stateId: String
+  $priority: Int
+  $estimate: Int
+  $dueDate: TimelessDate
+  $labelIds: [String!]
+  $assigneeId: String
+  $projectId: String
+  $cycleId: String
+  $parentId: String
+) {
+  issueCreate(
+    input: {
+      teamId: $teamId
+      title: $title
+      description: $description
+      stateId: $stateId
+      priority: $priority
+      estimate: $estimate
+      dueDate: $dueDate
+      labelIds: $labelIds
+      assigneeId: $assigneeId
+      projectId: $projectId
+      cycleId: $cycleId
+      parentId: $parentId
+    }
+  ) {
+    issue {
+      id
+      identifier
+    }
+  }
+}
+
+mutation SeedArchiveIssue($id: String!) {
+  issueArchive(id: $id) {
+    success
+  }
+}
+
+mutation SeedMarkDuplicate($issueId: String!, $relatedIssueId: String!) {
+  issueRelationCreate(input: { issueId: $issueId, relatedIssueId: $relatedIssueId, type: duplicate }) {
+    success
+  }
+}
+
+query SeedViews {
+  customViews(first: 50) {
+    nodes {
+      id
+      name
+    }
+  }
+}
+
+mutation SeedCreateTeamBugsView($name: String!, $teamId: String!) {
+  customViewCreate(
+    input: { name: $name, teamId: $teamId, shared: true, filterData: { labels: { name: { eq: "Bug" } } } }
+  ) {
+    success
+  }
+}
+
+mutation SeedCreateOpenView($name: String!) {
+  customViewCreate(
+    input: { name: $name, shared: true, filterData: { state: { type: { nin: ["completed", "canceled", "duplicate"] } } } }
+  ) {
+    success
+  }
+}
+
+# ---- Phase 0 probes (examples/probe_linear.rs) ----
+
+# The issue fields the Linear client will list (spec section 6); L2 measures their cost.
+query ProbeIssuePage($teamId: ID!, $first: Int!) {
+  issues(filter: { team: { id: { eq: $teamId } } }, first: $first, orderBy: updatedAt) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      id
+      identifier
+      number
+      title
+      url
+      priority
+      estimate
+      dueDate
+      sortOrder
+      prioritySortOrder
+      createdAt
+      updatedAt
+      completedAt
+      canceledAt
+      archivedAt
+      state {
+        id
+        name
+        type
+        color
+        position
+      }
+      team {
+        id
+        key
+      }
+      assignee {
+        id
+        displayName
+      }
+      cycle {
+        id
+        number
+        startsAt
+        endsAt
+      }
+      project {
+        id
+        name
+      }
+      parent {
+        id
+        identifier
+      }
+      labels(first: 10) {
+        nodes {
+          id
+          name
+          color
+          parent {
+            id
+            name
+            groupType
+          }
+        }
+      }
+    }
+  }
+}
+
+query ProbeIssue($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    priority
+    updatedAt
+    archivedAt
+    trashed
+  }
+}
+
+mutation ProbeSetPriority($id: String!, $priority: Int!) {
+  issueUpdate(id: $id, input: { priority: $priority }) {
+    issue {
+      updatedAt
+    }
+  }
+}
+
+query ProbeUpdatedSince($teamId: ID!, $since: DateTimeOrDuration!) {
+  issues(
+    filter: { team: { id: { eq: $teamId } }, updatedAt: { gt: $since } }
+    first: 50
+    orderBy: updatedAt
+    includeArchived: true
+  ) {
+    nodes {
+      id
+      priority
+      archivedAt
+      trashed
+    }
+  }
+}
+
+query ProbeViews {
+  customViews(first: 50) {
+    nodes {
+      id
+      name
+      shared
+      team {
+        key
+      }
+      facet {
+        sourceProject {
+          id
+        }
+      }
+      viewPreferencesValues {
+        layout
+        issueGrouping
+        issueSubGrouping
+        viewOrdering
+        viewOrderingDirection
+        showCompletedIssues
+      }
+    }
+  }
+}
+
+query ProbeProjectViews($name: String!) {
+  projects(filter: { name: { eq: $name } }, first: 1) {
+    nodes {
+      facets {
+        targetCustomView {
+          id
+          name
+          team {
+            key
+          }
+          viewPreferencesValues {
+            layout
+            issueGrouping
+            issueSubGrouping
+            viewOrdering
+            viewOrderingDirection
+            showCompletedIssues
+          }
+        }
+      }
+    }
+  }
+}
+
+query ProbeViewIssues($id: String!, $first: Int!) {
+  customView(id: $id) {
+    issues(first: $first) {
+      nodes {
+        id
+        priority
+        state {
+          type
+        }
+      }
+    }
+  }
+}
+
+mutation ProbeCreateIssue($teamId: String!, $title: String!) {
+  issueCreate(input: { teamId: $teamId, title: $title }) {
+    issue {
+      id
+    }
+  }
+}
+
+mutation ProbeArchive($id: String!) {
+  issueArchive(id: $id) {
+    success
+  }
+}
+
+mutation ProbeTrash($id: String!) {
+  issueDelete(id: $id) {
+    success
+  }
+}
+
+query ProbeProjectTeams($name: String!) {
+  projects(filter: { name: { eq: $name } }, first: 1) {
+    nodes {
+      teams(first: 10) {
+        nodes {
+          key
+        }
+      }
+      issues(first: 100) {
+        nodes {
+          team {
+            key
+          }
+        }
+      }
+    }
+  }
+}
+
+query ProbeSearch($term: String!) {
+  searchIssues(term: $term, first: 1) {
+    nodes {
+      id
+    }
+  }
+}

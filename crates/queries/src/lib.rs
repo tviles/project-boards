@@ -81,3 +81,64 @@ operation!(
     variables_derives = "Debug, Clone"
 )]
 pub struct DeleteIssue;
+
+/// Linear operations, validated against graphql/linear/schema.graphql. Phase 0 only for now.
+#[cfg(feature = "live")]
+pub mod linear {
+    use graphql_client::GraphQLQuery;
+
+    type DateTime = String;
+    type TimelessDate = String;
+    type DateTimeOrDuration = String;
+
+    macro_rules! linear_operation {
+        ($($name:ident),* $(,)?) => {$(
+            #[derive(GraphQLQuery)]
+            #[graphql(
+                schema_path = "graphql/linear/schema.graphql",
+                query_path = "graphql/linear/testbed.graphql",
+                variables_derives = "Debug, Clone"
+            )]
+            pub struct $name;
+        )*};
+    }
+
+    linear_operation!(
+        TestbedViewer,
+        SeedTeams,
+        SeedRenameTeam,
+        SeedCreateTeam,
+        SeedTeamSettings,
+        SeedTeamDetails,
+        SeedTeamCycleState,
+        SeedEnableTeamCycles,
+        SeedCycles,
+        SeedMoveLabel,
+        SeedRenameState,
+        SeedLabels,
+        SeedCreateLabelGroup,
+        SeedCreateChildLabel,
+        SeedCreateLooseLabel,
+        SeedProjects,
+        SeedCreateProject,
+        SeedIssues,
+        SeedCreateIssue,
+        SeedArchiveIssue,
+        SeedMarkDuplicate,
+        SeedViews,
+        SeedCreateTeamBugsView,
+        SeedCreateOpenView,
+        ProbeIssuePage,
+        ProbeIssue,
+        ProbeSetPriority,
+        ProbeUpdatedSince,
+        ProbeViews,
+        ProbeProjectViews,
+        ProbeViewIssues,
+        ProbeCreateIssue,
+        ProbeArchive,
+        ProbeTrash,
+        ProbeProjectTeams,
+        ProbeSearch,
+    );
+}
