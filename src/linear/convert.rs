@@ -5,6 +5,7 @@ use crate::github::convert::{nodes, str_of};
 use crate::linear::ids;
 use crate::model::*;
 use serde_json::Value;
+use std::collections::{BTreeMap, HashMap};
 
 /// A team on the board, as the resolve query reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,21 +116,24 @@ fn states(schema: &Value, teams: &[TeamInfo]) -> Vec<SelectOption> {
 /// Priorities 1 to 4 (Decision 12). Priority 0, "No priority", is no value: the field's own
 /// "No Priority" bucket.
 fn priorities() -> Vec<SelectOption> {
-    [
-        (1, "Urgent", OptionColor::Red),
-        (2, "High", OptionColor::Orange),
-        (3, "Medium", OptionColor::Yellow),
-        (4, "Low", OptionColor::Blue),
-    ]
-    .into_iter()
-    .map(|(n, name, color)| SelectOption {
-        id: ids::priority_option(n),
-        name: name.into(),
-        color,
-        kind: None,
-    })
-    .collect()
+    PRIORITIES
+        .into_iter()
+        .map(|(n, name, color)| SelectOption {
+            id: ids::priority_option(n),
+            name: name.into(),
+            color,
+            kind: None,
+        })
+        .collect()
 }
+
+/// Linear's priorities 1 to 4 with their option names and colours.
+const PRIORITIES: [(u8, &str, OptionColor); 4] = [
+    (1, "Urgent", OptionColor::Red),
+    (2, "High", OptionColor::Orange),
+    (3, "Medium", OptionColor::Yellow),
+    (4, "Low", OptionColor::Blue),
+];
 
 const MULTI_SELECT_GROUP: &str = "multiSelect";
 
@@ -179,14 +183,10 @@ fn cycles(schema: &Value, teams: &[TeamInfo]) -> FieldKind {
         .filter(|c| on_board(c, teams))
         .map(|c| {
             let starts = c["startsAt"].as_str().unwrap_or("");
-            let title = match c["name"].as_str() {
-                Some(name) if !name.is_empty() => name.to_string(),
-                _ => format!("Cycle {}", c["number"].as_u64().unwrap_or(0)),
-            };
             let iteration = Iteration {
                 id: IterationId::new(str_of(&c["id"])),
-                title,
-                start_date: starts.get(..10).unwrap_or(starts).to_string(),
+                title: cycle_title(c),
+                start_date: date_part(starts).to_string(),
                 duration_days: days_between(starts, c["endsAt"].as_str().unwrap_or("")),
             };
             (c["isPast"].as_bool().unwrap_or(false), iteration)
@@ -198,6 +198,19 @@ fn cycles(schema: &Value, teams: &[TeamInfo]) -> FieldKind {
         iterations: iterations.into_iter().map(|(_, i)| i).collect(),
         completed: completed.into_iter().map(|(_, i)| i).collect(),
     }
+}
+
+/// A cycle's name, else `Cycle <number>`.
+fn cycle_title(c: &Value) -> String {
+    match c["name"].as_str() {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => format!("Cycle {}", c["number"].as_u64().unwrap_or(0)),
+    }
+}
+
+/// The `YYYY-MM-DD` part of an ISO 8601 time; the whole string when it is shorter.
+fn date_part(t: &str) -> &str {
+    t.get(..10).unwrap_or(t)
 }
 
 /// Whole days from the date part of `start` to the date part of `end` (ISO 8601 times);
@@ -236,10 +249,297 @@ pub fn project_from_wire(
     }
 }
 
+/// One issue a poll returned: changed (an archived one keeps `archived: true`), or moved to
+/// the trash and so gone from the board.
+#[allow(clippy::large_enum_variant)] // short-lived: one poll page at a time, mostly `Item`s
+#[derive(Debug, Clone, PartialEq)]
+pub enum Polled {
+    Item(Item),
+    Trashed(ItemId),
+}
+
+/// A non-negative whole number from Linear's `Float` (`number`, `priority`).
+fn whole(v: &Value) -> Option<u32> {
+    let n = v.as_f64()?;
+    (n.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&n)).then_some(n as u32)
+}
+
+/// Open, or closed and why, from a workflow state kind (spec section 4). An unknown kind is
+/// open.
+fn state_of(kind: &str) -> (ContentState, Option<StateReason>) {
+    match OptionKind::from_linear(kind) {
+        Some(OptionKind::Completed) => (ContentState::Closed, Some(StateReason::Completed)),
+        Some(OptionKind::Canceled) => (ContentState::Closed, Some(StateReason::NotPlanned)),
+        Some(OptionKind::Duplicate) => (ContentState::Closed, Some(StateReason::Duplicate)),
+        _ => (ContentState::Open, None),
+    }
+}
+
+/// The Priority value for Linear's `priority`: 1 to 4 only, as 0 is "No priority"
+/// (Decision 12).
+fn priority_value(v: &Value) -> Option<FieldValue> {
+    let n = whole(v)?;
+    let (n, name, _) = PRIORITIES.into_iter().find(|(p, ..)| u32::from(*p) == n)?;
+    Some(FieldValue::SingleSelect {
+        option_id: ids::priority_option(n),
+        name: name.to_string(),
+    })
+}
+
+/// An `IssueFields` node's field values. A label in a single-select group is that group's
+/// value; every other label goes to Labels. Unset fields have no value.
+fn values_from_wire(v: &Value) -> BTreeMap<FieldId, FieldValue> {
+    let mut values = BTreeMap::new();
+    let state = &v["state"];
+    if let Some(id) = state["id"].as_str() {
+        values.insert(
+            FieldId::new(ids::STATUS),
+            FieldValue::SingleSelect {
+                option_id: OptionId::new(id),
+                name: str_of(&state["name"]),
+            },
+        );
+    }
+    if let Some(priority) = priority_value(&v["priority"]) {
+        values.insert(FieldId::new(ids::PRIORITY), priority);
+    }
+    if let Some(estimate) = v["estimate"].as_f64() {
+        values.insert(FieldId::new(ids::ESTIMATE), FieldValue::Number(estimate));
+    }
+    if let Some(due) = v["dueDate"].as_str() {
+        values.insert(FieldId::new(ids::DUE), FieldValue::Date(due.to_string()));
+    }
+    let cycle = &v["cycle"];
+    if let Some(id) = cycle["id"].as_str() {
+        values.insert(
+            FieldId::new(ids::CYCLE),
+            FieldValue::Iteration {
+                iteration_id: IterationId::new(id),
+                title: cycle_title(cycle),
+                start_date: date_part(cycle["startsAt"].as_str().unwrap_or("")).to_string(),
+            },
+        );
+    }
+    let project = &v["project"];
+    if let Some(id) = project["id"].as_str() {
+        values.insert(
+            FieldId::new(ids::PROJECT),
+            FieldValue::SingleSelect {
+                option_id: OptionId::new(id),
+                name: str_of(&project["name"]),
+            },
+        );
+    }
+    let mut labels = Vec::new();
+    for label in nodes(v, "labels") {
+        let parent = &label["parent"];
+        match (parent["id"].as_str(), label["id"].as_str()) {
+            (Some(group), Some(id)) if is_single_select_group(parent["groupType"].as_str()) => {
+                values.insert(
+                    ids::group(group),
+                    FieldValue::SingleSelect {
+                        option_id: OptionId::new(id),
+                        name: str_of(&label["name"]),
+                    },
+                );
+            }
+            _ => labels.push(Label {
+                name: str_of(&label["name"]),
+                color: label["color"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim_start_matches('#')
+                    .to_string(),
+            }),
+        }
+    }
+    if !labels.is_empty() {
+        values.insert(FieldId::new(ids::LABELS), FieldValue::Labels(labels));
+    }
+    if let Some(name) = v["assignee"]["displayName"].as_str() {
+        values.insert(
+            FieldId::new(ids::ASSIGNEES),
+            FieldValue::Users(vec![name.to_string()]),
+        );
+    }
+    values
+}
+
+/// The issue's parent, when it has one.
+fn parent_from_wire(p: &Value) -> Option<ParentIssue> {
+    Some(ParentIssue {
+        number: whole(&p["number"])?,
+        title: str_of(&p["title"]),
+        state: state_of(p["state"]["type"].as_str().unwrap_or("")).0,
+        key: p["identifier"].as_str().map(String::from),
+    })
+}
+
+/// Decodes an `IssueFields` node. `None` without `id`, `identifier` or `state.type`; such an
+/// issue is logged by count only.
+pub fn item_from_wire(v: &Value) -> Option<Item> {
+    let item = issue_from_wire(v);
+    if item.is_none() {
+        tracing::debug!(
+            skipped = 1,
+            "skipped a Linear issue without an id, identifier or state type"
+        );
+    }
+    item
+}
+
+fn issue_from_wire(v: &Value) -> Option<Item> {
+    let id = v["id"].as_str()?;
+    let identifier = v["identifier"].as_str()?;
+    let (state, state_reason) = state_of(v["state"]["type"].as_str()?);
+    let text = |key: &str| v[key].as_str().map(String::from);
+    let assignee = &v["assignee"];
+    let labels = nodes(v, "labels");
+    Some(Item {
+        id: ItemId::new(id),
+        content: ItemContent::Issue {
+            reference: ContentRef {
+                container: str_of(&v["team"]["key"]),
+                number: whole(&v["number"]).unwrap_or(0),
+                key: Some(identifier.to_string()),
+                url: str_of(&v["url"]),
+            },
+            title: str_of(&v["title"]),
+            state,
+        },
+        archived: !v["archivedAt"].is_null(),
+        updated_at: str_of(&v["updatedAt"]),
+        values: values_from_wire(v),
+        content_fields: ContentFields {
+            created_at: text("createdAt"),
+            updated_at: text("updatedAt"),
+            closed_at: text("completedAt").or_else(|| text("canceledAt")),
+            state_reason,
+            parent: parent_from_wire(&v["parent"]),
+            content_id: Some(id.to_string()),
+            assignee_ids: assignee["displayName"]
+                .as_str()
+                .zip(assignee["id"].as_str())
+                .map(|(name, id)| (name.to_string(), id.to_string()))
+                .into_iter()
+                .collect(),
+            label_ids: labels
+                .iter()
+                .filter_map(|l| Some((l["name"].as_str()?.into(), l["id"].as_str()?.into())))
+                .collect(),
+            sort_order: v["sortOrder"].as_f64(),
+            ..ContentFields::default()
+        },
+    })
+}
+
+/// Decodes an issue a poll returned: `Trashed` when it is in the trash, else as
+/// `item_from_wire` decodes it.
+pub fn polled_from_wire(v: &Value) -> Option<Polled> {
+    if v["trashed"].as_bool() == Some(true) {
+        return Some(Polled::Trashed(ItemId::new(v["id"].as_str()?)));
+    }
+    item_from_wire(v).map(Polled::Item)
+}
+
+/// A parent or sub-issue in the detail; its state is the state's name, else its kind.
+fn linked(v: &Value) -> Option<LinkedRef> {
+    let state = &v["state"];
+    Some(LinkedRef {
+        number: whole(&v["number"])?,
+        title: str_of(&v["title"]),
+        state: state["name"]
+            .as_str()
+            .or_else(|| state["type"].as_str())
+            .unwrap_or_default()
+            .to_string(),
+        key: v["identifier"].as_str().map(String::from),
+    })
+}
+
+/// The loaded comments oldest first, each top-level comment followed by its thread. A
+/// comment whose parent is not on the page is top-level; replies to replies join their
+/// top-level comment's thread at depth 1.
+fn threaded_comments<'a>(mut comments: Vec<&'a Value>) -> Vec<Comment> {
+    comments.sort_by(|a, b| a["createdAt"].as_str().cmp(&b["createdAt"].as_str()));
+    let parent_of: HashMap<&'a str, Option<&'a str>> = comments
+        .iter()
+        .filter_map(|c| Some((c["id"].as_str()?, c["parent"]["id"].as_str())))
+        .collect();
+    let in_page = |id: &&str| parent_of.contains_key(id);
+    // The top-level comment `c` replies to, directly or through other replies; `None` for a
+    // top-level comment, and for one in a cycle of replies, which has no top.
+    let root = |c: &'a Value| -> Option<&'a str> {
+        let mut top = c["parent"]["id"].as_str().filter(in_page)?;
+        for _ in 0..comments.len() {
+            match parent_of[top].filter(in_page) {
+                Some(up) => top = up,
+                None => return Some(top),
+            }
+        }
+        None
+    };
+    let roots: Vec<Option<&str>> = comments.iter().map(|&c| root(c)).collect();
+    let comment = |c: &Value, depth: u8| Comment {
+        author: c["user"]["displayName"]
+            .as_str()
+            .unwrap_or("Linear")
+            .to_string(),
+        created_at: str_of(&c["createdAt"]),
+        body: str_of(&c["body"]),
+        depth,
+    };
+    let mut out = Vec::with_capacity(comments.len());
+    for (c, _) in comments.iter().zip(&roots).filter(|(_, r)| r.is_none()) {
+        out.push(comment(c, 0));
+        let Some(id) = c["id"].as_str() else { continue };
+        out.extend(
+            comments
+                .iter()
+                .zip(&roots)
+                .filter(|(_, r)| **r == Some(id))
+                .map(|(reply, _)| comment(reply, 1)),
+        );
+    }
+    out
+}
+
+/// Decodes the `issue` of an `IssueDetail` response. A comment with no user (an integration)
+/// is by "Linear"; `comments_total` is the number loaded, as Linear gives no count.
+pub fn detail_from_wire(node: &Value) -> ItemDetail {
+    let comments = nodes(node, "comments");
+    let page = &node["comments"]["pageInfo"];
+    ItemDetail {
+        body: str_of(&node["description"]),
+        comments_total: comments.len(),
+        comments: threaded_comments(comments),
+        older_cursor: if page["hasPreviousPage"].as_bool() == Some(true) {
+            page["startCursor"].as_str().map(String::from)
+        } else {
+            None
+        },
+        sub_issues: nodes(node, "children")
+            .into_iter()
+            .filter_map(linked)
+            .collect(),
+        parent: linked(&node["parent"]),
+        issue_type: None,
+        linked_prs: Vec::new(),
+        attachments: nodes(node, "attachments")
+            .into_iter()
+            .map(|a| Attachment {
+                title: str_of(&a["title"]),
+                url: str_of(&a["url"]),
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     pub(crate) const TYPE_GROUP: &str = "lg-type";
     const SIZE_GROUP: &str = "lg-size";
@@ -533,5 +833,506 @@ pub(crate) mod tests {
         assert_eq!(p.fields, fields);
         assert!(p.linked_repos.is_empty() && p.issue_repos.is_empty());
         assert_eq!(p.linear, Some(meta));
+    }
+
+    /// An `IssueFields` node: TBA-7, In Progress, High, estimate 3, due 2026-11-02, in cycle
+    /// Sprint Two and project Launch, labelled Bug (the Type group) and docs, assigned to Ada
+    /// Lovelace, under TBA-2.
+    pub(crate) fn issue_json() -> Value {
+        json!({
+            "id": "i-7", "identifier": "TBA-7", "number": 7, "title": "Fix the login page",
+            "url": "https://linear.app/acme/issue/TBA-7/fix-the-login-page",
+            "priority": 2, "estimate": 3, "dueDate": "2026-11-02", "sortOrder": -12.5,
+            "createdAt": "2026-10-01T09:00:00.000Z", "updatedAt": "2026-10-15T10:30:00.000Z",
+            "completedAt": null, "canceledAt": null, "archivedAt": null, "trashed": null,
+            "state": {"id": "s-a-prog", "name": "In Progress", "type": "started",
+                      "color": "#f2c94c", "position": 1},
+            "team": {"id": "team-a", "key": "TBA"},
+            "assignee": {"id": "u-1", "displayName": "Ada Lovelace"},
+            "labels": {"nodes": [
+                {"id": "l-bug", "name": "Bug", "color": "#eb5757",
+                 "parent": {"id": TYPE_GROUP, "groupType": "singleSelect"}},
+                {"id": "l-docs", "name": "docs", "color": "#bec2c8", "parent": null},
+            ]},
+            "cycle": {"id": "c-now", "number": 2, "name": "Sprint Two",
+                      "startsAt": "2026-10-12T00:00:00.000Z", "endsAt": "2026-10-26T00:00:00.000Z"},
+            "project": {"id": "p-1", "name": "Launch"},
+            "parent": {"id": "i-2", "identifier": "TBA-2", "number": 2, "title": "Login epic",
+                       "state": {"type": "started"}},
+        })
+    }
+
+    fn issue_with(changes: Value) -> Value {
+        let mut v = issue_json();
+        for (key, value) in changes.as_object().unwrap() {
+            v[key] = value.clone();
+        }
+        v
+    }
+
+    fn select(option_id: &str, name: &str) -> FieldValue {
+        FieldValue::SingleSelect {
+            option_id: OptionId::new(option_id),
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn an_issue_decodes_with_key_state_and_values() {
+        let item = item_from_wire(&issue_json()).expect("decodes");
+        assert_eq!(item.id, ItemId::new("i-7"));
+        assert_eq!(
+            item.content,
+            ItemContent::Issue {
+                reference: ContentRef {
+                    container: "TBA".into(),
+                    number: 7,
+                    key: Some("TBA-7".into()),
+                    url: "https://linear.app/acme/issue/TBA-7/fix-the-login-page".into(),
+                },
+                title: "Fix the login page".into(),
+                state: ContentState::Open,
+            }
+        );
+        assert!(!item.archived);
+        assert_eq!(item.updated_at, "2026-10-15T10:30:00.000Z");
+        let expected: BTreeMap<FieldId, FieldValue> = [
+            (ids::STATUS.to_string(), select("s-a-prog", "In Progress")),
+            (
+                ids::PRIORITY.to_string(),
+                select("linear:priority:2", "High"),
+            ),
+            (ids::ESTIMATE.to_string(), FieldValue::Number(3.0)),
+            (ids::DUE.to_string(), FieldValue::Date("2026-11-02".into())),
+            (
+                ids::CYCLE.to_string(),
+                FieldValue::Iteration {
+                    iteration_id: IterationId::new("c-now"),
+                    title: "Sprint Two".into(),
+                    start_date: "2026-10-12".into(),
+                },
+            ),
+            (ids::PROJECT.to_string(), select("p-1", "Launch")),
+            (
+                ids::group(TYPE_GROUP).as_str().to_string(),
+                select("l-bug", "Bug"),
+            ),
+            (
+                ids::LABELS.to_string(),
+                FieldValue::Labels(vec![Label {
+                    name: "docs".into(),
+                    color: "bec2c8".into(),
+                }]),
+            ),
+            (
+                ids::ASSIGNEES.to_string(),
+                FieldValue::Users(vec!["Ada Lovelace".into()]),
+            ),
+        ]
+        .into_iter()
+        .map(|(id, value)| (FieldId::new(id), value))
+        .collect();
+        assert_eq!(item.values, expected);
+        assert_eq!(
+            item.content_fields,
+            ContentFields {
+                created_at: Some("2026-10-01T09:00:00.000Z".into()),
+                updated_at: Some("2026-10-15T10:30:00.000Z".into()),
+                closed_at: None,
+                state_reason: None,
+                parent: Some(ParentIssue {
+                    number: 2,
+                    title: "Login epic".into(),
+                    state: ContentState::Open,
+                    key: Some("TBA-2".into()),
+                }),
+                content_id: Some("i-7".into()),
+                assignee_ids: [("Ada Lovelace".to_string(), "u-1".to_string())].into(),
+                label_ids: [
+                    ("Bug".to_string(), "l-bug".to_string()),
+                    ("docs".to_string(), "l-docs".to_string()),
+                ]
+                .into(),
+                sort_order: Some(-12.5),
+                ..ContentFields::default()
+            }
+        );
+    }
+
+    #[test]
+    fn label_groups_follow_the_group_type() {
+        let v = issue_with(json!({"labels": {"nodes": [
+            {"id": "l-ui", "name": "UI", "color": "#4ea7fc",
+             "parent": {"id": "lg-area", "groupType": "multiSelect"}},
+            {"id": "l-small", "name": "Small", "color": "#bec2c8",
+             "parent": {"id": "lg-size", "groupType": null}},
+        ]}}));
+        let item = item_from_wire(&v).unwrap();
+        assert_eq!(
+            item.values.get(&FieldId::new(ids::LABELS)),
+            Some(&FieldValue::Labels(vec![Label {
+                name: "UI".into(),
+                color: "4ea7fc".into(),
+            }]))
+        );
+        assert_eq!(
+            item.values.get(&ids::group("lg-size")),
+            Some(&select("l-small", "Small"))
+        );
+        assert!(!item.values.contains_key(&ids::group("lg-area")));
+    }
+
+    #[test]
+    fn empty_values_are_absent() {
+        let v = issue_with(json!({
+            "estimate": null, "dueDate": null, "cycle": null, "project": null,
+            "assignee": null, "labels": {"nodes": []}, "parent": null,
+        }));
+        let item = item_from_wire(&v).unwrap();
+        let keys: Vec<_> = item.values.keys().map(|k| k.as_str()).collect();
+        assert_eq!(keys, [ids::PRIORITY, ids::STATUS]);
+        assert_eq!(item.content_fields.parent, None);
+        assert!(item.content_fields.assignee_ids.is_empty());
+        assert!(item.content_fields.label_ids.is_empty());
+    }
+
+    #[test]
+    fn a_cycle_without_a_name_is_titled_by_number() {
+        let v = issue_with(json!({"cycle": {"id": "c-past", "number": 1, "name": null,
+            "startsAt": "2026-09-28T05:00:00.000Z", "endsAt": "2026-10-12T04:00:00.000Z"}}));
+        let item = item_from_wire(&v).unwrap();
+        assert_eq!(
+            item.values.get(&FieldId::new(ids::CYCLE)),
+            Some(&FieldValue::Iteration {
+                iteration_id: IterationId::new("c-past"),
+                title: "Cycle 1".into(),
+                start_date: "2026-09-28".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn closed_kinds_map_to_state_and_reason() {
+        let cases = [
+            (
+                "completed",
+                ContentState::Closed,
+                Some(StateReason::Completed),
+            ),
+            (
+                "canceled",
+                ContentState::Closed,
+                Some(StateReason::NotPlanned),
+            ),
+            (
+                "duplicate",
+                ContentState::Closed,
+                Some(StateReason::Duplicate),
+            ),
+            ("started", ContentState::Open, None),
+            ("triage", ContentState::Open, None),
+            ("backlog", ContentState::Open, None),
+            ("unstarted", ContentState::Open, None),
+        ];
+        for (kind, want_state, want_reason) in cases {
+            let v = issue_with(json!({"state": {"id": "s", "name": "S", "type": kind}}));
+            let item = item_from_wire(&v).unwrap();
+            let ItemContent::Issue { state, .. } = item.content else {
+                panic!("{kind}: {:?}", item.content)
+            };
+            assert_eq!(state, want_state, "{kind}");
+            assert_eq!(item.content_fields.state_reason, want_reason, "{kind}");
+        }
+        let done = issue_with(
+            json!({"state": {"id": "s", "name": "Done", "type": "completed"},
+                                     "completedAt": "2026-10-16T08:00:00.000Z"}),
+        );
+        assert_eq!(
+            item_from_wire(&done)
+                .unwrap()
+                .content_fields
+                .closed_at
+                .as_deref(),
+            Some("2026-10-16T08:00:00.000Z")
+        );
+        let dropped = issue_with(
+            json!({"state": {"id": "s", "name": "Canceled", "type": "canceled"},
+                                        "canceledAt": "2026-10-17T08:00:00.000Z"}),
+        );
+        assert_eq!(
+            item_from_wire(&dropped)
+                .unwrap()
+                .content_fields
+                .closed_at
+                .as_deref(),
+            Some("2026-10-17T08:00:00.000Z")
+        );
+        let parent_done = issue_with(json!({"parent": {"id": "i-2", "identifier": "TBA-2",
+            "number": 2, "title": "Login epic", "state": {"type": "completed"}}}));
+        assert_eq!(
+            item_from_wire(&parent_done)
+                .unwrap()
+                .content_fields
+                .parent
+                .map(|p| p.state),
+            Some(ContentState::Closed)
+        );
+    }
+
+    #[test]
+    fn unknown_state_kind_is_open() {
+        let v =
+            issue_with(json!({"state": {"id": "s-b-paused", "name": "Paused", "type": "paused"}}));
+        let item = item_from_wire(&v).unwrap();
+        let ItemContent::Issue { state, .. } = item.content else {
+            panic!("{:?}", item.content)
+        };
+        assert_eq!(state, ContentState::Open);
+        assert_eq!(item.content_fields.state_reason, None);
+        assert_eq!(
+            item.values.get(&FieldId::new(ids::STATUS)),
+            Some(&select("s-b-paused", "Paused"))
+        );
+    }
+
+    #[test]
+    fn priority_zero_has_no_value() {
+        let priority = |n: Value| {
+            item_from_wire(&issue_with(json!({ "priority": n })))
+                .unwrap()
+                .values
+                .get(&FieldId::new(ids::PRIORITY))
+                .cloned()
+        };
+        assert_eq!(priority(json!(0)), None);
+        assert_eq!(priority(json!(5)), None);
+        assert_eq!(
+            priority(json!(1)),
+            Some(select("linear:priority:1", "Urgent"))
+        );
+        assert_eq!(
+            priority(json!(3.0)),
+            Some(select("linear:priority:3", "Medium"))
+        );
+        assert_eq!(priority(json!(4)), Some(select("linear:priority:4", "Low")));
+    }
+
+    #[test]
+    fn archived_is_kept_and_trashed_is_removal() {
+        let archived = issue_with(json!({"archivedAt": "2026-10-18T12:00:00.000Z"}));
+        assert!(item_from_wire(&archived).unwrap().archived);
+        match polled_from_wire(&archived) {
+            Some(Polled::Item(item)) => {
+                assert!(item.archived);
+                assert_eq!(item.id, ItemId::new("i-7"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let trashed = issue_with(json!({"trashed": true}));
+        assert_eq!(
+            polled_from_wire(&trashed),
+            Some(Polled::Trashed(ItemId::new("i-7")))
+        );
+        let restored = issue_with(json!({"trashed": false}));
+        assert!(matches!(
+            polled_from_wire(&restored),
+            Some(Polled::Item(item)) if !item.archived
+        ));
+        assert_eq!(
+            polled_from_wire(&issue_json()),
+            Some(Polled::Item(item_from_wire(&issue_json()).unwrap()))
+        );
+    }
+
+    #[test]
+    fn a_missing_identifier_is_skipped_not_a_panic() {
+        let mut no_identifier = issue_json();
+        no_identifier.as_object_mut().unwrap().remove("identifier");
+        assert_eq!(item_from_wire(&no_identifier), None);
+        assert_eq!(polled_from_wire(&no_identifier), None);
+        let mut no_id = issue_json();
+        no_id.as_object_mut().unwrap().remove("id");
+        assert_eq!(item_from_wire(&no_id), None);
+        assert_eq!(
+            polled_from_wire(&issue_with(json!({"id": null, "trashed": true}))),
+            None
+        );
+        assert_eq!(item_from_wire(&issue_with(json!({"state": null}))), None);
+        assert_eq!(
+            item_from_wire(&issue_with(json!({"state": {"id": "s", "name": "S"}}))),
+            None
+        );
+        assert_eq!(item_from_wire(&Value::Null), None);
+        assert_eq!(polled_from_wire(&Value::Null), None);
+    }
+
+    fn comment(id: &str, at: &str, parent: Option<&str>, author: Option<&str>) -> Value {
+        json!({"id": id, "body": format!("body {id}"), "createdAt": at,
+               "user": author.map(|a| json!({"displayName": a})),
+               "parent": parent.map(|p| json!({"id": p}))})
+    }
+
+    /// An `IssueDetail` response's `issue`.
+    fn detail_json(comments: Vec<Value>, has_older: bool) -> Value {
+        json!({
+            "id": "i-7", "description": "The **login** page.",
+            "parent": {"id": "i-2", "identifier": "TBA-2", "number": 2, "title": "Login epic",
+                       "state": {"type": "started"}},
+            "children": {"nodes": [
+                {"id": "i-8", "identifier": "TBA-8", "number": 8, "title": "Style the button",
+                 "state": {"name": "Done", "type": "completed"}},
+                {"id": "i-9", "identifier": "TBA-9", "number": 9, "title": "Write the copy",
+                 "state": {"name": null, "type": "unstarted"}},
+            ]},
+            "attachments": {"nodes": [
+                {"title": "Fix login", "url": "https://github.com/acme/web/pull/12"},
+                {"title": "Design", "url": "https://www.figma.com/file/abc"},
+            ]},
+            "comments": {
+                "pageInfo": {"hasPreviousPage": has_older, "startCursor": "cur-1"},
+                "nodes": comments,
+            },
+        })
+    }
+
+    fn thread(detail: &ItemDetail) -> Vec<(String, u8)> {
+        detail
+            .comments
+            .iter()
+            .map(|c| (c.body.clone(), c.depth))
+            .collect()
+    }
+
+    #[test]
+    fn detail_threads_replies_under_parents_oldest_first() {
+        let comments = vec![
+            comment(
+                "c3",
+                "2026-10-03T09:00:00.000Z",
+                Some("c1"),
+                Some("Ada Lovelace"),
+            ),
+            comment("c2", "2026-10-02T09:00:00.000Z", None, Some("Grace Hopper")),
+            comment("c1", "2026-10-01T09:00:00.000Z", None, Some("Ada Lovelace")),
+        ];
+        let detail = detail_from_wire(&detail_json(comments, false));
+        assert_eq!(
+            thread(&detail),
+            [
+                ("body c1".to_string(), 0),
+                ("body c3".to_string(), 1),
+                ("body c2".to_string(), 0)
+            ]
+        );
+        assert_eq!(
+            detail.comments[0],
+            Comment {
+                author: "Ada Lovelace".into(),
+                created_at: "2026-10-01T09:00:00.000Z".into(),
+                body: "body c1".into(),
+                depth: 0,
+            }
+        );
+        assert_eq!(detail.comments[2].author, "Grace Hopper");
+        assert_eq!(detail.comments_total, 3);
+        assert_eq!(detail.older_cursor, None);
+    }
+
+    #[test]
+    fn deep_replies_flatten_and_orphans_are_top_level() {
+        let comments = vec![
+            comment(
+                "c4",
+                "2026-10-04T09:00:00.000Z",
+                Some("c3"),
+                Some("Ada Lovelace"),
+            ),
+            comment(
+                "c5",
+                "2026-10-02T09:00:00.000Z",
+                Some("older"),
+                Some("Grace Hopper"),
+            ),
+            comment(
+                "c3",
+                "2026-10-03T09:00:00.000Z",
+                Some("c1"),
+                Some("Grace Hopper"),
+            ),
+            comment("c1", "2026-10-01T09:00:00.000Z", None, None),
+            // A cycle is not lost: both become top-level.
+            comment("x1", "2026-10-05T09:00:00.000Z", Some("x2"), None),
+            comment("x2", "2026-10-06T09:00:00.000Z", Some("x1"), None),
+        ];
+        let detail = detail_from_wire(&detail_json(comments, false));
+        assert_eq!(
+            thread(&detail),
+            [
+                ("body c1".to_string(), 0),
+                ("body c3".to_string(), 1),
+                ("body c4".to_string(), 1),
+                ("body c5".to_string(), 0),
+                ("body x1".to_string(), 0),
+                ("body x2".to_string(), 0),
+            ]
+        );
+        assert_eq!(detail.comments[0].author, "Linear");
+        assert_eq!(detail.comments_total, 6);
+    }
+
+    #[test]
+    fn detail_keeps_attachments_children_and_the_older_cursor() {
+        let detail = detail_from_wire(&detail_json(vec![], true));
+        assert_eq!(detail.body, "The **login** page.");
+        assert_eq!(
+            detail.parent,
+            Some(LinkedRef {
+                number: 2,
+                title: "Login epic".into(),
+                state: "started".into(),
+                key: Some("TBA-2".into()),
+            })
+        );
+        assert_eq!(
+            detail.sub_issues,
+            [
+                LinkedRef {
+                    number: 8,
+                    title: "Style the button".into(),
+                    state: "Done".into(),
+                    key: Some("TBA-8".into()),
+                },
+                LinkedRef {
+                    number: 9,
+                    title: "Write the copy".into(),
+                    state: "unstarted".into(),
+                    key: Some("TBA-9".into()),
+                },
+            ]
+        );
+        assert_eq!(
+            detail.attachments,
+            [
+                Attachment {
+                    title: "Fix login".into(),
+                    url: "https://github.com/acme/web/pull/12".into(),
+                },
+                Attachment {
+                    title: "Design".into(),
+                    url: "https://www.figma.com/file/abc".into(),
+                },
+            ]
+        );
+        assert_eq!(detail.older_cursor.as_deref(), Some("cur-1"));
+        assert_eq!(detail.comments_total, 0);
+        assert_eq!(detail.issue_type, None);
+        assert!(detail.linked_prs.is_empty());
+
+        let bare = detail_from_wire(&json!({
+            "id": "i-1", "description": null, "parent": null,
+            "children": {"nodes": []}, "attachments": {"nodes": []},
+            "comments": {"pageInfo": {"hasPreviousPage": false, "startCursor": null}, "nodes": []},
+        }));
+        assert_eq!(bare, ItemDetail::default());
     }
 }
