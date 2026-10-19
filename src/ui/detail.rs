@@ -1,7 +1,8 @@
+use crate::linear::ids;
 use crate::model::*;
 use crate::ui::keymap::Action;
 use crate::ui::labels::{label_spans, spans_width};
-use crate::ui::markdown::{Target, render_markdown_from};
+use crate::ui::markdown::{RefStyle, Target, render_markdown_from};
 use crate::ui::text::{display_width, truncate_to_width};
 use crate::ui::theme::Theme;
 use ratatui::Frame;
@@ -141,12 +142,32 @@ fn state_word(content: &ItemContent) -> &'static str {
     }
 }
 
-/// `Name: value · Name: value` within `width` cells; labels are coloured pills.
-fn field_line(item: &Item, project: &Project, width: usize, theme: &Theme) -> Line<'static> {
+/// The rows a Linear item's detail shows under its meta line, when set: field id and name.
+const LINEAR_ROWS: [(&str, &str); 5] = [
+    (ids::PROJECT, "Project"),
+    (ids::CYCLE, "Cycle"),
+    (ids::PRIORITY, "Priority"),
+    (ids::ESTIMATE, "Estimate"),
+    (ids::DUE, "Due date"),
+];
+
+/// `Name: value · Name: value` within `width` cells; labels are coloured pills. Fields in
+/// `skip` are left out.
+fn field_line(
+    item: &Item,
+    project: &Project,
+    skip: &[&str],
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut left = width;
     let mut overflow = false;
-    for f in project.fields.iter().filter(|f| f.kind != FieldKind::Title) {
+    for f in project
+        .fields
+        .iter()
+        .filter(|f| f.kind != FieldKind::Title && !skip.contains(&f.id.as_str()))
+    {
         let Some(value) = item.value(&f.id) else {
             continue;
         };
@@ -205,12 +226,14 @@ pub fn build_doc(
     theme: &Theme,
 ) -> DetailDoc {
     let w = width as usize;
+    let linear = project.board.provider() == Provider::Linear;
     let mut lines: Vec<Line<'static>> = vec![Line::styled(
         truncate_to_width(item.title(), w),
         theme.heading(),
     )];
-    let mut meta = vec![crate::ui::board::item_label(item).unwrap_or_default()];
-    if let Some(r) = item.reference() {
+    let mut meta = vec![item.reference_label().unwrap_or_default()];
+    // A key names its container already: `TBA-7` is in team TBA.
+    if let Some(r) = item.reference().filter(|r| r.key.is_none()) {
         meta.push(r.container.clone());
     }
     meta.push(state_word(&item.content).to_string());
@@ -222,13 +245,33 @@ pub fn build_doc(
         truncate_to_width(&meta.join(" · "), w),
         theme.dim(),
     ));
+    let skip: &[&str] = if linear {
+        &LINEAR_ROWS.map(|(id, _)| id)
+    } else {
+        &[]
+    };
+    if linear {
+        for (id, name) in LINEAR_ROWS {
+            if let Some(value) = item.value(&FieldId::new(id)) {
+                lines.push(Line::from(truncate_to_width(
+                    &format!("{name}: {}", value.display()),
+                    w,
+                )));
+            }
+        }
+    }
     if let Some(parent) = state.detail.as_ref().and_then(|d| d.parent.as_ref()) {
         lines.push(Line::from(truncate_to_width(
-            &format!("Parent: {} {}", parent.label(), parent.title),
+            &format!(
+                "Parent: {} {}{}",
+                parent.label(),
+                parent.title,
+                state_suffix(parent, linear)
+            ),
             w,
         )));
     }
-    let fields = field_line(item, project, w, theme);
+    let fields = field_line(item, project, skip, w, theme);
     if !fields.spans.is_empty() {
         lines.push(fields);
     }
@@ -252,23 +295,38 @@ pub fn build_doc(
         return DetailDoc { lines, targets };
     };
 
-    let body = |src: &str, lines: &mut Vec<Line<'static>>, targets: &mut Vec<Target>| {
-        if src.trim().is_empty() {
-            lines.push(Line::styled("No description.", theme.dim()));
-        } else if state.raw {
-            for l in src.lines() {
-                for piece in wrap_raw(l, w) {
-                    lines.push(Line::from(piece));
+    let refs = match &project.linear {
+        _ if !linear => RefStyle::Github,
+        Some(meta) => RefStyle::Keys(meta.team_keys.clone()),
+        None => RefStyle::Keys(Vec::new()),
+    };
+    // `indent` cells of space go before every line (a reply's), and the text wraps in the rest.
+    let body =
+        |src: &str, indent: usize, lines: &mut Vec<Line<'static>>, targets: &mut Vec<Target>| {
+            let w = w.saturating_sub(indent);
+            let mut out = Vec::new();
+            if src.trim().is_empty() {
+                out.push(Line::styled("No description.", theme.dim()));
+            } else if state.raw {
+                for l in src.lines() {
+                    for piece in wrap_raw(l, w) {
+                        out.push(Line::from(piece));
+                    }
+                }
+            } else {
+                // Footnote numbers continue across body, links and comments.
+                let r = render_markdown_from(src, w as u16, theme, targets.len(), &refs);
+                out.extend(r.lines);
+                targets.extend(r.targets);
+            }
+            if indent > 0 {
+                for line in &mut out {
+                    line.spans.insert(0, Span::raw(" ".repeat(indent)));
                 }
             }
-        } else {
-            // Footnote numbers continue across body and comments.
-            let r = render_markdown_from(src, width, theme, targets.len());
-            lines.extend(r.lines);
-            targets.extend(r.targets);
-        }
-    };
-    body(&detail.body, &mut lines, &mut targets);
+            lines.extend(out);
+        };
+    body(&detail.body, 0, &mut lines, &mut targets);
 
     if !detail.sub_issues.is_empty() {
         lines.push(Line::from(""));
@@ -277,11 +335,14 @@ pub fn build_doc(
             theme.bold(),
         ));
         for s in &detail.sub_issues {
-            let mark = if s.state == "CLOSED" { "☑" } else { "☐" };
-            lines.push(Line::from(truncate_to_width(
-                &format!("{mark} {} {}", s.label(), s.title),
-                w,
-            )));
+            // Linear names the state; GitHub's sub-issues are open or closed.
+            let text = if linear {
+                format!("{} {}{}", s.label(), s.title, state_suffix(s, linear))
+            } else {
+                let mark = if s.state == "CLOSED" { "☑" } else { "☐" };
+                format!("{mark} {} {}", s.label(), s.title)
+            };
+            lines.push(Line::from(truncate_to_width(&text, w)));
         }
     }
     if !detail.linked_prs.is_empty() {
@@ -292,6 +353,26 @@ pub fn build_doc(
                 &format!("#{} {} ({})", pr.number, pr.title, pr.state.to_lowercase()),
                 w,
             )));
+        }
+    }
+    if !detail.attachments.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::styled("Links", theme.bold()));
+        for a in &detail.attachments {
+            targets.push(Target::Link(a.url.clone()));
+            let pull = if is_github_pull(&a.url) { "⑂ " } else { "" };
+            let title = if a.title.trim().is_empty() {
+                &a.url
+            } else {
+                &a.title
+            };
+            // The footnote number stays; the title is cut first.
+            let number = format!(" [{}]", targets.len());
+            let room = w.saturating_sub(display_width(pull) + display_width(&number));
+            lines.push(Line::from(vec![
+                Span::raw(format!("{pull}{}", truncate_to_width(title, room))),
+                Span::styled(number, theme.dim()),
+            ]));
         }
     }
     if detail.comments_total > 0 {
@@ -313,11 +394,16 @@ pub fn build_doc(
             theme.bold(),
         ));
         for c in &detail.comments {
+            // A reply sits one level (two cells) under its thread's first comment.
+            let indent = 2 * usize::from(c.depth.min(1));
+            // Linear authors are display names, GitHub's are logins.
+            let at = if linear { "" } else { "@" };
             lines.push(Line::from(""));
             lines.push(Line::styled(
                 truncate_to_width(
                     &format!(
-                        "@{} · {}",
+                        "{}{at}{} · {}",
+                        " ".repeat(indent),
                         c.author,
                         c.created_at.get(..10).unwrap_or(&c.created_at)
                     ),
@@ -325,7 +411,7 @@ pub fn build_doc(
                 ),
                 theme.accent(),
             ));
-            body(&c.body, &mut lines, &mut targets);
+            body(&c.body, indent, &mut lines, &mut targets);
         }
     }
     DetailDoc { lines, targets }
@@ -368,7 +454,36 @@ fn target_label(t: &Target) -> String {
     match t {
         Target::Link(url) => url.clone(),
         Target::IssueRef(n) => format!("#{n}"),
+        Target::Key(k) => k.clone(),
     }
+}
+
+/// ` (state)` after a Linear parent or sub-issue; nothing on GitHub or without a state.
+fn state_suffix(r: &LinkedRef, linear: bool) -> String {
+    if linear && !r.state.is_empty() {
+        format!(" ({})", r.state)
+    } else {
+        String::new()
+    }
+}
+
+/// Whether `url` is a GitHub pull request: `github.com/<owner>/<repo>/pull/<number>`.
+fn is_github_pull(url: &str) -> bool {
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+    let path = rest.split(['?', '#']).next().unwrap_or_default();
+    let mut parts = path.split('/');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some("github.com"), Some(owner), Some(repo), Some("pull"), Some(n))
+            if !owner.is_empty() && !repo.is_empty()
+                && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+    )
 }
 
 pub fn render_detail(
@@ -736,5 +851,172 @@ mod tests {
         });
         assert!(screen.contains("Creating on GitHub"), "{screen}");
         assert!(!screen.contains("Loading"));
+    }
+
+    #[test]
+    fn detail_shows_linear_fields_links_and_threaded_comments() {
+        use crate::linear::ids;
+        let mut p = project();
+        p.board = "linear:team:t1".parse().unwrap();
+        p.linear = Some(LinearMeta {
+            url_key: "testbed-workspace".into(),
+            viewer_id: "u-1".into(),
+            team_keys: vec!["TBA".into()],
+        });
+        let field = |id: &str, name: &str, kind: FieldKind| Field {
+            id: FieldId::new(id),
+            name: name.into(),
+            kind,
+        };
+        p.fields.extend([
+            field(
+                ids::PRIORITY,
+                "Priority",
+                FieldKind::SingleSelect { options: vec![] },
+            ),
+            field(ids::ESTIMATE, "Estimate", FieldKind::Number),
+            field(ids::DUE, "Due date", FieldKind::Date),
+            field(
+                ids::PROJECT,
+                "Project",
+                FieldKind::SingleSelect { options: vec![] },
+            ),
+        ]);
+        let mut item = items()[1].clone();
+        item.content = ItemContent::Issue {
+            reference: ContentRef {
+                container: "TBA".into(),
+                number: 7,
+                key: Some("TBA-7".into()),
+                url: "https://linear.app/testbed-workspace/issue/TBA-7".into(),
+            },
+            title: "Fix login".into(),
+            state: ContentState::Open,
+        };
+        let select = |id: &str, name: &str| FieldValue::SingleSelect {
+            option_id: OptionId::new(id),
+            name: name.into(),
+        };
+        // The fixture's own Priority field would read as a repeat.
+        item.values.remove(&FieldId::new("F_prio"));
+        item.values.extend([
+            (FieldId::new(ids::PROJECT), select("p1", "Website")),
+            (
+                FieldId::new(ids::CYCLE),
+                FieldValue::Iteration {
+                    iteration_id: IterationId::new("c5"),
+                    title: "Cycle 5".into(),
+                    start_date: "2026-10-12".into(),
+                },
+            ),
+            (
+                FieldId::new(ids::PRIORITY),
+                select("linear:priority:2", "High"),
+            ),
+            (FieldId::new(ids::ESTIMATE), FieldValue::Number(3.0)),
+            (
+                FieldId::new(ids::DUE),
+                FieldValue::Date("2026-10-30".into()),
+            ),
+        ]);
+        let comment = |author: &str, day: &str, body: &str, depth: u8| Comment {
+            author: author.into(),
+            created_at: format!("2026-10-{day}T09:00:00Z"),
+            body: body.into(),
+            depth,
+        };
+        let mut state = DetailState::new(item.id.clone());
+        state.set_detail(
+            ItemDetail {
+                body: "Blocks TBA-8, not XYZ-1 or #12. See [spec](https://example.com/spec)."
+                    .into(),
+                comments: vec![
+                    comment("Ada Lovelace", "02", "Looks good, see TBA-9.", 0),
+                    comment("Grace Hopper", "03", "Agreed.", 1),
+                ],
+                comments_total: 2,
+                older_cursor: None,
+                sub_issues: vec![
+                    LinkedRef {
+                        number: 8,
+                        title: "Style the button".into(),
+                        state: "Done".into(),
+                        key: Some("TBA-8".into()),
+                    },
+                    LinkedRef {
+                        number: 9,
+                        title: "Write the copy".into(),
+                        state: "Todo".into(),
+                        key: Some("TBA-9".into()),
+                    },
+                ],
+                parent: Some(LinkedRef {
+                    number: 2,
+                    title: "Login epic".into(),
+                    state: "In Progress".into(),
+                    key: Some("TBA-2".into()),
+                }),
+                issue_type: None,
+                linked_prs: vec![],
+                attachments: vec![
+                    Attachment {
+                        title: "Fix login".into(),
+                        url: "https://github.com/acme/web/pull/12".into(),
+                    },
+                    Attachment {
+                        title: "Design".into(),
+                        url: "https://www.figma.com/file/abc".into(),
+                    },
+                ],
+            },
+            false,
+        );
+        let doc = build_doc(&item, &p, &state, 60, &Theme::plain());
+        let text: Vec<String> = doc.lines.iter().map(line_text).collect();
+        assert_eq!(text[1], "TBA-7 · open", "the key already names the team");
+        assert_eq!(
+            text[2..8],
+            [
+                "Project: Website",
+                "Cycle: Cycle 5",
+                "Priority: High",
+                "Estimate: 3",
+                "Due date: 2026-10-30",
+                "Parent: TBA-2 Login epic (In Progress)",
+            ]
+        );
+        assert_eq!(text[8], "Status: In Progress", "the rows are not repeated");
+        assert!(text.iter().any(|l| l == "TBA-8 Style the button (Done)"));
+        assert!(text.iter().any(|l| l == "⑂ Fix login [3]"), "{text:?}");
+        assert!(text.iter().any(|l| l == "Design [4]"), "{text:?}");
+        assert!(text.iter().any(|l| l == "Ada Lovelace · 2026-10-02"));
+        assert!(text.iter().any(|l| l == "  Grace Hopper · 2026-10-03"));
+        assert!(text.iter().any(|l| l == "  Agreed."));
+        assert_eq!(
+            doc.targets,
+            vec![
+                Target::Key("TBA-8".into()),
+                Target::Link("https://example.com/spec".into()),
+                Target::Link("https://github.com/acme/web/pull/12".into()),
+                Target::Link("https://www.figma.com/file/abc".into()),
+                Target::Key("TBA-9".into()),
+            ]
+        );
+        let screen = render_to_string(60, 40, |f| {
+            render_detail(f, f.area(), &doc, &state, &Theme::plain())
+        });
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn only_github_pull_request_urls_are_pull_requests() {
+        assert!(is_github_pull("https://github.com/acme/web/pull/12"));
+        assert!(is_github_pull("https://github.com/acme/web/pull/12/files"));
+        assert!(is_github_pull("http://www.github.com/acme/web/pull/3#top"));
+        assert!(!is_github_pull("https://github.com/acme/web/issues/12"));
+        assert!(!is_github_pull("https://github.com/acme/web/pull/x"));
+        assert!(!is_github_pull("https://github.com/acme/pull/12"));
+        assert!(!is_github_pull("https://gitlab.com/acme/web/pull/12"));
+        assert!(!is_github_pull("https://notgithub.com/acme/web/pull/12"));
     }
 }

@@ -611,6 +611,11 @@ impl App {
                     .collect()
             },
             highlight: self.highlight.clone(),
+            status_field: self
+                .project()
+                .filter(|_| self.is_linear())
+                .and_then(|p| p.field(&FieldId::new(crate::linear::ids::STATUS)))
+                .cloned(),
         }
     }
 

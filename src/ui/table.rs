@@ -132,7 +132,7 @@ pub fn table_columns<'a>(view: &View, project: &'a Project) -> Vec<&'a Field> {
 
 pub fn cell_text(item: &Item, field: &Field) -> String {
     if field.kind == FieldKind::Title {
-        return match crate::ui::board::item_label(item) {
+        return match item.reference_label() {
             Some(label) => format!("{label} {}", item.title()),
             None => item.title().to_string(),
         };

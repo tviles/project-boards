@@ -1,0 +1,44 @@
+---
+source: src/ui/detail.rs
+expression: screen
+---
+Fix login
+TBA-7 · open
+Project: Website
+Cycle: Cycle 5
+Priority: High
+Estimate: 3
+Due date: 2026-10-30
+Parent: TBA-2 Login epic (In Progress)
+Status: In Progress
+
+Blocks TBA-8, not XYZ-1 or #12. See spec[2].
+
+Sub-issues (2)
+TBA-8 Style the button (Done)
+TBA-9 Write the copy (Todo)
+
+Links
+⑂ Fix login [3]
+Design [4]
+
+Comments (2 of 2)
+
+Ada Lovelace · 2026-10-02
+Looks good, see TBA-9.
+
+  Grace Hopper · 2026-10-03
+  Agreed.
+
+
+
+
+
+
+
+ links: tab · enter ────────────────────────────────────────
+[1] TBA-8
+[2] https://example.com/spec
+[3] https://github.com/acme/web/pull/12
+[4] https://www.figma.com/file/abc
+[5] TBA-9

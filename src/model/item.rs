@@ -293,14 +293,17 @@ impl Item {
         crate::model::caps::is_placeholder(&self.id)
     }
 
-    /// What names the item in headings: `#12` or `ENG-123`, `new` while it is still being
-    /// created, or `Draft`.
+    /// What names the item in a title: `ENG-123` or `#12`, `new` while it is still being
+    /// created, nothing for a draft.
+    pub fn reference_label(&self) -> Option<String> {
+        self.reference()
+            .and_then(ContentRef::label)
+            .or_else(|| self.is_placeholder().then(|| "new".to_string()))
+    }
+
+    /// What names the item in headings: `reference_label`, or `Draft`.
     pub fn ref_label(&self) -> String {
-        match self.reference().and_then(ContentRef::label) {
-            Some(label) => label,
-            None if self.is_placeholder() => "new".into(),
-            None => "Draft".into(),
-        }
+        self.reference_label().unwrap_or_else(|| "Draft".into())
     }
 
     pub fn url(&self) -> Option<&str> {

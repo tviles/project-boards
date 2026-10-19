@@ -785,6 +785,22 @@ impl App {
                     ))],
                 }
             }
+            Target::Key(key) => {
+                let on_board = self.snapshot().and_then(|s| {
+                    s.items
+                        .values()
+                        .find(|i| i.reference().and_then(|r| r.key.as_ref()) == Some(&key))
+                        .map(|i| i.id.clone())
+                });
+                match (on_board, self.project().and_then(|p| p.linear.as_ref())) {
+                    (Some(id), _) => self.open_detail(id),
+                    (None, Some(linear)) => vec![Command::OpenUrl(format!(
+                        "https://linear.app/{}/issue/{key}",
+                        linear.url_key
+                    ))],
+                    (None, None) => Vec::new(),
+                }
+            }
         }
     }
 
@@ -2028,6 +2044,79 @@ mod tests {
                 "https://github.com/tviles/t/issues/99".into()
             )]
         );
+    }
+
+    #[test]
+    fn a_key_on_the_board_opens_its_detail_and_others_open_linear() {
+        let mut a = linear_board();
+        let mut snap = a.snapshot().unwrap().clone();
+        for (id, number) in [("a", 1), ("b", 2)] {
+            let item = snap.items.get_mut(&ItemId::new(id)).unwrap();
+            if let ItemContent::Issue { reference, .. } = &mut item.content {
+                reference.container = "TBA".into();
+                reference.key = Some(format!("TBA-{number}"));
+                reference.url = format!("https://linear.app/acme/issue/TBA-{number}");
+            }
+        }
+        a.store.apply(StoreUpdate::Replace(snap));
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert_eq!(
+            cmds,
+            vec![Command::LoadDetail {
+                item: ItemId::new("a"),
+                before: None
+            }]
+        );
+        a.on_sync(SyncEvent::Detail {
+            item: ItemId::new("a"),
+            detail: ItemDetail {
+                body: "see TBA-2, #2 and TBA-99".into(),
+                ..Default::default()
+            },
+            older: false,
+        });
+        assert_eq!(
+            a.detail_targets(),
+            vec![Target::Key("TBA-2".into()), Target::Key("TBA-99".into())]
+        );
+        a.handle_key(code(KeyCode::Tab));
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert_eq!(
+            cmds,
+            vec![Command::LoadDetail {
+                item: ItemId::new("b"),
+                before: None
+            }]
+        );
+        a.on_sync(SyncEvent::Detail {
+            item: ItemId::new("b"),
+            detail: ItemDetail {
+                body: "back to TBA-99".into(),
+                ..Default::default()
+            },
+            older: false,
+        });
+        a.handle_key(code(KeyCode::Tab));
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert_eq!(
+            cmds,
+            vec![Command::OpenUrl(
+                "https://linear.app/acme/issue/TBA-99".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_linear_boards_marks_carry_its_status_field() {
+        assert_eq!(app().marks().status_field, None, "GitHub");
+        let mut a = linear_board();
+        assert_eq!(a.marks().status_field, None, "no Status field yet");
+        let mut snap = a.snapshot().unwrap().clone();
+        let mut status = snap.project.fields[1].clone();
+        status.id = FieldId::new(crate::linear::ids::STATUS);
+        snap.project.fields.push(status.clone());
+        a.store.apply(StoreUpdate::Replace(snap));
+        assert_eq!(a.marks().status_field, Some(status));
     }
 
     #[test]
