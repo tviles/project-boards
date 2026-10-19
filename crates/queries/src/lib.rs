@@ -82,16 +82,33 @@ operation!(
 )]
 pub struct DeleteIssue;
 
-/// Linear operations, validated against graphql/linear/schema.graphql. Phase 0 only for now.
-#[cfg(feature = "live")]
+/// Linear operations, validated against graphql/linear/schema.graphql. The app's operations
+/// (linear.graphql) are always built; the phase 0 testbed tooling is behind `live`.
 pub mod linear {
     use graphql_client::GraphQLQuery;
 
     type DateTime = String;
     type TimelessDate = String;
     type DateTimeOrDuration = String;
+    type Duration = String;
+    type TimelessDateOrDuration = String;
+    type JSONObject = String;
+    type JSON = String;
 
     macro_rules! linear_operation {
+        ($($name:ident),* $(,)?) => {$(
+            #[derive(GraphQLQuery)]
+            #[graphql(
+                schema_path = "graphql/linear/schema.graphql",
+                query_path = "graphql/linear/linear.graphql",
+                variables_derives = "Debug, Clone"
+            )]
+            pub struct $name;
+        )*};
+    }
+
+    #[cfg(feature = "live")]
+    macro_rules! testbed_operation {
         ($($name:ident),* $(,)?) => {$(
             #[derive(GraphQLQuery)]
             #[graphql(
@@ -104,6 +121,23 @@ pub mod linear {
     }
 
     linear_operation!(
+        ResolveProjectBoard,
+        ResolveTeamBoard,
+        TeamByKey,
+        BoardSchema,
+        TeamProjects,
+        BoardIssues,
+        PollIssues,
+        IssueIds,
+        CustomViewIssueIds,
+        IssuesById,
+        IssueDetail,
+        ListBoards,
+        LinearViewer,
+    );
+
+    #[cfg(feature = "live")]
+    testbed_operation!(
         TestbedViewer,
         SeedTeams,
         SeedRenameTeam,
@@ -141,4 +175,21 @@ pub mod linear {
         ProbeProjectTeams,
         ProbeSearch,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::linear::*;
+
+    #[test]
+    fn issue_filter_operations_expose_name_and_text() {
+        assert_eq!(board_issues::OPERATION_NAME, "BoardIssues");
+        assert_eq!(poll_issues::OPERATION_NAME, "PollIssues");
+        assert_eq!(issue_ids::OPERATION_NAME, "IssueIds");
+        assert_eq!(custom_view_issue_ids::OPERATION_NAME, "CustomViewIssueIds");
+        for q in [board_issues::QUERY, poll_issues::QUERY, issues_by_id::QUERY] {
+            assert!(q.contains("fragment IssueFields"));
+        }
+        assert!(issue_ids::QUERY.contains("query IssueIds"));
+    }
 }

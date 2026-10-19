@@ -72,6 +72,13 @@ const LINEAR_REQUIRED: &[&str] = &[
     "issueUpdate(",
     "customViews(",
     "rateLimitStatus: RateLimitPayload!",
+    "facets: [Facet!]!",
+    "targetCustomView: CustomView",
+    "groupType: LabelGroupType",
+    "issueGroupingLabelGroupId: String",
+    "issueSubGroupingLabelGroupId: String",
+    "includeArchived: Boolean",
+    "trashed: Boolean",
 ];
 
 #[test]

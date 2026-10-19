@@ -1,0 +1,122 @@
+fragment IssueFields on Issue {
+  id identifier number title url priority estimate dueDate sortOrder
+  createdAt updatedAt completedAt canceledAt archivedAt trashed
+  state { id name type color position }
+  team { id key }
+  assignee { id displayName }
+  labels(first: 10) { nodes { id name color parent { id groupType } } }
+  cycle { id number name startsAt endsAt }
+  project { id name }
+  parent { id identifier number title state { type } }
+}
+
+fragment ViewFields on CustomView {
+  id name modelName team { id }
+  viewPreferencesValues {
+    layout issueGrouping issueGroupingLabelGroupId issueSubGrouping issueSubGroupingLabelGroupId
+    viewOrdering viewOrderingDirection showCompletedIssues
+    fieldStatus fieldPriority fieldAssignee fieldLabels fieldCycle fieldEstimate fieldDueDate
+    fieldProject fieldDateCreated fieldDateUpdated
+  }
+}
+
+query ResolveProjectBoard($id: String!) {
+  viewer { id } organization { urlKey }
+  project(id: $id) {
+    id name url slugId
+    teams(first: 20) { nodes { id key cyclesEnabled } }
+    facets { targetCustomView { ...ViewFields } }
+  }
+}
+
+query ResolveTeamBoard($id: String!) {
+  viewer { id } organization { urlKey }
+  team(id: $id) { id key name cyclesEnabled }
+}
+
+query TeamByKey($key: String!) {
+  teams(filter: { key: { eq: $key } }, first: 1) { nodes { id } }
+}
+
+query BoardSchema($teamIds: [ID!]!) {
+  workflowStates(filter: { team: { id: { in: $teamIds } } }, first: 250) {
+    nodes { id name type color position team { id } }
+  }
+  issueLabels(filter: { or: [{ team: { id: { in: $teamIds } } }, { team: { null: true } }] }, first: 250) {
+    nodes { id name color isGroup groupType parent { id } }
+  }
+  cycles(filter: { team: { id: { in: $teamIds } }, endsAt: { gt: "-P26W" } }, first: 100) {
+    nodes { id number name startsAt endsAt isPast team { id } }
+  }
+  customViews(
+    filter: { shared: { eq: true }, modelName: { eq: "Issue" },
+              or: [{ team: { id: { in: $teamIds } } }, { team: { null: true } }] }
+    first: 100
+  ) { nodes { ...ViewFields } }
+}
+
+query TeamProjects($teamId: String!) {
+  team(id: $teamId) { projects(first: 100) { nodes { id name } } }
+}
+
+query BoardIssues($filter: IssueFilter!, $first: Int!, $after: String) {
+  issues(filter: $filter, first: $first, after: $after, orderBy: updatedAt) {
+    pageInfo { hasNextPage endCursor }
+    nodes { ...IssueFields }
+  }
+}
+
+query PollIssues($filter: IssueFilter!, $first: Int!, $after: String) {
+  issues(filter: $filter, first: $first, after: $after, orderBy: updatedAt, includeArchived: true) {
+    pageInfo { hasNextPage endCursor }
+    nodes { ...IssueFields }
+  }
+}
+
+query IssueIds($filter: IssueFilter!, $first: Int!, $after: String, $includeArchived: Boolean!) {
+  issues(filter: $filter, first: $first, after: $after, includeArchived: $includeArchived) {
+    pageInfo { hasNextPage endCursor }
+    nodes { id }
+  }
+}
+
+query CustomViewIssueIds($id: String!, $filter: IssueFilter!, $first: Int!, $after: String, $includeArchived: Boolean!) {
+  customView(id: $id) {
+    issues(filter: $filter, first: $first, after: $after, includeArchived: $includeArchived) {
+      pageInfo { hasNextPage endCursor }
+      nodes { id }
+    }
+  }
+}
+
+query IssuesById($ids: [ID!]!) {
+  issues(filter: { id: { in: $ids } }, first: 100, includeArchived: true) {
+    nodes { ...IssueFields }
+  }
+}
+
+query IssueDetail($id: String!, $before: String) {
+  issue(id: $id) {
+    id description
+    parent { id identifier number title state { type } }
+    children(first: 50) { nodes { id identifier number title state { name type } } }
+    attachments(first: 25) { nodes { title url } }
+    comments(last: 20, before: $before) {
+      pageInfo { hasPreviousPage startCursor }
+      nodes { id body createdAt user { displayName } parent { id } }
+    }
+  }
+}
+
+query ListBoards {
+  projects(filter: { status: { type: { nin: ["completed", "canceled"] } } }, first: 100) {
+    nodes { id name }
+  }
+  teams(first: 100) { nodes { id key name } }
+}
+
+query LinearViewer {
+  viewer { id }
+  organization { urlKey }
+  rateLimitStatus { limits { type remainingAmount allowedAmount reset } }
+}
