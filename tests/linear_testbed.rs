@@ -108,3 +108,11 @@ async fn an_unguarded_client_sends_only_the_viewer_check() {
         "only TestbedViewer may be sent without the workspace guard"
     );
 }
+
+#[test]
+fn the_viewer_check_passes_the_viewer_operation() {
+    use graphql_client::GraphQLQuery;
+    use project_boards_queries::linear::{TestbedViewer, testbed_viewer};
+    let body = TestbedViewer::build_query(testbed_viewer::Variables {});
+    assert_eq!(viewer_only_check(&body), Ok(()));
+}

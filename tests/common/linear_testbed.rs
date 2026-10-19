@@ -175,6 +175,18 @@ impl Raw {
     }
 }
 
+/// The error-probe client's restriction: only `TestbedViewer`, checked before any request.
+pub fn viewer_only_check(body: &impl serde::Serialize) -> Result<(), String> {
+    let operation = serde_json::to_value(body)
+        .ok()
+        .and_then(|v| v["operationName"].as_str().map(String::from));
+    if operation.as_deref() == Some("TestbedViewer") {
+        Ok(())
+    } else {
+        Err("only TestbedViewer may be sent without the workspace guard".into())
+    }
+}
+
 pub struct Linear {
     http: reqwest::Client,
     key: String,
@@ -220,12 +232,7 @@ impl Linear {
 
     pub async fn post(&self, body: &impl serde::Serialize) -> Result<Raw, String> {
         if self.viewer_only {
-            let operation = serde_json::to_value(body)
-                .ok()
-                .and_then(|v| v["operationName"].as_str().map(String::from));
-            if operation.as_deref() != Some("TestbedViewer") {
-                return Err("only TestbedViewer may be sent without the workspace guard".into());
-            }
+            viewer_only_check(body)?;
         }
         let mut key = reqwest::header::HeaderValue::from_str(&self.key)
             .map_err(|_| "the testbed key is not a valid header value".to_string())?;

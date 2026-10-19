@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-/// Invented full names, handed out by order of first appearance (wrapping after eight).
+/// Invented full names, handed out by order of first appearance; past eight a numeric
+/// suffix keeps them unique.
 pub const INVENTED_PEOPLE: [&str; 8] = [
     "Avery Quill",
     "Blair Fenwick",
@@ -26,8 +27,10 @@ const WORKSPACE_KEY: &str = "testbed-workspace";
 
 pub struct Scrubber {
     url_key: String,
-    /// First-appearance index per person, keyed by `id` (or the real name without one).
+    /// First-appearance index per person, keyed by every real `id`, `displayName`, `name`
+    /// and `email` seen, so objects that carry only some of them unify.
     people: HashMap<String, usize>,
+    next_person: usize,
     /// Every real value replaced so far, for `check`.
     replaced: Vec<String>,
 }
@@ -37,6 +40,7 @@ impl Scrubber {
         Self {
             url_key: url_key.to_string(),
             people: HashMap::new(),
+            next_person: 0,
             replaced: Vec::new(),
         }
     }
@@ -68,21 +72,34 @@ impl Scrubber {
     }
 
     fn scrub_person(&mut self, map: &mut serde_json::Map<String, Value>) {
-        let key = map
-            .get("id")
-            .or_else(|| map.get("name"))
-            .and_then(Value::as_str)
-            .map(String::from);
-        let next = self.people.len();
-        let i = match key {
-            Some(k) => *self.people.entry(k).or_insert(next),
-            None => next,
+        let keys: Vec<String> = ["id", "displayName", "name", "email"]
+            .iter()
+            .filter_map(|k| map.get(*k).and_then(Value::as_str))
+            .filter(|k| !k.is_empty())
+            .map(String::from)
+            .collect();
+        // Any key already seen identifies the person; every key is then an alias of them.
+        let i = keys
+            .iter()
+            .find_map(|k| self.people.get(k).copied())
+            .unwrap_or_else(|| {
+                self.next_person += 1;
+                self.next_person - 1
+            });
+        for k in keys {
+            self.people.insert(k, i);
+        }
+        let base = INVENTED_PEOPLE[i % INVENTED_PEOPLE.len()];
+        let round = i / INVENTED_PEOPLE.len();
+        let fake_name = if round == 0 {
+            base.to_string()
+        } else {
+            format!("{base} {}", round + 1)
         };
-        let fake_name = INVENTED_PEOPLE[i % INVENTED_PEOPLE.len()];
         let fake_email = format!("person{i}@example.com");
         for (field, fake) in [
-            ("name", Some(fake_name)),
-            ("displayName", Some(fake_name)),
+            ("name", Some(fake_name.as_str())),
+            ("displayName", Some(fake_name.as_str())),
             ("email", Some(fake_email.as_str())),
             ("avatarUrl", None),
         ] {
@@ -218,5 +235,41 @@ mod tests {
             .check("see linear.app/project-boards-linear-testbed")
             .unwrap_err();
         assert!(!err.contains("project-boards-linear-testbed"), "{err}");
+    }
+
+    #[test]
+    fn an_id_less_object_unifies_with_the_same_person_in_either_order() {
+        let mut s = Scrubber::new("example-key");
+        let mut a = json!([{"id": "u1", "displayName": "Real One"}, {"displayName": "Real One"},
+                           {"displayName": "Real Two"}]);
+        s.scrub(&mut a);
+        assert_eq!(a[0]["displayName"], INVENTED_PEOPLE[0]);
+        assert_eq!(a[1]["displayName"], INVENTED_PEOPLE[0]);
+        assert_eq!(a[2]["displayName"], INVENTED_PEOPLE[1]);
+        let mut s = Scrubber::new("example-key");
+        let mut b = json!({"displayName": "Real One"});
+        s.scrub(&mut b);
+        let mut c = json!({"id": "u1", "displayName": "Real One"});
+        s.scrub(&mut c);
+        assert_eq!(b["displayName"], c["displayName"]);
+    }
+
+    #[test]
+    fn ten_people_get_ten_distinct_names() {
+        let mut s = Scrubber::new("example-key");
+        let mut v = Value::Array(
+            (0..10)
+                .map(|i| json!({"id": format!("u{i}"), "displayName": format!("real{i}")}))
+                .collect(),
+        );
+        s.scrub(&mut v);
+        let names: std::collections::HashSet<_> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["displayName"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names.len(), 10);
+        assert_eq!(v[8]["displayName"], format!("{} 2", INVENTED_PEOPLE[0]));
     }
 }
