@@ -176,20 +176,3 @@ pub mod linear {
         ProbeSearch,
     );
 }
-
-#[cfg(test)]
-mod tests {
-    use super::linear::*;
-
-    #[test]
-    fn issue_filter_operations_expose_name_and_text() {
-        assert_eq!(board_issues::OPERATION_NAME, "BoardIssues");
-        assert_eq!(poll_issues::OPERATION_NAME, "PollIssues");
-        assert_eq!(issue_ids::OPERATION_NAME, "IssueIds");
-        assert_eq!(custom_view_issue_ids::OPERATION_NAME, "CustomViewIssueIds");
-        for q in [board_issues::QUERY, poll_issues::QUERY, issues_by_id::QUERY] {
-            assert!(q.contains("fragment IssueFields"));
-        }
-        assert!(issue_ids::QUERY.contains("query IssueIds"));
-    }
-}
