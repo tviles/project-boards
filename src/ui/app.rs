@@ -229,6 +229,16 @@ pub fn setup_message(error: &BackendError) -> Option<String> {
     }
 }
 
+/// The setup screen when no provider has credentials: each error's setup text (or the error
+/// itself), one after another.
+pub fn setup_message_for_all(errors: &[BackendError]) -> String {
+    errors
+        .iter()
+        .map(|e| setup_message(e).unwrap_or_else(|| e.to_string()))
+        .collect::<Vec<_>>()
+        .join("\n\n— or —\n\n")
+}
+
 impl App {
     pub fn new(store: Box<dyn Store>, keymap: Keymap, theme: Theme) -> Self {
         Self {
@@ -1781,6 +1791,34 @@ mod tests {
             assert!(text.ends_with("press r."), "{text}");
         }
         assert_eq!(setup_message(&BackendError::Network("x".into())), None);
+    }
+
+    #[test]
+    fn the_setup_screen_lists_every_providers_fix() {
+        let gh = BackendError::NoCredentials {
+            provider: Provider::Github,
+        };
+        let ln = BackendError::NoCredentials {
+            provider: Provider::Linear,
+        };
+        assert_eq!(
+            setup_message_for_all(&[gh.clone(), ln.clone()]),
+            format!(
+                "{}\n\n— or —\n\n{}",
+                setup_message(&gh).unwrap(),
+                setup_message(&ln).unwrap()
+            )
+        );
+        assert_eq!(
+            setup_message_for_all(std::slice::from_ref(&gh)),
+            setup_message(&gh).unwrap()
+        );
+        let odd = BackendError::Network("offline".into());
+        assert_eq!(
+            setup_message_for_all(std::slice::from_ref(&odd)),
+            odd.to_string(),
+            "an error with no setup text shows its own"
+        );
     }
 
     #[test]

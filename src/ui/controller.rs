@@ -13,7 +13,7 @@ use crate::store::MemoryStore;
 use crate::store::cache::{cache_path, load_cache, save_cache};
 use crate::sync::scheduler::{PollConfig, PollKind, Scheduler};
 use crate::sync::{IncrementalMode, SyncEvent, SyncTask};
-use crate::ui::app::{App, Command, EditPurpose, Mode, setup_message};
+use crate::ui::app::{App, Command, EditPurpose, Mode, setup_message, setup_message_for_all};
 use crate::ui::editor::Edited;
 use crate::ui::keymap::Keymap;
 use crate::ui::picker::PickerState;
@@ -122,10 +122,12 @@ impl SyncJob {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// `generation` is the controller's generation when the effect was produced; the shell
-    /// tags the job's events with it.
+    /// tags the job's events with it. `provider` is the shown board's, whose backend runs
+    /// the job; `None` when no board is open.
     Spawn {
         job: SyncJob,
         generation: u64,
+        provider: Option<Provider>,
     },
     OpenUrl(String),
     /// Resolve the token again and call `start` (after Retry).
@@ -175,7 +177,8 @@ pub struct Controller {
     pub app: App,
     options: PaneOptions,
     herdr: Arc<dyn HerdrCli>,
-    mode: IncrementalMode,
+    /// A fixed incremental mode (tests); `None` follows the board's provider (Decision 18).
+    incremental: Option<IncrementalMode>,
     scheduler: Scheduler,
     board: Option<BoardKey>,
     full_load_in_flight: bool,
@@ -192,7 +195,7 @@ impl Controller {
     pub fn new(
         options: PaneOptions,
         herdr: Arc<dyn HerdrCli>,
-        mode: IncrementalMode,
+        incremental: Option<IncrementalMode>,
         now: Instant,
     ) -> Self {
         let (keymap, key_warnings) = Keymap::with_overrides(&options.config.keys);
@@ -214,7 +217,7 @@ impl Controller {
             app,
             options,
             herdr,
-            mode,
+            incremental,
             scheduler,
             board: None,
             full_load_in_flight: false,
@@ -233,19 +236,41 @@ impl Controller {
         Effect::Spawn {
             job,
             generation: self.generation,
+            provider: self.board.as_ref().map(BoardKey::provider),
         }
+    }
+
+    /// How the shown board is polled: the fixed mode, else its provider's.
+    fn incremental_mode(&self) -> IncrementalMode {
+        self.incremental.unwrap_or_else(|| {
+            let provider = self
+                .board
+                .as_ref()
+                .map_or(Provider::Github, BoardKey::provider);
+            crate::backend::profile_for(provider).incremental
+        })
     }
 
     pub fn board(&self) -> Option<&BoardKey> {
         self.board.as_ref()
     }
 
-    /// Called once the shell has tried to resolve a token, and again after Retry.
-    pub fn start(&mut self, token: Result<(), BackendError>, now: Instant) -> Vec<Effect> {
-        if let Err(e) = token {
-            self.show_setup(&e);
-            return Vec::new();
-        }
+    /// Called once the shell has tried to resolve each provider's credentials, and again after
+    /// Retry: `Ok` with the providers that have them, `Err` with every provider's error when
+    /// none has.
+    pub fn start(
+        &mut self,
+        providers: Result<Vec<Provider>, Vec<BackendError>>,
+        now: Instant,
+    ) -> Vec<Effect> {
+        let providers = match providers {
+            Ok(providers) => providers,
+            Err(errors) => {
+                self.app.setup = Some(setup_message_for_all(&errors));
+                self.app.mode = Mode::Setup;
+                return Vec::new();
+            }
+        };
         self.app.setup = None;
         if self.app.mode == Mode::Setup {
             self.app.mode = Mode::Normal;
@@ -267,6 +292,7 @@ impl Controller {
             self.options.picker,
             remembered,
             self.options.repo.clone(),
+            providers.contains(&Provider::Github),
         ) {
             FirstStep::Use(board) => self.open_board(board, now),
             FirstStep::FetchRepoProjects(repo) => {
@@ -275,11 +301,6 @@ impl Controller {
             }
             FirstStep::PickAll => self.show_picker(true),
         }
-    }
-
-    fn show_setup(&mut self, error: &BackendError) {
-        self.app.setup = setup_message(error).or_else(|| Some(error.to_string()));
-        self.app.mode = Mode::Setup;
     }
 
     fn show_picker(&mut self, required: bool) -> Vec<Effect> {
@@ -380,7 +401,9 @@ impl Controller {
         let project = snapshot.project.clone();
         let since = snapshot.fetched_at.clone();
         let job = match (kind, since) {
-            (PollKind::Incremental, Some(since)) if self.mode != IncrementalMode::Unsupported => {
+            (PollKind::Incremental, Some(since))
+                if self.incremental_mode() != IncrementalMode::Unsupported =>
+            {
                 SyncJob::Incremental {
                     project: project.id.clone(),
                     since: poll_since(&since),
@@ -781,7 +804,7 @@ mod tests {
             Controller::new(
                 options(dir, board),
                 fake.clone(),
-                IncrementalMode::DateTime,
+                Some(IncrementalMode::DateTime),
                 t0,
             ),
             fake,
@@ -817,9 +840,9 @@ mod tests {
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
         assert!(
             c.start(
-                Err(BackendError::NoCredentials {
+                Err(vec![BackendError::NoCredentials {
                     provider: Provider::Github
-                }),
+                }]),
                 t0
             )
             .is_empty()
@@ -835,7 +858,10 @@ mod tests {
     fn a_board_without_cache_is_resolved_registered_and_remembered() {
         let dir = tempfile::tempdir().unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        assert_eq!(c.start(Ok(()), t0), vec![sp(&c, SyncJob::Resolve(board()))]);
+        assert_eq!(
+            c.start(Ok(vec![Provider::Github]), t0),
+            vec![sp(&c, SyncJob::Resolve(board()))]
+        );
         assert_eq!(
             PaneRegistry::new(dir.path()).lookup(&board()).as_deref(),
             Some("me")
@@ -851,7 +877,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        let effects = c.start(Ok(()), t0);
+        let effects = c.start(Ok(vec![Provider::Github]), t0);
         assert!(
             matches!(&effects[0], Effect::Spawn { job: SyncJob::Refresh(p), .. } if p.board == board())
         );
@@ -867,7 +893,7 @@ mod tests {
         let (mut c, fake, t0) = controller(dir.path(), Some("tviles/3"));
         fake.respond(&["pane", "get", "other"], Ok(json!({})));
         fake.respond(&["plugin", "pane", "focus", "other"], Ok(json!({})));
-        assert_eq!(c.start(Ok(()), t0), vec![Effect::Exit]);
+        assert_eq!(c.start(Ok(vec![Provider::Github]), t0), vec![Effect::Exit]);
         assert!(
             fake.calls()
                 .iter()
@@ -882,7 +908,7 @@ mod tests {
 
         let (mut one, _, t0) = controller(dir.path(), None);
         assert_eq!(
-            one.start(Ok(()), t0),
+            one.start(Ok(vec![Provider::Github]), t0),
             vec![sp(&one, SyncJob::RepoProjects(repo.clone()))]
         );
         let effects = one.handle(
@@ -896,7 +922,7 @@ mod tests {
 
         let dir2 = tempfile::tempdir().unwrap();
         let (mut two, _, t0) = controller(dir2.path(), None);
-        two.start(Ok(()), t0);
+        two.start(Ok(vec![Provider::Github]), t0);
         two.handle(
             Input::Sync {
                 generation: two.generation(),
@@ -909,7 +935,7 @@ mod tests {
 
         let dir3 = tempfile::tempdir().unwrap();
         let (mut failed, _, t0) = controller(dir3.path(), None);
-        failed.start(Ok(()), t0);
+        failed.start(Ok(vec![Provider::Github]), t0);
         let failure = SyncEvent::Failed {
             task: SyncTask::Projects,
             error: BackendError::Network("down".into()),
@@ -960,7 +986,7 @@ mod tests {
             Layout::Table,
         );
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         assert_eq!(c.app.layout().0, Layout::Board, "V_table is overridden");
         c.app.select_view(&ViewId::new("V_bugs"));
         assert_eq!(
@@ -976,7 +1002,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         c.handle(Input::Key(key('L')), t0);
         let saved = State::load(dir.path()).layout_overrides_for(&board());
         assert_eq!(
@@ -1013,7 +1039,7 @@ mod tests {
             Layout::Board,
         );
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         assert_eq!(
             c.app.status.flash.as_deref(),
             Some("View 'Table' layout changed on GitHub; local layout cleared")
@@ -1051,7 +1077,7 @@ mod tests {
             Layout::Board,
         );
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         assert_eq!(
             State::load(dir.path()).layout_overrides.len(),
             1,
@@ -1078,7 +1104,7 @@ mod tests {
         })
         .unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        let effects = c.start(Ok(()), t0);
+        let effects = c.start(Ok(vec![Provider::Github]), t0);
         assert!(effects.iter().any(|e| matches!(e, Effect::Spawn { job: SyncJob::ViewIds { hydrate: false, query, .. }, .. } if query == &ListQuery::github("label:bug"))));
         let effects = c.handle(
             Input::Sync {
@@ -1105,7 +1131,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         let item = crate::model::ItemId::new("a");
         let field = crate::model::FieldId::new("F_status");
         let before = c.app.store.confirmed().unwrap().items[&item]
@@ -1130,7 +1156,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         c.handle(
             Input::Sync {
                 generation: c.generation(),
@@ -1156,7 +1182,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         c.handle(
             Input::Sync {
                 generation: c.generation(),
@@ -1196,10 +1222,10 @@ mod tests {
         let mut c = Controller::new(
             options(dir.path(), Some("tviles/3")),
             fake,
-            IncrementalMode::Unsupported,
+            Some(IncrementalMode::Unsupported),
             t0,
         );
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         c.handle(
             Input::Sync {
                 generation: c.generation(),
@@ -1222,7 +1248,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         assert!(
             c.handle(Input::Key(key('r')), t0).is_empty(),
             "initial load still running"
@@ -1247,7 +1273,7 @@ mod tests {
     fn a_cancelled_picker_stays_closed_while_the_board_still_loads() {
         let dir = tempfile::tempdir().unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         assert!(
             c.app.snapshot().is_none(),
             "no cache: the board is still resolving"
@@ -1271,10 +1297,10 @@ mod tests {
         let mut c = Controller::new(
             opts,
             Arc::new(FakeHerdr::default()),
-            IncrementalMode::DateTime,
+            Some(IncrementalMode::DateTime),
             t0,
         );
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         for k in ['/', 'b', 'u', 'g'] {
             c.handle(Input::Key(key(k)), t0);
         }
@@ -1311,7 +1337,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         assert!(c.handle(Input::Key(key('r')), t0).is_empty());
         assert_eq!(c.app.status.flash.as_deref(), Some(REFRESHING));
         c.handle(at(&c, complete("2026-10-01T12:00:00Z")), t0);
@@ -1358,7 +1384,7 @@ mod tests {
     fn links_that_are_not_web_links_are_not_opened() {
         let dir = tempfile::tempdir().unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         for url in [
             "file:///etc/passwd",
             "-a Calculator",
@@ -1384,7 +1410,7 @@ mod tests {
     fn quit_exits_and_release_unregisters_the_pane() {
         let dir = tempfile::tempdir().unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         assert_eq!(c.handle(Input::Key(key('q')), t0), vec![Effect::Exit]);
         c.release();
         assert_eq!(PaneRegistry::new(dir.path()).lookup(&board()), None);
@@ -1397,9 +1423,9 @@ mod tests {
         opts.picker = true;
         let fake = Arc::new(FakeHerdr::default());
         let t0 = Instant::now();
-        let mut c = Controller::new(opts, fake, IncrementalMode::DateTime, t0);
+        let mut c = Controller::new(opts, fake, Some(IncrementalMode::DateTime), t0);
         assert_eq!(
-            c.start(Ok(()), t0),
+            c.start(Ok(vec![Provider::Github]), t0),
             vec![sp(
                 &c,
                 SyncJob::Projects(Some("tviles/app".parse().unwrap()))
@@ -1434,6 +1460,7 @@ mod tests {
         Effect::Spawn {
             job,
             generation: c.generation(),
+            provider: c.board().map(BoardKey::provider),
         }
     }
 
@@ -1456,7 +1483,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         let e = at(&c, fail(SyncTask::Resolve));
         c.handle(e, t0 + Duration::from_secs(1));
         let effects = c.handle(Input::Tick, t0 + Duration::from_secs(31));
@@ -1478,7 +1505,7 @@ mod tests {
     fn a_failed_first_resolve_is_retried_after_the_interval() {
         let dir = tempfile::tempdir().unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         let e = at(&c, fail(SyncTask::Resolve));
         c.handle(e, t0 + Duration::from_secs(1));
         assert!(
@@ -1500,7 +1527,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         let old = c.generation();
         let other: BoardKey = "tviles/4".parse().unwrap();
         let effects = c.commands(vec![Command::PickBoard(other.clone())], t0);
@@ -1538,14 +1565,17 @@ mod tests {
             &["plugin", "pane", "focus", "other"],
             FakeHerdr::not_found(),
         );
-        assert_eq!(c.start(Ok(()), t0), vec![sp(&c, SyncJob::Resolve(board()))]);
+        assert_eq!(
+            c.start(Ok(vec![Provider::Github]), t0),
+            vec![sp(&c, SyncJob::Resolve(board()))]
+        );
     }
 
     #[test]
     fn empty_updates_are_not_persisted_but_hydration_is() {
         let dir = tempfile::tempdir().unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         let e = at(&c, SyncEvent::Project(crate::ui::fixtures::project()));
         c.handle(e, t0);
         let path = cache_path(dir.path(), &board());
@@ -1568,7 +1598,7 @@ mod tests {
     fn lists_fetched_with_a_local_filter_stay_out_of_the_cache() {
         let dir = tempfile::tempdir().unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         let e = at(&c, SyncEvent::Project(crate::ui::fixtures::project()));
         c.handle(e, t0);
         let e = at(&c, complete("2026-10-01T12:00:00Z"));
@@ -1615,7 +1645,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         let e = at(&c, complete("2026-10-01T12:00:00Z"));
         c.handle(e, t0);
         assert!(c.handle(Input::Focus(false), t0).is_empty());
@@ -1634,7 +1664,7 @@ mod tests {
     fn an_auth_failure_on_the_repo_board_list_shows_setup() {
         let dir = tempfile::tempdir().unwrap();
         let (mut c, _, t0) = controller(dir.path(), None);
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         let failure = SyncEvent::Failed {
             task: SyncTask::Projects,
             error: BackendError::Unauthorized {
@@ -1651,7 +1681,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_cache(&cache_path(dir.path(), &board()), &snapshot()).unwrap();
         let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         let e = at(&c, complete("2026-10-01T12:00:00Z"));
         c.handle(e, t0);
         let old = c.generation();
@@ -1663,13 +1693,14 @@ mod tests {
         let other: BoardKey = "tviles/4".parse().unwrap();
         assert_eq!(effects.len(), 2, "{effects:?}");
         assert!(
-            matches!(&effects[0], Effect::Spawn { job: SyncJob::Incremental { .. }, generation } if *generation == old)
+            matches!(&effects[0], Effect::Spawn { job: SyncJob::Incremental { .. }, generation, .. } if *generation == old)
         );
         assert_eq!(
             effects[1],
             Effect::Spawn {
                 job: SyncJob::Resolve(other),
-                generation: old + 1
+                generation: old + 1,
+                provider: Some(Provider::Github),
             }
         );
     }
@@ -1678,7 +1709,7 @@ mod tests {
     fn opening_a_board_forgets_a_pending_repo_lookup() {
         let dir = tempfile::tempdir().unwrap();
         let (mut c, _, t0) = controller(dir.path(), None);
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         assert!(c.awaiting_repo_projects);
         c.commands(vec![Command::PickBoard(board())], t0);
         assert!(!c.awaiting_repo_projects);
@@ -1703,7 +1734,7 @@ mod tests {
     fn opened(dir: &Path) -> (Controller, Instant) {
         save_cache(&cache_path(dir, &board()), &snapshot()).unwrap();
         let (mut c, _, t0) = controller(dir, Some("tviles/3"));
-        c.start(Ok(()), t0);
+        c.start(Ok(vec![Provider::Github]), t0);
         (c, t0)
     }
 
@@ -1975,7 +2006,10 @@ mod tests {
         let effects = c.handle(Input::Key(key('r')), t0);
         assert_eq!(effects, vec![Effect::ResolveToken]);
         let project = c.app.project().unwrap().clone();
-        assert_eq!(c.start(Ok(()), t0), vec![sp(&c, SyncJob::Refresh(project))]);
+        assert_eq!(
+            c.start(Ok(vec![Provider::Github]), t0),
+            vec![sp(&c, SyncJob::Refresh(project))]
+        );
         assert_eq!(c.generation(), generation, "late answers still count");
         assert_eq!(c.app.mode, Mode::Normal);
         assert_eq!(c.app.pending_count(), 5);
@@ -2164,5 +2198,128 @@ mod tests {
         let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
         let effects = c.handle(Input::Key(alt_enter), t0);
         assert_eq!(mutates(&effects), [1]);
+    }
+
+    const LINEAR_TEAM: &str = "linear:team:1b4e28ba-2fa1-4d3b-a3f5-ef19b5a7633b";
+
+    /// A controller with no fixed incremental mode, as the runtime builds it, on `board`
+    /// with a cached snapshot whose load finished at noon.
+    fn polling(dir: &Path, board: &str) -> (Controller, Instant) {
+        let key: BoardKey = board.parse().unwrap();
+        let mut cached = snapshot();
+        cached.project.board = key.clone();
+        cached.project.id = ProjectId::new(board);
+        save_cache(&cache_path(dir, &key), &cached).unwrap();
+        let t0 = Instant::now();
+        let mut c = Controller::new(
+            options(dir, Some(board)),
+            Arc::new(FakeHerdr::default()),
+            None,
+            t0,
+        );
+        c.start(Ok(vec![Provider::Github, Provider::Linear]), t0);
+        c.handle(at(&c, complete("2026-10-01T12:00:00Z")), t0);
+        (c, t0)
+    }
+
+    #[test]
+    fn linear_boards_poll_by_datetime_and_github_by_date() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = polling(dir.path(), LINEAR_TEAM);
+        assert_eq!(c.incremental_mode(), IncrementalMode::DateTime);
+        assert_eq!(
+            c.handle(Input::Tick, t0 + Duration::from_secs(31)),
+            vec![Effect::Spawn {
+                job: SyncJob::Incremental {
+                    project: ProjectId::new(LINEAR_TEAM),
+                    since: poll_since("2026-10-01T12:00:00Z"),
+                },
+                generation: c.generation(),
+                provider: Some(Provider::Linear),
+            }]
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = polling(dir.path(), "tviles/3");
+        assert_eq!(c.incremental_mode(), IncrementalMode::Date);
+        assert_eq!(
+            c.handle(Input::Tick, t0 + Duration::from_secs(31)),
+            vec![Effect::Spawn {
+                job: SyncJob::Incremental {
+                    project: ProjectId::new("tviles/3"),
+                    since: poll_since("2026-10-01T12:00:00Z"),
+                },
+                generation: c.generation(),
+                provider: Some(Provider::Github),
+            }]
+        );
+    }
+
+    #[test]
+    fn setup_shows_only_when_no_provider_has_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        let none = vec![
+            BackendError::NoCredentials {
+                provider: Provider::Github,
+            },
+            BackendError::NoCredentials {
+                provider: Provider::Linear,
+            },
+        ];
+        assert!(c.start(Err(none), t0).is_empty());
+        assert_eq!(c.app.mode, Mode::Setup);
+        let text = c.app.setup.clone().unwrap();
+        assert!(text.contains("gh auth login"), "{text}");
+        assert!(text.contains("LINEAR_API_KEY"), "{text}");
+
+        assert_eq!(
+            c.start(Ok(vec![Provider::Linear]), t0),
+            vec![sp(&c, SyncJob::Resolve(board()))],
+            "one provider with credentials is enough"
+        );
+        assert_eq!(c.app.mode, Mode::Normal);
+        assert_eq!(c.app.setup, None);
+    }
+
+    #[test]
+    fn a_github_only_user_sends_nothing_to_linear() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), None);
+        let repo: RepoSlug = "tviles/app".parse().unwrap();
+        assert_eq!(
+            c.start(Ok(vec![Provider::Github]), t0),
+            vec![Effect::Spawn {
+                job: SyncJob::RepoProjects(repo),
+                generation: c.generation(),
+                provider: None,
+            }]
+        );
+        let effects = c.handle(
+            at(&c, SyncEvent::RepoProjects(vec![summary("tviles/3")])),
+            t0,
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::Spawn {
+                job: SyncJob::Resolve(board()),
+                generation: c.generation(),
+                provider: Some(Provider::Github),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_linear_only_user_in_a_repository_gets_the_picker() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), None);
+        assert_eq!(
+            c.start(Ok(vec![Provider::Linear]), t0),
+            vec![sp(
+                &c,
+                SyncJob::Projects(Some("tviles/app".parse().unwrap()))
+            )]
+        );
+        assert_eq!(c.app.mode, Mode::Picker);
     }
 }

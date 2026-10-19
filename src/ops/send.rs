@@ -1,7 +1,7 @@
 //! Carries an op to GitHub: which mutation, with which ids, and what came back.
 
 use crate::backend::Backend;
-use crate::error::BackendError;
+use crate::error::{BackendError, GraphqlErrorEntry};
 use crate::github::Github;
 use crate::model::{ContentId, FieldId, FieldValue, ItemId, ProjectId};
 use crate::ops::{Confirmed, NewItem, Op};
@@ -57,6 +57,12 @@ pub async fn send(
 ) -> Result<Confirmed, BackendError> {
     match backend {
         Backend::Github(gh) => send_github(gh, project, op).await,
+        // The controller refuses every edit on a Linear board before it gets here (spec
+        // section 5); this keeps any that slips through from being sent.
+        Backend::Linear(_) => Err(BackendError::Api(vec![GraphqlErrorEntry {
+            message: "not supported".into(),
+            kind: None,
+        }])),
     }
 }
 
@@ -730,5 +736,23 @@ mod tests {
             Ok(Confirmed::Applied)
         );
         assert_eq!(t.requests()[0].operation_name, "UpdateItemPosition");
+    }
+
+    #[tokio::test]
+    async fn nothing_is_sent_to_linear() {
+        let t = Arc::new(FixtureTransport::new());
+        let backend = crate::backend::Backend::Linear(crate::linear::Linear::new(t.clone()));
+        let op = Op::Reorder {
+            item: ItemId::new("i-1"),
+            after: None,
+        };
+        assert_eq!(
+            send(&backend, &ProjectId::new("linear:team:t1"), &op).await,
+            Err(BackendError::Api(vec![GraphqlErrorEntry {
+                message: "not supported".into(),
+                kind: None,
+            }]))
+        );
+        assert!(t.requests().is_empty());
     }
 }

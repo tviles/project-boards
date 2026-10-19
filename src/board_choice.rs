@@ -10,12 +10,14 @@ pub enum FirstStep {
 }
 
 /// `--project` wins; `--picker` always picks; then the board remembered for the repo; then
-/// the repo's linked boards; with no repo, the picker.
+/// the repo's linked boards, which only GitHub (`github`: its credentials resolved) can list;
+/// otherwise the picker.
 pub fn first_step(
     explicit: Option<BoardKey>,
     picker: bool,
     remembered: Option<BoardKey>,
     repo: Option<RepoSlug>,
+    github: bool,
 ) -> FirstStep {
     if let Some(b) = explicit {
         return FirstStep::Use(b);
@@ -27,8 +29,8 @@ pub fn first_step(
         return FirstStep::Use(b);
     }
     match repo {
-        Some(r) => FirstStep::FetchRepoProjects(r),
-        None => FirstStep::PickAll,
+        Some(r) if github => FirstStep::FetchRepoProjects(r),
+        Some(_) | None => FirstStep::PickAll,
     }
 }
 
@@ -86,22 +88,38 @@ mod tests {
     #[test]
     fn first_step_order() {
         assert_eq!(
-            first_step(Some(b("a/1")), true, Some(b("a/2")), Some(r())),
+            first_step(Some(b("a/1")), true, Some(b("a/2")), Some(r()), true),
             FirstStep::Use(b("a/1"))
         );
         assert_eq!(
-            first_step(None, true, Some(b("a/2")), Some(r())),
+            first_step(None, true, Some(b("a/2")), Some(r()), true),
             FirstStep::PickAll
         );
         assert_eq!(
-            first_step(None, false, Some(b("a/2")), Some(r())),
+            first_step(None, false, Some(b("a/2")), Some(r()), true),
             FirstStep::Use(b("a/2"))
         );
         assert_eq!(
-            first_step(None, false, None, Some(r())),
+            first_step(None, false, None, Some(r()), true),
             FirstStep::FetchRepoProjects(r())
         );
-        assert_eq!(first_step(None, false, None, None), FirstStep::PickAll);
+        assert_eq!(
+            first_step(None, false, None, None, true),
+            FirstStep::PickAll
+        );
+        // Without GitHub credentials a repository's linked boards cannot be listed.
+        assert_eq!(
+            first_step(None, false, None, Some(r()), false),
+            FirstStep::PickAll
+        );
+        assert_eq!(
+            first_step(None, false, Some(b("a/2")), Some(r()), false),
+            FirstStep::Use(b("a/2"))
+        );
+        assert_eq!(
+            first_step(Some(b("a/1")), false, None, Some(r()), false),
+            FirstStep::Use(b("a/1"))
+        );
     }
 
     #[test]
