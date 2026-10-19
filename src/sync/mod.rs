@@ -3,7 +3,7 @@
 pub mod scheduler;
 pub mod syncer;
 
-use crate::github::GithubError;
+use crate::error::BackendError;
 use crate::github::transport::RateInfo;
 use crate::model::{
     ContentHit, Item, ItemDetail, ItemId, Project, ProjectSummary, PushableRepos, RepoCandidates,
@@ -110,7 +110,7 @@ pub enum SyncEvent {
     /// re-queues those instead of failing them.
     OpDone {
         id: OpId,
-        result: Result<Confirmed, GithubError>,
+        result: Result<Confirmed, BackendError>,
     },
     /// The token's classic scopes as the last response reported them (`None`: none reported).
     Access {
@@ -118,7 +118,7 @@ pub enum SyncEvent {
     },
     Failed {
         task: SyncTask,
-        error: GithubError,
+        error: BackendError,
     },
     Candidates {
         repo: RepoSlug,
@@ -446,7 +446,7 @@ mod tests {
         ));
         let failed = SyncEvent::Failed {
             task: SyncTask::FullLoad,
-            error: crate::github::GithubError::Network("x".into()),
+            error: crate::error::BackendError::Network("x".into()),
         };
         assert_eq!(store_update(&failed), None);
     }

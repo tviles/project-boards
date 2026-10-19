@@ -1,7 +1,7 @@
 //! Decodes GraphQL response JSON into model types. Every union match has a fallback arm,
 //! so a type GitHub adds later degrades to Unsupported/Unknown instead of failing.
 
-use crate::github::GithubError;
+use crate::error::BackendError;
 use crate::model::*;
 use serde_json::Value;
 
@@ -120,10 +120,10 @@ pub fn view_from_wire(v: &Value, fields: &[Field]) -> View {
 }
 
 /// Decodes a `ProjectSchemaFields` object.
-pub fn project_from_wire(v: &Value, board: &BoardRef) -> Result<Project, GithubError> {
+pub fn project_from_wire(v: &Value, board: &BoardRef) -> Result<Project, BackendError> {
     let id = v["id"]
         .as_str()
-        .ok_or_else(|| GithubError::Decode("project has no id".into()))?;
+        .ok_or_else(|| BackendError::Decode("project has no id".into()))?;
     let fields: Vec<Field> = nodes(v, "fields")
         .into_iter()
         .map(field_from_wire)
@@ -564,7 +564,7 @@ pub(crate) mod tests {
         v["id"] = serde_json::Value::Null;
         assert!(matches!(
             project_from_wire(&v, &board()),
-            Err(GithubError::Decode(_))
+            Err(BackendError::Decode(_))
         ));
     }
 

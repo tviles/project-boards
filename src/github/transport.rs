@@ -1,4 +1,6 @@
-use crate::github::error::{GithubError, GraphqlErrorEntry, is_tolerable, required_scopes};
+use crate::error::{BackendError, GraphqlErrorEntry};
+use crate::github::error::{is_tolerable, required_scopes};
+use crate::model::Provider;
 use serde::Serialize;
 use std::future::Future;
 use std::pin::Pin;
@@ -67,22 +69,22 @@ pub trait Transport: Send + Sync {
     fn execute(
         &self,
         request: GraphqlRequest,
-    ) -> BoxFuture<'_, Result<GraphqlResponse, GithubError>>;
+    ) -> BoxFuture<'_, Result<GraphqlResponse, BackendError>>;
 }
 
 /// Turns a GraphQL response body into its data, or the error it describes.
 /// Data with only NOT_FOUND/FORBIDDEN errors is kept; those mark nodes the viewer cannot see.
-pub fn interpret_body(body: serde_json::Value) -> Result<serde_json::Value, GithubError> {
+pub fn interpret_body(body: serde_json::Value) -> Result<serde_json::Value, BackendError> {
     interpret_body_keeping_errors(body).map(|(data, _)| data)
 }
 
 /// `interpret_body`, also returning the tolerated errors that came with the data.
 pub fn interpret_body_keeping_errors(
     body: serde_json::Value,
-) -> Result<(serde_json::Value, Vec<GraphqlErrorEntry>), GithubError> {
+) -> Result<(serde_json::Value, Vec<GraphqlErrorEntry>), BackendError> {
     let errors: Vec<GraphqlErrorEntry> = match body.get("errors") {
         Some(e) => {
-            serde_json::from_value(e.clone()).map_err(|e| GithubError::Decode(e.to_string()))?
+            serde_json::from_value(e.clone()).map_err(|e| BackendError::Decode(e.to_string()))?
         }
         None => Vec::new(),
     };
@@ -90,13 +92,14 @@ pub fn interpret_body_keeping_errors(
         .iter()
         .find(|e| e.kind.as_deref() == Some("INSUFFICIENT_SCOPES"))
     {
-        return Err(GithubError::InsufficientScopes {
-            missing: required_scopes(&e.message),
+        return Err(BackendError::MissingPermission {
+            provider: Provider::Github,
+            needed: required_scopes(&e.message),
         });
     }
     let data = body.get("data").cloned().unwrap_or(serde_json::Value::Null);
     if !errors.is_empty() && (data.is_null() || !errors.iter().all(is_tolerable)) {
-        return Err(GithubError::Graphql(errors));
+        return Err(BackendError::Api(errors));
     }
     if !errors.is_empty() {
         tracing::debug!(
@@ -165,7 +168,7 @@ impl Transport for HttpTransport {
     fn execute(
         &self,
         request: GraphqlRequest,
-    ) -> BoxFuture<'_, Result<GraphqlResponse, GithubError>> {
+    ) -> BoxFuture<'_, Result<GraphqlResponse, BackendError>> {
         Box::pin(async move {
             let operation = request.operation_name.clone();
             let response = self
@@ -175,7 +178,7 @@ impl Transport for HttpTransport {
                 .json(&request)
                 .send()
                 .await
-                .map_err(|e| GithubError::Network(e.without_url().to_string()))?;
+                .map_err(|e| BackendError::Network(e.without_url().to_string()))?;
             let status = response.status();
             let headers = response.headers().clone();
             let rate = RateInfo {
@@ -195,18 +198,20 @@ impl Transport for HttpTransport {
             tracing::debug!(%operation, status = status.as_u16(), "graphql request");
 
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                return Err(GithubError::Unauthorized);
+                return Err(BackendError::Unauthorized {
+                    provider: Provider::Github,
+                });
             }
             // A secondary limit says how long to wait.
             if (status == reqwest::StatusCode::FORBIDDEN
                 || status == reqwest::StatusCode::TOO_MANY_REQUESTS)
                 && let Some(secs) = header_u64(&headers, "retry-after")
             {
-                return Err(GithubError::RateLimited {
+                return Err(BackendError::RateLimited {
                     retry_after_secs: secs,
                 });
             }
-            let primary_limited = || GithubError::RateLimited {
+            let primary_limited = || BackendError::RateLimited {
                 retry_after_secs: primary_wait(
                     &rate,
                     time::OffsetDateTime::now_utc().unix_timestamp().max(0) as u64,
@@ -215,10 +220,10 @@ impl Transport for HttpTransport {
             let text = response
                 .text()
                 .await
-                .map_err(|e| GithubError::Decode(e.without_url().to_string()))?;
+                .map_err(|e| BackendError::Decode(e.without_url().to_string()))?;
             if is_secondary_limit(status, &text) {
                 // No retry-after: GitHub's docs say to wait at least a minute.
-                return Err(GithubError::RateLimited {
+                return Err(BackendError::RateLimited {
                     retry_after_secs: SECONDARY_WAIT_SECS,
                 });
             }
@@ -228,7 +233,7 @@ impl Transport for HttpTransport {
             if rate.remaining == Some(0) && !has_data(body.as_ref().ok()) {
                 return Err(primary_limited());
             }
-            let body = body.map_err(|e| GithubError::Decode(e.to_string()))?;
+            let body = body.map_err(|e| BackendError::Decode(e.to_string()))?;
             // GraphQL reports an exhausted primary budget as HTTP 200 with a RATE_LIMITED error.
             if body["errors"]
                 .as_array()
@@ -237,7 +242,7 @@ impl Transport for HttpTransport {
                 return Err(primary_limited());
             }
             if !status.is_success() && body.get("data").is_none() && body.get("errors").is_none() {
-                return Err(GithubError::Network(format!("HTTP {status}")));
+                return Err(BackendError::Network(format!("HTTP {status}")));
             }
             let (data, errors) = interpret_body_keeping_errors(body)?;
             Ok(GraphqlResponse {
@@ -314,7 +319,12 @@ mod tests {
             ResponseTemplate::new(401).set_body_json(json!({"message": "Bad credentials"})),
         )
         .await;
-        assert_eq!(t.execute(request()).await, Err(GithubError::Unauthorized));
+        assert_eq!(
+            t.execute(request()).await,
+            Err(BackendError::Unauthorized {
+                provider: Provider::Github
+            })
+        );
     }
 
     #[tokio::test]
@@ -327,7 +337,7 @@ mod tests {
         .await;
         assert_eq!(
             t.execute(request()).await,
-            Err(GithubError::RateLimited {
+            Err(BackendError::RateLimited {
                 retry_after_secs: 30
             })
         );
@@ -339,8 +349,9 @@ mod tests {
         let (_s, t) = server_with(ResponseTemplate::new(200).set_body_json(body)).await;
         assert_eq!(
             t.execute(request()).await,
-            Err(GithubError::InsufficientScopes {
-                missing: vec!["read:project".into()]
+            Err(BackendError::MissingPermission {
+                provider: Provider::Github,
+                needed: vec!["read:project".into()]
             })
         );
     }
@@ -360,7 +371,7 @@ mod tests {
         let (_s, t) = server_with(ResponseTemplate::new(200).set_body_json(body)).await;
         assert!(matches!(
             t.execute(request()).await,
-            Err(GithubError::Graphql(_))
+            Err(BackendError::Api(_))
         ));
     }
 
@@ -368,9 +379,9 @@ mod tests {
         time::OffsetDateTime::now_utc().unix_timestamp() as u64
     }
 
-    fn assert_wait_near(result: Result<GraphqlResponse, GithubError>, expected: u64) {
+    fn assert_wait_near(result: Result<GraphqlResponse, BackendError>, expected: u64) {
         match result {
-            Err(GithubError::RateLimited { retry_after_secs }) => assert!(
+            Err(BackendError::RateLimited { retry_after_secs }) => assert!(
                 (expected.saturating_sub(2)..=expected).contains(&retry_after_secs),
                 "waited {retry_after_secs}s, expected about {expected}s"
             ),
@@ -396,7 +407,7 @@ mod tests {
         let (_s, t) = server_with(ResponseTemplate::new(200).set_body_json(body)).await;
         assert_eq!(
             t.execute(request()).await,
-            Err(GithubError::RateLimited {
+            Err(BackendError::RateLimited {
                 retry_after_secs: 60
             })
         );
@@ -473,7 +484,7 @@ mod tests {
             .await;
             assert_eq!(
                 t.execute(request()).await,
-                Err(GithubError::RateLimited {
+                Err(BackendError::RateLimited {
                     retry_after_secs: 60
                 }),
                 "HTTP {status}"
@@ -489,7 +500,7 @@ mod tests {
         .await;
         assert!(!matches!(
             t.execute(request()).await,
-            Err(GithubError::RateLimited { .. })
+            Err(BackendError::RateLimited { .. })
         ));
     }
 

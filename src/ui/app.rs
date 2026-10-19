@@ -1,4 +1,4 @@
-use crate::github::GithubError;
+use crate::error::BackendError;
 use crate::model::*;
 use crate::store::{BoardSnapshot, Store, StoreUpdate, ViewList};
 use crate::sync::{SyncEvent, SyncTask, store_update};
@@ -195,18 +195,36 @@ pub(crate) fn task_words(task: &SyncTask) -> &'static str {
 }
 
 /// The setup screen text for errors the user has to fix outside the app.
-pub fn setup_message(error: &GithubError) -> Option<String> {
+pub fn setup_message(error: &BackendError) -> Option<String> {
+    use crate::model::Provider::{Github, Linear};
     match error {
-        GithubError::NoToken => Some(
+        BackendError::NoCredentials { provider: Github } => Some(
             "No GitHub token found.\n\nRun:  gh auth login\nor set GH_TOKEN, then press r.".into(),
         ),
-        GithubError::Unauthorized => {
+        BackendError::Unauthorized { provider: Github } => {
             Some("GitHub rejected the token.\n\nRun:  gh auth login\nthen press r.".into())
         }
-        GithubError::InsufficientScopes { missing } => Some(format!(
+        BackendError::MissingPermission {
+            provider: Github,
+            needed,
+        } => Some(format!(
             "The token is missing the {} scope.\n\nRun:  gh auth refresh -s project\n(add -s repo for private repositories), then press r.",
-            missing.join(", ")
+            needed.join(", ")
         )),
+        BackendError::NoCredentials { provider: Linear } => Some(
+            "No Linear API key found.\n\nCreate a personal API key in Linear\n(Settings → Security & access → Personal API keys),\nthen set LINEAR_API_KEY or linear_api_key_command, and press r."
+                .into(),
+        ),
+        BackendError::Unauthorized { provider: Linear } => Some(
+            "Linear rejected the API key.\n\nCreate a new personal API key in Linear's settings, then press r."
+                .into(),
+        ),
+        BackendError::MissingPermission {
+            provider: Linear, ..
+        } => Some(
+            "Linear refused the request: the API key cannot see this board.\n\nUse a key from the board's workspace, then press r."
+                .into(),
+        ),
         _ => None,
     }
 }
@@ -1605,7 +1623,7 @@ mod tests {
         );
         a.on_sync(SyncEvent::Failed {
             task: SyncTask::Incremental,
-            error: GithubError::Network("offline".into()),
+            error: BackendError::Network("offline".into()),
         });
         assert!(
             a.status
@@ -1617,12 +1635,59 @@ mod tests {
     }
 
     #[test]
+    fn github_setup_texts_are_unchanged() {
+        let gh = Provider::Github;
+        assert_eq!(
+            setup_message(&BackendError::NoCredentials { provider: gh }).unwrap(),
+            "No GitHub token found.\n\nRun:  gh auth login\nor set GH_TOKEN, then press r."
+        );
+        assert_eq!(
+            setup_message(&BackendError::Unauthorized { provider: gh }).unwrap(),
+            "GitHub rejected the token.\n\nRun:  gh auth login\nthen press r."
+        );
+        assert!(
+            setup_message(&BackendError::MissingPermission {
+                provider: gh,
+                needed: vec!["project".into()],
+            })
+            .unwrap()
+            .contains("gh auth refresh -s project")
+        );
+    }
+
+    #[test]
+    fn linear_setup_texts_say_where_a_key_comes_from() {
+        let ln = Provider::Linear;
+        let missing = setup_message(&BackendError::NoCredentials { provider: ln }).unwrap();
+        assert!(missing.contains("No Linear API key found"), "{missing}");
+        assert!(
+            missing.contains("Settings → Security & access"),
+            "{missing}"
+        );
+        assert!(missing.contains("LINEAR_API_KEY"), "{missing}");
+        for e in [
+            BackendError::NoCredentials { provider: ln },
+            BackendError::Unauthorized { provider: ln },
+            BackendError::MissingPermission {
+                provider: ln,
+                needed: vec![],
+            },
+        ] {
+            let text = setup_message(&e).unwrap();
+            assert!(!text.contains("gh "), "{text}");
+            assert!(text.ends_with("press r."), "{text}");
+        }
+        assert_eq!(setup_message(&BackendError::Network("x".into())), None);
+    }
+
+    #[test]
     fn auth_failures_switch_to_the_setup_screen() {
         let mut a = app();
         a.on_sync(SyncEvent::Failed {
             task: SyncTask::FullLoad,
-            error: GithubError::InsufficientScopes {
-                missing: vec!["read:project".into()],
+            error: BackendError::MissingPermission {
+                provider: Provider::Github,
+                needed: vec!["read:project".into()],
             },
         });
         assert_eq!(a.mode, Mode::Setup);
@@ -1710,7 +1775,9 @@ mod tests {
         let mut a = app();
         a.on_sync(SyncEvent::Failed {
             task: SyncTask::FullLoad,
-            error: GithubError::NoToken,
+            error: BackendError::NoCredentials {
+                provider: Provider::Github,
+            },
         });
         assert!(a.handle_key(code(KeyCode::Esc)).is_empty());
         assert!(!a.quit);
@@ -1729,7 +1796,7 @@ mod tests {
         assert!(a.status.loading.is_some());
         a.on_sync(SyncEvent::Failed {
             task: SyncTask::FullLoad,
-            error: GithubError::Network("offline".into()),
+            error: BackendError::Network("offline".into()),
         });
         assert!(a.status.loading.is_none());
         assert!(a.status.error.is_some());
@@ -1816,7 +1883,7 @@ mod tests {
         assert!(a.handle_key(key('P')).is_empty(), "already loading");
         a.on_sync(SyncEvent::Failed {
             task: SyncTask::Detail(ItemId::new("a")),
-            error: GithubError::Network("offline".into()),
+            error: BackendError::Network("offline".into()),
         });
         assert_eq!(a.handle_key(key('P')), vec![older]);
     }

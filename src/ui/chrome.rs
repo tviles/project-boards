@@ -1337,7 +1337,7 @@ mod tests {
         );
         a.on_sync(crate::sync::SyncEvent::OpDone {
             id: 1,
-            result: Err(crate::github::GithubError::Network(
+            result: Err(crate::error::BackendError::Network(
                 "connection reset".into(),
             )),
         });

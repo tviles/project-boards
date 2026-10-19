@@ -11,5 +11,5 @@ pub mod record;
 pub mod token;
 pub mod transport;
 
+pub use crate::error::{BackendError, GraphqlErrorEntry};
 pub use client::Github;
-pub use error::{GithubError, GraphqlErrorEntry};

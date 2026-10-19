@@ -201,13 +201,13 @@ pub fn ago(elapsed: std::time::Duration) -> String {
 }
 
 /// GitHub's own words for a failure; other errors as their message.
-pub fn error_message(error: &GithubError) -> String {
+pub fn error_message(error: &BackendError) -> String {
     crate::ui::text::sanitize(&raw_error_message(error))
 }
 
-fn raw_error_message(error: &GithubError) -> String {
+fn raw_error_message(error: &BackendError) -> String {
     match error {
-        GithubError::Graphql(entries) => {
+        BackendError::Api(entries) => {
             let messages: Vec<&str> = entries
                 .iter()
                 .map(|e| e.message.trim())
@@ -376,7 +376,7 @@ impl App {
     }
 
     /// Records a failed lookup where its popover shows it. False for other failures.
-    pub(super) fn lookup_failed(&mut self, task: &SyncTask, error: &GithubError) -> bool {
+    pub(super) fn lookup_failed(&mut self, task: &SyncTask, error: &BackendError) -> bool {
         let message = format!("{}: {}", task_words(task), error_message(error));
         match task {
             SyncTask::Candidates(repo) => {
@@ -1247,7 +1247,7 @@ impl App {
     pub(crate) fn settle(
         &mut self,
         id: OpId,
-        result: Result<Confirmed, GithubError>,
+        result: Result<Confirmed, BackendError>,
     ) -> Vec<Command> {
         let kind = self.pending_kinds.remove(&id);
         let pending = self
@@ -1308,7 +1308,7 @@ impl App {
                 // draft, issue or comment may exist.
                 let lost = pending.as_ref().filter(|op| {
                     not_safe_to_resend(op)
-                        && matches!(error, GithubError::Network(_) | GithubError::Decode(_))
+                        && matches!(error, BackendError::Network(_) | BackendError::Decode(_))
                 });
                 let may_exist = lost.is_some();
                 let message = match lost {
@@ -1324,7 +1324,7 @@ impl App {
     }
 
     /// "Added 'T', but a field was not set: Status (reason)", naming every refused preset.
-    fn refused_presets(&self, item: &Item, refused: &[(FieldId, GithubError)]) -> String {
+    fn refused_presets(&self, item: &Item, refused: &[(FieldId, BackendError)]) -> String {
         let named: Vec<String> = refused
             .iter()
             .map(|(field, e)| {
@@ -1348,8 +1348,12 @@ impl App {
 
     /// GitHub refused an edit for a missing scope: later edits that need it are blocked with
     /// the fix instead of failing one by one.
-    fn record_refused_scopes(&mut self, error: &GithubError) {
-        if let GithubError::InsufficientScopes { missing } = error {
+    fn record_refused_scopes(&mut self, error: &BackendError) {
+        if let BackendError::MissingPermission {
+            provider: Provider::Github,
+            needed: missing,
+        } = error
+        {
             // GitHub names one of `repo` / `public_repo`, but either satisfies the write,
             // and `caps::check` blocks only when all of them are refused, so a refused repo
             // scope refuses both.
@@ -1768,7 +1772,7 @@ mod tests {
         assert!(a.need_candidates(&repo).is_empty(), "already loading");
         a.on_sync(SyncEvent::Failed {
             task: crate::sync::SyncTask::Candidates(repo.clone()),
-            error: GithubError::Network("offline".into()),
+            error: BackendError::Network("offline".into()),
         });
         assert!(
             matches!(a.candidates.get(&repo), Some(Lookup::Failed(m)) if m.contains("offline"))
@@ -1835,13 +1839,13 @@ mod tests {
         a.start_search("two", scope);
         a.on_sync(SyncEvent::Failed {
             task: crate::sync::SyncTask::Search("one".into()),
-            error: GithubError::Network("offline".into()),
+            error: BackendError::Network("offline".into()),
         });
         assert!(matches!(&a.content_search, Some((q, Lookup::Loading)) if q == "two"));
         assert_eq!(a.status.error, None);
         a.on_sync(SyncEvent::Failed {
             task: crate::sync::SyncTask::Search("two".into()),
-            error: GithubError::Network("offline".into()),
+            error: BackendError::Network("offline".into()),
         });
         assert!(matches!(&a.content_search, Some((_, Lookup::Failed(_)))));
     }
@@ -1861,7 +1865,9 @@ mod tests {
         a.need_candidates(&repo);
         a.on_sync(SyncEvent::Failed {
             task: crate::sync::SyncTask::Candidates(repo.clone()),
-            error: GithubError::NoToken,
+            error: BackendError::NoCredentials {
+                provider: Provider::Github,
+            },
         });
         assert_eq!(
             a.need_candidates(&repo),
@@ -1954,7 +1960,7 @@ mod tests {
     fn a_failed_edit_rolls_back_and_shows_githubs_message() {
         let mut a = test_app();
         a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
-        let error = GithubError::Graphql(vec![GraphqlErrorEntry {
+        let error = BackendError::Api(vec![GraphqlErrorEntry {
             message: "The field is archived".into(),
             kind: None,
         }]);
@@ -1980,8 +1986,9 @@ mod tests {
     fn a_refused_scope_blocks_later_edits_with_the_fix() {
         let mut a = test_app();
         a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
-        let error = GithubError::InsufficientScopes {
-            missing: vec!["project".into()],
+        let error = BackendError::MissingPermission {
+            provider: Provider::Github,
+            needed: vec!["project".into()],
         };
         a.on_sync(SyncEvent::OpDone {
             id: 1,
@@ -2050,9 +2057,10 @@ mod tests {
         );
     }
 
-    fn refused(scope: &str) -> GithubError {
-        GithubError::InsufficientScopes {
-            missing: vec![scope.into()],
+    fn refused(scope: &str) -> BackendError {
+        BackendError::MissingPermission {
+            provider: Provider::Github,
+            needed: vec![scope.into()],
         }
     }
 
@@ -2164,7 +2172,9 @@ mod tests {
         a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
         a.on_sync(SyncEvent::OpDone {
             id: 99,
-            result: Err(GithubError::Unauthorized),
+            result: Err(BackendError::Unauthorized {
+                provider: Provider::Github,
+            }),
         });
         assert_eq!(
             (a.pending_count(), a.errors.len(), a.status.error.clone()),
@@ -2177,7 +2187,9 @@ mod tests {
         let before = status(a.store.confirmed(), "a");
         a.on_sync(SyncEvent::OpDone {
             id: 1,
-            result: Err(GithubError::Unauthorized),
+            result: Err(BackendError::Unauthorized {
+                provider: Provider::Github,
+            }),
         });
         a.on_sync(SyncEvent::OpDone {
             id: 1,
@@ -2196,7 +2208,7 @@ mod tests {
         a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
         a.store
             .apply(crate::store::StoreUpdate::ReplaceItems(Vec::new()));
-        let error = GithubError::Graphql(vec![GraphqlErrorEntry {
+        let error = BackendError::Api(vec![GraphqlErrorEntry {
             message: "Gone".into(),
             kind: None,
         }]);
@@ -2219,7 +2231,9 @@ mod tests {
             let result = if ok {
                 Ok(Confirmed::Applied)
             } else {
-                Err(GithubError::Unauthorized)
+                Err(BackendError::Unauthorized {
+                    provider: Provider::Github,
+                })
             };
             a.on_sync(SyncEvent::OpDone { id: 1, result });
             assert_eq!(a.selected_item().unwrap().id, sel, "ok={ok}");
@@ -2255,9 +2269,9 @@ mod tests {
 
     #[test]
     fn a_graphql_error_without_messages_has_no_dangling_colon() {
-        let none = GithubError::Graphql(vec![]);
+        let none = BackendError::Api(vec![]);
         assert_eq!(error_message(&none), "GitHub returned an error");
-        let blank = GithubError::Graphql(vec![GraphqlErrorEntry {
+        let blank = BackendError::Api(vec![GraphqlErrorEntry {
             message: " ".into(),
             kind: None,
         }]);
@@ -3062,7 +3076,7 @@ mod tests {
     }
 
     fn fail(a: &mut App, id: OpId, message: &str) {
-        let error = GithubError::Graphql(vec![GraphqlErrorEntry {
+        let error = BackendError::Api(vec![GraphqlErrorEntry {
             message: message.into(),
             kind: None,
         }]);
@@ -3122,7 +3136,9 @@ mod tests {
         a.submit(OpKind::Move, set_status("a", "o_done", "Done"));
         a.on_sync(SyncEvent::Failed {
             task: SyncTask::FullLoad,
-            error: GithubError::Unauthorized,
+            error: BackendError::Unauthorized {
+                provider: Provider::Github,
+            },
         });
         assert_eq!(a.mode, Mode::Setup);
         assert!(a.handle_key(key('q')).is_empty());
@@ -3318,7 +3334,7 @@ mod tests {
 
     #[test]
     fn messages_lose_newlines_and_control_characters() {
-        let error = GithubError::Graphql(vec![GraphqlErrorEntry {
+        let error = BackendError::Api(vec![GraphqlErrorEntry {
             message: "bad\nthing\u{7}here".into(),
             kind: None,
         }]);
@@ -3414,7 +3430,7 @@ mod tests {
                 item,
                 refused: vec![(
                     FieldId::new("F_status"),
-                    GithubError::Network("reset".into()),
+                    BackendError::Network("reset".into()),
                 )],
             }),
         });
@@ -3461,7 +3477,7 @@ mod tests {
             id: 1,
             result: Ok(Confirmed::NotAdded {
                 issue: "I_new".into(),
-                error: GithubError::Network("reset".into()),
+                error: BackendError::Network("reset".into()),
             }),
         });
         assert_eq!(a.pending_count(), 0);
@@ -3593,7 +3609,7 @@ mod tests {
                     (FieldId::new("F_status"), refused("project")),
                     (
                         FieldId::new("F_notes"),
-                        GithubError::Network("reset".into()),
+                        BackendError::Network("reset".into()),
                     ),
                 ],
             }),
@@ -3614,8 +3630,8 @@ mod tests {
     fn a_new_item_whose_answer_was_lost_may_exist_and_r_refuses() {
         for (op, needs_repo) in [(new_issue("local:1"), true), (new_draft("local:1"), false)] {
             for error in [
-                GithubError::Network("reset".into()),
-                GithubError::Decode("createIssue returned no issue id".into()),
+                BackendError::Network("reset".into()),
+                BackendError::Decode("createIssue returned no issue id".into()),
             ] {
                 let mut a = test_app();
                 a.submit_new(op.clone(), needs_repo);
@@ -3641,8 +3657,8 @@ mod tests {
     #[test]
     fn a_comment_whose_answer_was_lost_may_be_posted_and_r_refuses() {
         for error in [
-            GithubError::Network("reset".into()),
-            GithubError::Decode("addComment returned no comment".into()),
+            BackendError::Network("reset".into()),
+            BackendError::Decode("addComment returned no comment".into()),
         ] {
             let mut a = test_app();
             assert_eq!(
@@ -3729,7 +3745,7 @@ mod tests {
         );
         b.on_sync(SyncEvent::OpDone {
             id: 1,
-            result: Err(GithubError::Network("reset".into())),
+            result: Err(BackendError::Network("reset".into())),
         });
         assert!(
             !b.errors[0].may_exist,
@@ -3980,7 +3996,7 @@ mod tests {
         );
         a.on_sync(SyncEvent::Failed {
             task: crate::sync::SyncTask::Detail(ItemId::new("a")),
-            error: GithubError::Network("offline".into()),
+            error: BackendError::Network("offline".into()),
         });
         assert_eq!(
             a.edit_body(),
@@ -4615,7 +4631,7 @@ mod tests {
         // Once the convert settles, content edits are offered again.
         a.on_sync(SyncEvent::OpDone {
             id: 1,
-            result: Err(GithubError::Graphql(vec![])),
+            result: Err(BackendError::Api(vec![])),
         });
         let item = a.item(&draft).unwrap().clone();
         assert_eq!(a.check_here(OpKind::Title, &item), Ok(()));

@@ -1,6 +1,7 @@
 //! Carries an op to GitHub: which mutation, with which ids, and what came back.
 
-use crate::github::{Github, GithubError};
+use crate::error::BackendError;
+use crate::github::Github;
 use crate::model::{ContentId, FieldId, FieldValue, ItemId, ProjectId};
 use crate::ops::{Confirmed, NewItem, Op};
 
@@ -20,7 +21,7 @@ async fn create(
     temp: &ItemId,
     new: &NewItem,
     presets: &[(FieldId, FieldValue)],
-) -> Result<Confirmed, GithubError> {
+) -> Result<Confirmed, BackendError> {
     let mut item = match new {
         NewItem::Draft { title, body } => gh.add_draft_issue(project, title, body).await?,
         NewItem::Issue { repo, title, body } => {
@@ -48,7 +49,7 @@ async fn create(
 
 /// Sends `op` and reports what GitHub confirmed. Ops on the same item must not overlap; the
 /// queue (ops::queue) makes sure of that.
-pub async fn send(gh: &Github, project: &ProjectId, op: &Op) -> Result<Confirmed, GithubError> {
+pub async fn send(gh: &Github, project: &ProjectId, op: &Op) -> Result<Confirmed, BackendError> {
     match op {
         Op::SetField { item, field, value } => gh
             .set_field_value(project, item, field, value)
@@ -422,7 +423,7 @@ mod tests {
             "SetSingleSelectValue",
             json!({"updateProjectV2ItemFieldValue": {"projectV2Item": item_json()}}),
         );
-        t.push_error("SetTextValue", GithubError::Network("reset".into()));
+        t.push_error("SetTextValue", BackendError::Network("reset".into()));
         let gh = Github::new(t.clone());
         let op = Op::Create {
             temp: ItemId::new("local:1"),
@@ -454,7 +455,7 @@ mod tests {
                 assert_eq!((temp.as_str(), item.id.as_str()), ("local:1", "PVTI_1"));
                 assert!(matches!(
                     &refused[..],
-                    [(field, GithubError::Network(_))] if field.as_str() == "F_notes"
+                    [(field, BackendError::Network(_))] if field.as_str() == "F_notes"
                 ));
             }
             other => panic!("expected Created, got {other:?}"),
@@ -589,8 +590,8 @@ mod tests {
     #[tokio::test]
     async fn an_issue_created_but_not_added_is_reported_with_its_id_whatever_the_error() {
         for error in [
-            GithubError::Network("reset".into()),
-            GithubError::RateLimited {
+            BackendError::Network("reset".into()),
+            BackendError::RateLimited {
                 retry_after_secs: 30,
             },
         ] {
@@ -620,14 +621,14 @@ mod tests {
     #[tokio::test]
     async fn a_failed_create_or_add_is_an_error_with_nothing_created() {
         let t = Arc::new(FixtureTransport::new());
-        t.push_error("CreateIssue", GithubError::Network("reset".into()));
+        t.push_error("CreateIssue", BackendError::Network("reset".into()));
         let gh = Github::new(t.clone());
         assert_eq!(
             send(&gh, &ProjectId::new("P"), &new_issue_op()).await,
-            Err(GithubError::Network("reset".into()))
+            Err(BackendError::Network("reset".into()))
         );
         let t = Arc::new(FixtureTransport::new());
-        t.push_error("AddDraftIssue", GithubError::Network("reset".into()));
+        t.push_error("AddDraftIssue", BackendError::Network("reset".into()));
         let gh = Github::new(t.clone());
         let draft = Op::Create {
             temp: ItemId::new("local:1"),
@@ -650,15 +651,16 @@ mod tests {
         );
         t.push_error(
             "SetSingleSelectValue",
-            GithubError::InsufficientScopes {
-                missing: vec!["project".into()],
+            BackendError::MissingPermission {
+                provider: crate::model::Provider::Github,
+                needed: vec!["project".into()],
             },
         );
         t.push(
             "SetTextValue",
             json!({"updateProjectV2ItemFieldValue": {"projectV2Item": item_json()}}),
         );
-        t.push_error("SetNumberValue", GithubError::Network("reset".into()));
+        t.push_error("SetNumberValue", BackendError::Network("reset".into()));
         let gh = Github::new(t.clone());
         let op = Op::Create {
             temp: ItemId::new("local:1"),
@@ -686,7 +688,7 @@ mod tests {
         assert_eq!(fields, ["F_status", "F_size"]);
         assert!(matches!(
             refused[0].1,
-            GithubError::InsufficientScopes { .. }
+            BackendError::MissingPermission { .. }
         ));
         assert_eq!(t.requests().len(), 4, "the draft and all three presets");
     }

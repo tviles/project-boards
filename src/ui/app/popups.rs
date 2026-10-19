@@ -2237,7 +2237,7 @@ mod tests {
         a.handle_key(key('a'));
         a.on_sync(SyncEvent::Failed {
             task: crate::sync::SyncTask::Candidates(repo()),
-            error: crate::github::GithubError::Network("offline".into()),
+            error: crate::error::BackendError::Network("offline".into()),
         });
         let Some(Popup::Assignees { select, .. }) = &a.popup else {
             panic!("assignees")
@@ -2919,7 +2919,7 @@ mod tests {
         created.id = ItemId::new("PVTI_new");
         let refused = vec![(
             FieldId::new("F_status"),
-            crate::github::GithubError::Network("reset".into()),
+            crate::error::BackendError::Network("reset".into()),
         )];
         a.on_sync(SyncEvent::OpDone {
             id: 1,
@@ -3284,7 +3284,7 @@ mod tests {
         );
         a.on_sync(SyncEvent::Failed {
             task: crate::sync::SyncTask::Search("crash".into()),
-            error: crate::github::GithubError::Network("offline".into()),
+            error: crate::error::BackendError::Network("offline".into()),
         });
         let Some(Popup::Search { error, loading, .. }) = &a.popup else {
             panic!("search")
@@ -3315,7 +3315,7 @@ mod tests {
         search_popup(&mut a, "crash");
         a.on_sync(SyncEvent::Failed {
             task: crate::sync::SyncTask::Search("crash".into()),
-            error: crate::github::GithubError::Network("offline".into()),
+            error: crate::error::BackendError::Network("offline".into()),
         });
         let cmds = a.handle_key(code(KeyCode::Enter));
         assert!(
@@ -3355,7 +3355,7 @@ mod tests {
         a.handle_key(code(KeyCode::Enter));
         a.on_sync(SyncEvent::Failed {
             task: crate::sync::SyncTask::Search("crashx".into()),
-            error: crate::github::GithubError::Network("offline".into()),
+            error: crate::error::BackendError::Network("offline".into()),
         });
         a.handle_key(key('y'));
         let Some(Popup::Search { error, .. }) = &a.popup else {

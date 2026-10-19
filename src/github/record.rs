@@ -1,6 +1,6 @@
 //! Wraps a transport and writes every successful response to disk, for PB_RECORD=1 runs.
 
-use crate::github::GithubError;
+use crate::error::BackendError;
 use crate::github::transport::{BoxFuture, GraphqlRequest, GraphqlResponse, Transport};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -26,7 +26,7 @@ impl Transport for RecordingTransport {
     fn execute(
         &self,
         request: GraphqlRequest,
-    ) -> BoxFuture<'_, Result<GraphqlResponse, GithubError>> {
+    ) -> BoxFuture<'_, Result<GraphqlResponse, BackendError>> {
         Box::pin(async move {
             let operation = request.operation_name.clone();
             let response = self.inner.execute(request).await?;
@@ -36,11 +36,11 @@ impl Transport for RecordingTransport {
                 *n += 1;
                 *n
             };
-            std::fs::create_dir_all(&self.dir).map_err(|e| GithubError::Network(e.to_string()))?;
+            std::fs::create_dir_all(&self.dir).map_err(|e| BackendError::Network(e.to_string()))?;
             let body = serde_json::json!({ "data": response.data });
             let path = self.dir.join(format!("{operation}__{n}.json"));
             std::fs::write(&path, serde_json::to_string_pretty(&body).unwrap())
-                .map_err(|e| GithubError::Network(e.to_string()))?;
+                .map_err(|e| BackendError::Network(e.to_string()))?;
             Ok(response)
         })
     }

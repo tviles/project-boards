@@ -1,4 +1,4 @@
-use crate::github::GithubError;
+use crate::error::BackendError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenSource {
@@ -40,7 +40,7 @@ impl std::fmt::Debug for Token {
 pub fn resolve_token(
     env: impl Fn(&str) -> Option<String>,
     gh_auth_token: impl FnOnce() -> Option<String>,
-) -> Result<Token, GithubError> {
+) -> Result<Token, BackendError> {
     let clean = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     if let Some(value) = clean(env("GH_TOKEN")) {
         return Ok(Token {
@@ -60,12 +60,14 @@ pub fn resolve_token(
             source: TokenSource::GhCli,
         });
     }
-    Err(GithubError::NoToken)
+    Err(BackendError::NoCredentials {
+        provider: crate::model::Provider::Github,
+    })
 }
 
 /// `gh_user` (config) picks the `gh` account for the `gh auth token` fallback; the
 /// environment variables still win.
-pub fn resolve_token_from_system(gh_user: Option<&str>) -> Result<Token, GithubError> {
+pub fn resolve_token_from_system(gh_user: Option<&str>) -> Result<Token, BackendError> {
     let token = resolve_token(
         |key| std::env::var(key).ok(),
         || {
@@ -121,7 +123,9 @@ mod tests {
     fn nothing_found_is_no_token() {
         assert_eq!(
             resolve_token(env_of(&[]), || None),
-            Err(GithubError::NoToken)
+            Err(BackendError::NoCredentials {
+                provider: crate::model::Provider::Github
+            })
         );
     }
 
