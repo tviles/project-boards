@@ -266,6 +266,7 @@ fn content_fields_from_wire(c: &Value) -> ContentFields {
             number: number as u32,
             title: str_of(&parent["title"]),
             state: ContentState::from_api(parent["state"].as_str().unwrap_or("")),
+            key: None,
         }),
         sub_issues: subs["total"].as_u64().map(|total| SubIssuesSummary {
             total: total as u32,
@@ -365,6 +366,7 @@ fn linked(v: &Value) -> Option<LinkedRef> {
         number: v["number"].as_u64()? as u32,
         title: str_of(&v["title"]),
         state: str_of(&v["state"]),
+        key: None,
     })
 }
 
@@ -647,7 +649,8 @@ pub(crate) mod tests {
             Some(ParentIssue {
                 number: 7,
                 title: "Epic".into(),
-                state: ContentState::Closed
+                state: ContentState::Closed,
+                key: None,
             })
         );
         assert_eq!(

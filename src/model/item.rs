@@ -139,6 +139,17 @@ pub struct ParentIssue {
     pub number: u32,
     pub title: String,
     pub state: ContentState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+impl ParentIssue {
+    /// `ENG-123`, else `#12`.
+    pub fn label(&self) -> String {
+        self.key
+            .clone()
+            .unwrap_or_else(|| format!("#{}", self.number))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -423,6 +434,7 @@ pub(crate) mod tests {
                 number: 3,
                 title: "Epic".into(),
                 state: ContentState::Open,
+                key: None,
             }),
             sub_issues: Some(SubIssuesSummary {
                 total: 4,

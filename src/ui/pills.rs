@@ -494,6 +494,7 @@ mod tests {
             number: 3,
             title: "Epic".into(),
             state: ContentState::Closed,
+            key: None,
         });
         item.content_fields.sub_issues = Some(SubIssuesSummary {
             total: 4,
@@ -602,6 +603,7 @@ mod tests {
             number: 3,
             title: "feat(widgets): redesign the widget list".into(),
             state: ContentState::Open,
+            key: None,
         });
         let pills = vec![
             Pill::plain("⑂ #1", Style::default()),

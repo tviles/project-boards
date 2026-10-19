@@ -12,6 +12,17 @@ pub struct LinkedRef {
     pub number: u32,
     pub title: String,
     pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+impl LinkedRef {
+    /// `ENG-123`, else `#12`.
+    pub fn label(&self) -> String {
+        self.key
+            .clone()
+            .unwrap_or_else(|| format!("#{}", self.number))
+    }
 }
 
 /// Everything the item detail shows beyond what the board already has.

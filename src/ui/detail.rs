@@ -209,11 +209,7 @@ pub fn build_doc(
         truncate_to_width(item.title(), w),
         theme.heading(),
     )];
-    let mut meta = vec![match item.number() {
-        Some(n) => format!("#{n}"),
-        None if item.is_placeholder() => "new".to_string(),
-        None => String::new(),
-    }];
+    let mut meta = vec![crate::ui::board::item_label(item).unwrap_or_default()];
     if let Some(r) = item.reference() {
         meta.push(r.container.clone());
     }
@@ -228,7 +224,7 @@ pub fn build_doc(
     ));
     if let Some(parent) = state.detail.as_ref().and_then(|d| d.parent.as_ref()) {
         lines.push(Line::from(truncate_to_width(
-            &format!("Parent: #{} {}", parent.number, parent.title),
+            &format!("Parent: {} {}", parent.label(), parent.title),
             w,
         )));
     }
@@ -283,7 +279,7 @@ pub fn build_doc(
         for s in &detail.sub_issues {
             let mark = if s.state == "CLOSED" { "☑" } else { "☐" };
             lines.push(Line::from(truncate_to_width(
-                &format!("{mark} #{} {}", s.number, s.title),
+                &format!("{mark} {} {}", s.label(), s.title),
                 w,
             )));
         }
@@ -447,11 +443,13 @@ mod tests {
                 number: 4,
                 title: "Child".into(),
                 state: "CLOSED".into(),
+                key: None,
             }],
             parent: Some(LinkedRef {
                 number: 3,
                 title: "Epic".into(),
                 state: "OPEN".into(),
+                key: None,
             }),
             issue_type: Some("Bug".into()),
             linked_prs: vec![],

@@ -1604,12 +1604,14 @@ impl App {
             return Vec::new();
         };
         let title = crate::ui::text::truncate_to_width(item.title(), 40);
-        let question = match (&item.content, item.number()) {
+        let question = match (&item.content, item.reference().and_then(ContentRef::label)) {
             (ItemContent::Draft { .. }, _) => {
                 format!("Remove the draft '{title}' from the project? The draft is deleted. (y/n)")
             }
-            (_, Some(n)) => {
-                format!("Remove #{n} '{title}' from the project? It stays in its repository. (y/n)")
+            (_, Some(label)) => {
+                format!(
+                    "Remove {label} '{title}' from the project? It stays in its repository. (y/n)"
+                )
             }
             (_, None) => format!("Remove '{title}' from the project? (y/n)"),
         };
@@ -1689,8 +1691,8 @@ impl App {
             return Vec::new();
         };
         let title = crate::ui::text::truncate_to_width(item.title(), 40);
-        let reference = match item.number() {
-            Some(n) => format!("#{n} '{title}'"),
+        let reference = match item.reference().and_then(ContentRef::label) {
+            Some(label) => format!("{label} '{title}'"),
             None => format!("'{title}'"),
         };
         match (kind, &content) {
