@@ -1,11 +1,14 @@
 //! `project-boards doctor`: checks everything the board needs and says how to fix it.
 
+use crate::error::BackendError;
 use crate::github::Github;
 use crate::github::token::resolve_token_from_system;
 use crate::github::transport::HttpTransport;
 use crate::herdr::cli::{HerdrCli, ProcessHerdr, action_cwd};
 use crate::herdr::env::PluginEnv;
 use crate::herdr::repo::detect_repo;
+use crate::linear::client::{Linear, LinearViewer};
+use crate::linear::token::{ApiKey, resolve_key_from_system};
 use crate::model::RepoSlug;
 use crate::ui::keymap::{KeySpec, Keymap};
 use std::fmt;
@@ -137,28 +140,76 @@ pub fn repo_check(cwd: Option<&str>, detect: impl Fn(&Path) -> Option<RepoSlug>)
     }
 }
 
+/// The failed GitHub token check: a failure only when GitHub is the sole provider.
+fn github_token_failure(e: &BackendError, linear_configured: bool) -> Check {
+    Check {
+        level: if linear_configured {
+            Level::Warn
+        } else {
+            Level::Fail
+        },
+        name: "token",
+        detail: e.to_string(),
+    }
+}
+
+/// The Linear key and workspace. A missing key is fine: Linear is optional.
+pub fn linear_checks(
+    key: Result<ApiKey, BackendError>,
+    viewer: impl FnOnce(&ApiKey) -> Result<LinearViewer, BackendError>,
+) -> Vec<Check> {
+    let Ok(key) = key else {
+        return vec![Check {
+            level: Level::Ok,
+            name: "linear",
+            detail: "not configured (optional)".into(),
+        }];
+    };
+    let mut checks = vec![Check {
+        level: Level::Ok,
+        name: "linear key",
+        detail: format!("from {}", key.source.describe()),
+    }];
+    checks.push(match viewer(&key) {
+        Ok(v) => {
+            let budget = match (v.requests_remaining, v.requests_limit) {
+                (Some(left), Some(limit)) => format!("{left} of {limit} requests left"),
+                _ => "requests left unknown".into(),
+            };
+            Check {
+                level: Level::Ok,
+                name: "linear",
+                detail: format!("workspace {}; {budget}", v.url_key),
+            }
+        }
+        Err(e) => Check {
+            level: Level::Fail,
+            name: "linear",
+            detail: e.to_string(),
+        },
+    });
+    checks
+}
+
 pub fn run_doctor(notify: bool) -> anyhow::Result<bool> {
     let env = PluginEnv::from_system();
     let mut checks = Vec::new();
 
     let (config, warnings) = crate::config::load_config(&env.config_dir);
     let token = resolve_token_from_system(config.gh_user.as_deref());
+    let linear_key = resolve_key_from_system(config.linear_api_key_command.as_deref());
     match &token {
         Ok(t) => checks.push(Check {
             level: Level::Ok,
             name: "token",
             detail: format!("from {}", t.source.describe()),
         }),
-        Err(e) => checks.push(Check {
-            level: Level::Fail,
-            name: "token",
-            detail: e.to_string(),
-        }),
+        Err(e) => checks.push(github_token_failure(e, linear_key.is_ok())),
     }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     if let Ok(t) = token {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
         let gh = Github::new(Arc::new(HttpTransport::new(t.value)));
         match runtime.block_on(gh.viewer()) {
             Ok(v) => {
@@ -176,6 +227,13 @@ pub fn run_doctor(notify: bool) -> anyhow::Result<bool> {
             }),
         }
     }
+
+    checks.extend(linear_checks(linear_key, |key| {
+        let linear = Linear::new(Arc::new(crate::transport::HttpTransport::linear(
+            key.value.clone(),
+        )));
+        runtime.block_on(linear.viewer())
+    }));
 
     let herdr = ProcessHerdr::from_env();
     match herdr.call(&["pane".into(), "list".into()]) {
@@ -260,6 +318,87 @@ pub fn run_doctor(notify: bool) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::BackendError;
+    use crate::linear::client::LinearViewer;
+    use crate::linear::token::{ApiKey, KeySource};
+    use crate::model::Provider;
+
+    fn key() -> ApiKey {
+        ApiKey {
+            value: "lin_api_secret".into(),
+            source: KeySource::LinearApiKeyEnv,
+        }
+    }
+
+    #[test]
+    fn linear_not_configured_is_fine() {
+        let checks = linear_checks(
+            Err(BackendError::NoCredentials {
+                provider: Provider::Linear,
+            }),
+            |_| panic!("no key, no request"),
+        );
+        assert_eq!(
+            checks,
+            vec![Check {
+                level: Level::Ok,
+                name: "linear",
+                detail: "not configured (optional)".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn linear_key_and_workspace_are_reported() {
+        let checks = linear_checks(Ok(key()), |_| {
+            Ok(LinearViewer {
+                url_key: "acme".into(),
+                requests_remaining: Some(4990),
+                requests_limit: Some(5000),
+            })
+        });
+        let lines: Vec<String> = checks.iter().map(|c| c.to_string()).collect();
+        assert_eq!(
+            lines,
+            vec![
+                "✓ linear key: from LINEAR_API_KEY",
+                "✓ linear: workspace acme; 4990 of 5000 requests left"
+            ]
+        );
+        let unknown = linear_checks(Ok(key()), |_| {
+            Ok(LinearViewer {
+                url_key: "acme".into(),
+                requests_remaining: None,
+                requests_limit: None,
+            })
+        });
+        assert_eq!(unknown[1].detail, "workspace acme; requests left unknown");
+        assert!(!lines.join("").contains("lin_api_secret"));
+    }
+
+    #[test]
+    fn a_rejected_linear_key_fails_with_the_linear_fix() {
+        let checks = linear_checks(Ok(key()), |_| {
+            Err(BackendError::Unauthorized {
+                provider: Provider::Linear,
+            })
+        });
+        assert_eq!(checks[0].level, Level::Ok);
+        assert_eq!(checks[1].level, Level::Fail);
+        assert_eq!(checks[1].name, "linear");
+        assert!(checks[1].detail.contains("Linear"));
+        assert!(!checks[1].detail.contains("gh "));
+    }
+
+    #[test]
+    fn github_missing_with_linear_present_only_warns() {
+        let e = BackendError::NoCredentials {
+            provider: Provider::Github,
+        };
+        assert_eq!(github_token_failure(&e, true).level, Level::Warn);
+        assert_eq!(github_token_failure(&e, false).level, Level::Fail);
+        assert_eq!(github_token_failure(&e, true).detail, e.to_string());
+    }
 
     #[test]
     fn repo_check_names_the_repo_of_the_action_directory() {
