@@ -1031,16 +1031,24 @@ impl App {
                 self.status.notes.retain(|n| !n.starts_with("loaded "));
                 if truncated {
                     let loaded = self.snapshot().map(|s| s.items.len()).unwrap_or(0);
-                    self.status
-                        .notes
-                        .push(format!("loaded {loaded} of {total} items (max_items)"));
+                    // Linear has no count: a total of 0 means unknown, shown as `N+`.
+                    let note = if total > loaded {
+                        format!("loaded {loaded} of {total} items (max_items)")
+                    } else {
+                        format!("loaded {loaded}+ items (max_items)")
+                    };
+                    self.status.notes.push(note);
                 }
                 cmds.extend(self.revalidate_view());
             }
-            SyncEvent::ItemsUpdated { items, fetched_at } => {
+            SyncEvent::ItemsUpdated {
+                items,
+                removed,
+                fetched_at,
+            } => {
                 self.store.apply(StoreUpdate::FetchedAt(fetched_at));
                 self.status.error = None;
-                if !items.is_empty() {
+                if !items.is_empty() || !removed.is_empty() {
                     cmds.extend(self.revalidate_view());
                 }
             }
@@ -1833,12 +1841,14 @@ mod tests {
         assert!(
             a.on_sync(SyncEvent::ItemsUpdated {
                 items: vec![],
+                removed: vec![],
                 fetched_at: "t".into()
             })
             .is_empty()
         );
         let changed = SyncEvent::ItemsUpdated {
             items: vec![crate::ui::fixtures::items().remove(0)],
+            removed: vec![],
             fetched_at: "t".into(),
         };
         assert_eq!(a.on_sync(changed), vec![fetch]);

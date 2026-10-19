@@ -194,6 +194,7 @@ impl Syncer {
         }
         self.send(SyncEvent::ItemsUpdated {
             items,
+            removed: vec![],
             fetched_at: started,
         });
         self.send(SyncEvent::Rate(self.backend.rate()));

@@ -489,7 +489,9 @@ impl Controller {
         }
         let persist = match &event {
             SyncEvent::ItemsComplete { .. } | SyncEvent::Hydrated(_) => true,
-            SyncEvent::ItemsUpdated { items, .. } => !items.is_empty(),
+            SyncEvent::ItemsUpdated { items, removed, .. } => {
+                !items.is_empty() || !removed.is_empty()
+            }
             _ => false,
         };
 
@@ -1551,6 +1553,7 @@ mod tests {
             &c,
             SyncEvent::ItemsUpdated {
                 items: vec![],
+                removed: vec![],
                 fetched_at: "2026-10-01T12:00:00Z".into(),
             },
         );
@@ -1931,6 +1934,7 @@ mod tests {
                 generation,
                 event: SyncEvent::ItemsUpdated {
                     items: vec![stale],
+                    removed: vec![],
                     fetched_at: "2026-10-12T00:00:00Z".into(),
                 },
             },

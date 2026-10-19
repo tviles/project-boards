@@ -88,6 +88,8 @@ pub enum SyncEvent {
     },
     ItemsUpdated {
         items: Vec<Item>,
+        /// Items the poll reports gone (Linear archives and deletions); GitHub sends none.
+        removed: Vec<ItemId>,
         fetched_at: String,
     },
     ViewIds {
@@ -143,7 +145,10 @@ pub fn store_update(event: &SyncEvent) -> Option<StoreUpdate> {
             Some(StoreUpdate::UpsertItems(items.clone()))
         }
         SyncEvent::ItemsComplete { items, .. } => Some(StoreUpdate::ReplaceItems(items.clone())),
-        SyncEvent::ItemsUpdated { items, .. } => Some(StoreUpdate::UpsertItems(items.clone())),
+        SyncEvent::ItemsUpdated { items, removed, .. } => Some(StoreUpdate::Polled {
+            upsert: items.clone(),
+            remove: removed.clone(),
+        }),
         SyncEvent::ViewIds { view, list, .. } => Some(StoreUpdate::ViewIds {
             view: view.clone(),
             list: list.clone(),
@@ -421,6 +426,22 @@ mod tests {
             Some("updated:>=2026-10-01")
         );
         assert_eq!(incremental_query(IncrementalMode::Unsupported, since), None);
+    }
+
+    #[test]
+    fn polls_upsert_and_remove() {
+        let event = SyncEvent::ItemsUpdated {
+            items: vec![issue("x", 1, "X")],
+            removed: vec![ItemId::new("y")],
+            fetched_at: "t".into(),
+        };
+        assert_eq!(
+            store_update(&event),
+            Some(StoreUpdate::Polled {
+                upsert: vec![issue("x", 1, "X")],
+                remove: vec![ItemId::new("y")],
+            })
+        );
     }
 
     #[test]

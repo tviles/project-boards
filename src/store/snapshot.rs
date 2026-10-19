@@ -51,6 +51,21 @@ impl BoardSnapshot {
         }
     }
 
+    /// Drops items a poll reports gone, from the item map, the board order and every view list.
+    pub fn remove_items(&mut self, ids: &[ItemId]) {
+        if ids.is_empty() {
+            return;
+        }
+        let gone: std::collections::HashSet<&ItemId> = ids.iter().collect();
+        for id in ids {
+            self.items.remove(id);
+        }
+        self.order.retain(|id| !gone.contains(id));
+        for list in self.views.values_mut() {
+            list.ids.retain(|id| !gone.contains(id));
+        }
+    }
+
     /// Replaces the whole item set after a complete full fetch.
     pub fn replace_items(&mut self, items: Vec<Item>) {
         self.order = items.iter().map(|i| i.id.clone()).collect();
@@ -117,6 +132,32 @@ pub(crate) mod tests {
 
     fn ids(items: &[&Item]) -> Vec<String> {
         items.iter().map(|i| i.id.0.clone()).collect()
+    }
+
+    #[test]
+    fn removed_items_leave_every_list() {
+        let mut s = BoardSnapshot::new(project());
+        s.upsert_items(vec![
+            issue("a", 1, "A"),
+            issue("b", 2, "B"),
+            issue("c", 3, "C"),
+        ]);
+        let list = ViewList {
+            ids: vec![ItemId::new("a"), ItemId::new("b"), ItemId::new("c")],
+            total: 3,
+            truncated: false,
+        };
+        s.set_view_ids(ViewId::new("v1"), list.clone());
+        s.set_view_ids(ViewId::new("v2"), list);
+        s.remove_items(&[ItemId::new("b"), ItemId::new("zzz")]);
+        assert_eq!(ids(&s.all_items()), ["a", "c"]);
+        assert!(!s.items.contains_key(&ItemId::new("b")));
+        for v in ["v1", "v2"] {
+            assert_eq!(
+                s.views[&ViewId::new(v)].ids,
+                [ItemId::new("a"), ItemId::new("c")]
+            );
+        }
     }
 
     #[test]
