@@ -26,7 +26,7 @@ async fn main() {
     let team_b = team_id(&linear, &tb.team_b).await;
     println!("# Linear phase 0 report\n");
     l2_page_cost(&linear, &team_a).await;
-    l3_l4_l5_views(&linear, &team_b).await;
+    l3_l4_l5_views(&linear, &team_b, &tb.project).await;
     l6_errors(&linear).await;
     l1_read_after_write(&linear, &team_a).await;
     l7_archive_and_trash(&linear, &team_a).await;
@@ -44,11 +44,11 @@ async fn post(linear: &Linear, body: &impl serde::Serialize) -> Raw {
 /// Like `post`, but a transport failure becomes an empty status-0 response instead of a panic:
 /// used wherever L1's restore must still run afterwards.
 async fn post_soft(linear: &Linear, body: &impl serde::Serialize) -> Raw {
-    linear.post(body).await.unwrap_or_else(|_| Raw {
+    linear.post(body).await.unwrap_or_else(|e| Raw {
         status: 0,
         headers: vec![],
         body: Value::Null,
-        text: None,
+        text: Some(format!("transport error: {e}")),
     })
 }
 
@@ -85,9 +85,20 @@ fn secs(since: Instant) -> f64 {
     since.elapsed().as_secs_f64()
 }
 
-/// One line of text, cut to 200 characters (an error message or the start of an error page).
+/// One line of text, cut to 200 characters (an error message or the start of an error page),
+/// with anything between `<` and `>` removed so it cannot inject Markdown or HTML.
 fn short(text: &str) -> String {
-    let one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut plain = String::new();
+    let mut in_tag = false;
+    for c in text.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => plain.push(c),
+            _ => {}
+        }
+    }
+    let one: String = plain.split_whitespace().collect::<Vec<_>>().join(" ");
     one.chars().take(200).collect()
 }
 
@@ -106,8 +117,9 @@ fn describe(raw: &Raw) -> String {
     )
 }
 
+/// `Issue.priority` is a Float in the schema.
 fn priority_of(issue: &Value) -> Option<i64> {
-    issue["priority"].as_i64()
+    issue["priority"].as_f64().map(|p| p.round() as i64)
 }
 
 /// The node with `id` in `issues.nodes`, if listed.
@@ -195,7 +207,7 @@ async fn completed_in_view(linear: &Linear, id: &str) -> (usize, usize) {
     (issues.len(), done)
 }
 
-async fn l3_l4_l5_views(linear: &Linear, team_b: &str) {
+async fn l3_l4_l5_views(linear: &Linear, team_b: &str, project: &str) {
     println!("## L3/L4/L5: custom views\n");
     let raw = post(linear, &ProbeViews::build_query(probe_views::Variables {})).await;
     let views = nodes(&raw.data()["customViews"]);
@@ -206,9 +218,9 @@ async fn l3_l4_l5_views(linear: &Linear, team_b: &str) {
         codes(&raw)
     );
     println!(
-        "| view | team | layout | issueGrouping | issueSubGrouping | viewOrdering | viewOrderingDirection | showCompletedIssues |"
+        "| view | team | project-scoped | layout | issueGrouping | issueSubGrouping | viewOrdering | viewOrderingDirection | showCompletedIssues |"
     );
-    println!("|---|---|---|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|---|---|---|");
     let text = |v: &Value| match v {
         Value::Null => "null".to_string(),
         Value::String(s) => s.clone(),
@@ -218,9 +230,14 @@ async fn l3_l4_l5_views(linear: &Linear, team_b: &str) {
         let team = v["team"]["key"].as_str().unwrap_or("workspace");
         let p = &v["viewPreferencesValues"];
         println!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             v["name"].as_str().unwrap_or(""),
             team,
+            if v["facet"]["sourceProject"].is_null() {
+                "no"
+            } else {
+                "yes"
+            },
             text(&p["layout"]),
             text(&p["issueGrouping"]),
             text(&p["issueSubGrouping"]),
@@ -238,12 +255,46 @@ async fn l3_l4_l5_views(linear: &Linear, team_b: &str) {
     };
 
     println!();
-    match views.iter().find(|v| v["name"] == "Probe project view") {
-        Some(v) => println!(
-            "L4: \"Probe project view\" is in the customViews list (team: {}).",
-            v["team"]["key"].as_str().unwrap_or("workspace")
+    let in_list = views.iter().any(|v| v["name"] == "Probe project view");
+    println!(
+        "L4: \"Probe project view\" is {}in the customViews list.",
+        if in_list { "" } else { "NOT " }
+    );
+    let projects = post_soft(
+        linear,
+        &ProbeProjectViews::build_query(probe_project_views::Variables {
+            name: project.into(),
+        }),
+    )
+    .await;
+    let facet_view = nodes(&projects.data()["projects"])
+        .first()
+        .and_then(|p| p["facets"].as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|f| f["targetCustomView"].clone())
+        .find(|v| v["name"] == "Probe project view");
+    match facet_view {
+        Some(v) => {
+            let p = &v["viewPreferencesValues"];
+            let ids = v["id"].as_str().unwrap_or("");
+            let (count, _) = completed_in_view(linear, ids).await;
+            println!(
+                "L4: it IS reachable through Project.facets (team: {}; layout {}, issueGrouping {}, issueSubGrouping {}, viewOrdering {}, viewOrderingDirection {}, showCompletedIssues {}); ProbeViewIssues on it returns {count} issues.",
+                v["team"]["key"].as_str().unwrap_or("workspace"),
+                text(&p["layout"]),
+                text(&p["issueGrouping"]),
+                text(&p["issueSubGrouping"]),
+                text(&p["viewOrdering"]),
+                text(&p["viewOrderingDirection"]),
+                text(&p["showCompletedIssues"]),
+            );
+        }
+        None => println!(
+            "L4: it is NOT reachable through Project.facets (HTTP {}, codes: {}).",
+            projects.status,
+            codes(&projects)
         ),
-        None => println!("L4: \"Probe project view\" is NOT in the customViews list."),
     }
 
     match find("Probe hide completed") {
@@ -297,6 +348,9 @@ async fn l6_errors(linear: &Linear) {
         Ok(key) if !key.trim().is_empty() => {
             let revoked = Linear::unguarded(key.trim().to_string());
             match revoked.post(&body).await {
+                Ok(raw) if raw.status == 200 && !raw.data().is_null() => println!(
+                    "- WARNING: PB_LINEAR_REVOKED_KEY still works \u{2014} it is not revoked (HTTP 200 with data)"
+                ),
                 Ok(raw) => println!("- revoked key, TestbedViewer: {}", describe(&raw)),
                 Err(e) => println!(
                     "- revoked key, TestbedViewer: request failed: {}",
@@ -311,8 +365,25 @@ async fn l6_errors(linear: &Linear) {
 
 // ---- L1 ------------------------------------------------------------------------------------
 
+async fn set_priority(linear: &Linear, id: &str, priority: i64) -> Raw {
+    post_soft(
+        linear,
+        &ProbeSetPriority::build_query(probe_set_priority::Variables {
+            id: id.into(),
+            priority,
+        }),
+    )
+    .await
+}
+
+fn update_ok(raw: &Raw) -> bool {
+    raw.status == 200
+        && raw.error_codes().is_empty()
+        && !raw.data()["issueUpdate"]["issue"].is_null()
+}
+
 /// Everything after the first write goes through paths that cannot panic, so the priority is
-/// always put back.
+/// always put back (three tries, then a loud line).
 async fn l1_read_after_write(linear: &Linear, team: &str) {
     println!("## L1: read-after-write delay\n");
     let raw = issue_by(linear, "TBA-1").await;
@@ -324,43 +395,46 @@ async fn l1_read_after_write(linear: &Linear, team: &str) {
     };
     let new = if original == 1 { 2 } else { 1 };
 
-    let set = |priority: i64| {
-        ProbeSetPriority::build_query(probe_set_priority::Variables {
-            id: id.clone(),
-            priority,
-        })
-    };
-    let set_raw = linear.post(&set(new)).await;
+    let raw = set_priority(linear, &id, new).await;
     let t0 = Instant::now();
-    match &set_raw {
-        Ok(raw) => {
-            let updated = raw.data()["issueUpdate"]["issue"]["updatedAt"]
-                .as_str()
-                .map(String::from);
-            println!(
-                "Set TBA-1 priority {original} -> {new}: HTTP {}, error codes: {}, updatedAt returned: {}",
-                raw.status,
-                codes(raw),
-                updated.is_some()
-            );
-            if raw.status == 200 && raw.error_codes().is_empty() {
-                poll_until_visible(linear, team, &id, new, updated.as_deref(), t0).await;
-            }
-        }
-        Err(e) => println!("Setting the priority failed: {}", short(e)),
+    let updated = raw.data()["issueUpdate"]["issue"]["updatedAt"]
+        .as_str()
+        .map(String::from);
+    println!(
+        "Set TBA-1 priority {original} -> {new}: {}; updatedAt returned: {}",
+        describe(&raw),
+        updated.is_some()
+    );
+    if update_ok(&raw) {
+        poll_until_visible(linear, team, &id, new, updated.as_deref(), t0).await;
     }
 
     // Restore, whatever happened above.
-    match linear.post(&set(original)).await {
-        Ok(raw) => println!(
-            "Restored TBA-1 priority to {original}: HTTP {}, error codes: {}",
-            raw.status,
-            codes(&raw)
-        ),
-        Err(e) => println!(
-            "RESTORE FAILED, TBA-1 priority is still {new}, put it back to {original} by hand: {}",
-            short(&e)
-        ),
+    let mut restored = false;
+    let mut last = String::new();
+    for attempt in 0..3u64 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(2 * attempt)).await;
+        }
+        let raw = set_priority(linear, &id, original).await;
+        if update_ok(&raw) {
+            restored = true;
+            break;
+        }
+        last = describe(&raw);
+    }
+    if restored {
+        let raw = issue_by(linear, "TBA-1").await;
+        println!(
+            "Restored TBA-1 priority to {original}; confirmed by a read: {}",
+            priority_of(&raw.data()["issue"])
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| format!("unknown ({})", describe(&raw)))
+        );
+    } else {
+        println!(
+            "RESTORE FAILED after 3 tries ({last}): set TBA-1 priority back to {original} by hand"
+        );
     }
     println!();
 }
@@ -381,6 +455,7 @@ async fn poll_until_visible(
     let board = view_id(linear, "Probe board by priority").await;
 
     let (mut a, mut b, mut c): (Option<f64>, Option<f64>, Option<f64>) = (None, None, None);
+    let mut absent_from_view = false;
     while t0.elapsed() < Duration::from_secs(120) {
         if a.is_none() {
             let raw = updated_since(linear, team, &since).await;
@@ -395,6 +470,7 @@ async fn poll_until_visible(
             }
         }
         if c.is_none()
+            && !absent_from_view
             && let Some(view) = &board
         {
             let raw = post_soft(
@@ -405,15 +481,19 @@ async fn poll_until_visible(
                 }),
             )
             .await;
-            let seen = nodes(&raw.data()["customView"]["issues"])
+            let listed = nodes(&raw.data()["customView"]["issues"])
                 .into_iter()
-                .find(|n| n["id"] == id)
-                .and_then(|n| priority_of(&n));
-            if seen == Some(new) {
-                c = Some(secs(t0));
+                .find(|n| n["id"] == id);
+            match listed {
+                Some(n) if priority_of(&n) == Some(new) => c = Some(secs(t0)),
+                Some(_) => {}
+                None if raw.status == 200 && !raw.data()["customView"].is_null() => {
+                    absent_from_view = true;
+                }
+                None => {}
             }
         }
-        if a.is_some() && b.is_some() && (c.is_some() || board.is_none()) {
+        if a.is_some() && b.is_some() && (c.is_some() || board.is_none() || absent_from_view) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -430,6 +510,9 @@ async fn poll_until_visible(
     );
     println!("| b: single issue by id | {} |", show(b));
     match &board {
+        Some(_) if absent_from_view => {
+            println!("| c: \"Probe board by priority\" view issues | TBA-1 not in the view |")
+        }
         Some(_) => println!(
             "| c: \"Probe board by priority\" view issues | {} |",
             show(c)
@@ -448,14 +531,29 @@ async fn l7_archive_and_trash(linear: &Linear, team: &str) {
             title: title.into(),
         })
     };
-    let archive_raw = post(linear, &create("[probe] L7 archive")).await;
-    let trash_raw = post(linear, &create("[probe] L7 trash")).await;
+    let archive_raw = post_soft(linear, &create("[probe] L7 archive")).await;
+    let trash_raw = post_soft(linear, &create("[probe] L7 trash")).await;
     let id_of = |raw: &Raw| {
         raw.data()["issueCreate"]["issue"]["id"]
             .as_str()
             .map(String::from)
     };
     let (Some(archive_id), Some(trash_id)) = (id_of(&archive_raw), id_of(&trash_raw)) else {
+        // Do not leave an active probe issue behind: trash whichever one was created.
+        for created in [id_of(&archive_raw), id_of(&trash_raw)]
+            .into_iter()
+            .flatten()
+        {
+            let raw = post_soft(
+                linear,
+                &ProbeTrash::build_query(probe_trash::Variables { id: created }),
+            )
+            .await;
+            println!(
+                "Trashed the probe issue that was created: HTTP {}",
+                raw.status
+            );
+        }
         println!(
             "Creating the probe issues failed: archive: {}; trash: {}\n",
             describe(&archive_raw),
@@ -465,14 +563,14 @@ async fn l7_archive_and_trash(linear: &Linear, team: &str) {
     };
 
     let t0 = OffsetDateTime::now_utc();
-    let archived = post(
+    let archived = post_soft(
         linear,
         &ProbeArchive::build_query(probe_archive::Variables {
             id: archive_id.clone(),
         }),
     )
     .await;
-    let trashed = post(
+    let trashed = post_soft(
         linear,
         &ProbeTrash::build_query(probe_trash::Variables {
             id: trash_id.clone(),
@@ -563,12 +661,18 @@ async fn l9_identifier_and_search(linear: &Linear, team_key: &str) {
     let works = raw.data()["issue"]["identifier"] == ident.as_str();
     println!(
         "- ProbeIssue(\"{ident}\"): {} (HTTP {}, codes: {})",
-        if works { "works" } else { "does not work" },
+        if raw.status == 0 {
+            "unknown (transport error)"
+        } else if works {
+            "works"
+        } else {
+            "does not work"
+        },
         raw.status,
         codes(&raw)
     );
 
-    let raw = post(
+    let raw = post_soft(
         linear,
         &ProbeSearch::build_query(probe_search::Variables {
             term: "Dark theme".into(),
@@ -576,7 +680,7 @@ async fn l9_identifier_and_search(linear: &Linear, team_key: &str) {
     )
     .await;
     println!(
-        "- ProbeSearch(\"Dark theme\"): HTTP {}, {} results, codes: {}",
+        "- ProbeSearch(<seeded title>): HTTP {}, {} results, codes: {}",
         raw.status,
         nodes(&raw.data()["searchIssues"]).len(),
         codes(&raw)

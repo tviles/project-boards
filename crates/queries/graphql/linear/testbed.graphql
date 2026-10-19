@@ -361,6 +361,11 @@ query ProbeViews {
       team {
         key
       }
+      facet {
+        sourceProject {
+          id
+        }
+      }
       viewPreferencesValues {
         layout
         issueGrouping
@@ -368,6 +373,30 @@ query ProbeViews {
         viewOrdering
         viewOrderingDirection
         showCompletedIssues
+      }
+    }
+  }
+}
+
+query ProbeProjectViews($name: String!) {
+  projects(filter: { name: { eq: $name } }, first: 1) {
+    nodes {
+      facets {
+        targetCustomView {
+          id
+          name
+          team {
+            key
+          }
+          viewPreferencesValues {
+            layout
+            issueGrouping
+            issueSubGrouping
+            viewOrdering
+            viewOrderingDirection
+            showCompletedIssues
+          }
+        }
       }
     }
   }

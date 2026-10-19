@@ -133,6 +133,7 @@ pub mod linear {
         ProbeSetPriority,
         ProbeUpdatedSince,
         ProbeViews,
+        ProbeProjectViews,
         ProbeViewIssues,
         ProbeCreateIssue,
         ProbeArchive,
