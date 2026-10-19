@@ -139,10 +139,11 @@ impl BoardKey {
         else {
             return text.parse();
         };
+        let rest = rest.split(['?', '#']).next().unwrap_or(rest);
         let mut parts = rest.split('/');
         let (host, _workspace, kind, slug) =
             (parts.next(), parts.next(), parts.next(), parts.next());
-        match (host, kind, slug) {
+        match (host.map(str::to_ascii_lowercase).as_deref(), kind, slug) {
             (Some("linear.app"), Some("project"), Some(slug)) => slug
                 .rsplit_once('-')
                 .and_then(|(_, id)| linear_id(id))
@@ -294,12 +295,17 @@ mod tests {
         assert!("tviles".parse::<RepoSlug>().is_err());
         assert!("a/b/c".parse::<RepoSlug>().is_err());
     }
+
     #[test]
     fn a_linear_project_url_becomes_its_slug_id() {
         for url in [
             "https://linear.app/acme/project/launch-plan-1a2b3c4d5e6f/overview",
             "https://linear.app/acme/project/launch-plan-1a2b3c4d5e6f",
             "http://linear.app/acme/project/launch-plan-1a2b3c4d5e6f/",
+            "https://linear.app/acme/project/launch-plan-1a2b3c4d5e6f?utm=x#top",
+            "https://linear.app/acme/project/launch-plan-1a2b3c4d5e6f/overview?x",
+            "https://linear.app/acme/project/launch-plan-1a2b3c4d5e6f#frag",
+            "https://LINEAR.APP/acme/project/launch-plan-1a2b3c4d5e6f",
         ] {
             assert_eq!(
                 BoardKey::parse_cli(url),
@@ -338,6 +344,7 @@ mod tests {
             "https://example.com/acme/project/x-1a2b",
             "https://linear.app/acme/team/ENG/active",
             "https://linear.app/acme/project/",
+            "https://linear.app/acme/project/nodash",
         ] {
             assert_eq!(BoardKey::parse_cli(url), Err(want.to_string()), "{url}");
         }
