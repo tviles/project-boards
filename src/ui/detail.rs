@@ -436,6 +436,7 @@ mod tests {
                 author: "tviles".into(),
                 created_at: "2026-10-01T09:00:00Z".into(),
                 body: "Looks bad".into(),
+                depth: 0,
             }],
             comments_total: 21,
             older_cursor: Some("cur".into()),
@@ -453,6 +454,7 @@ mod tests {
             }),
             issue_type: Some("Bug".into()),
             linked_prs: vec![],
+            attachments: vec![],
         }
     }
 
@@ -671,6 +673,7 @@ mod tests {
                 author: "x".into(),
                 created_at: "2026-09-01T00:00:00Z".into(),
                 body: "older".into(),
+                depth: 0,
             }],
             comments_total: 21,
             older_cursor: None,

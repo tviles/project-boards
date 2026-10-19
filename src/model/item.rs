@@ -188,6 +188,9 @@ pub struct ContentFields {
     /// Label name -> label node id, to remove one.
     pub label_ids: BTreeMap<String, String>,
     pub milestone: Option<crate::model::MilestoneRef>,
+    /// Linear's manual order (`sortOrder`), ascending; a tie-break after the view's sorts.
+    /// `None` for GitHub items.
+    pub sort_order: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

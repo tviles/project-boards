@@ -153,6 +153,7 @@ pub fn project_from_wire(v: &Value, board: &BoardKey) -> Result<Project, Backend
             .filter(|r| crate::github::lookups::writable(r))
             .filter_map(|r| linked_ref(r))
             .collect(),
+        linear: None,
     })
 }
 
@@ -296,6 +297,7 @@ fn content_fields_from_wire(c: &Value) -> ContentFields {
             id: id.to_string(),
             title: str_of(&c["milestone"]["title"]),
         }),
+        sort_order: None,
     }
 }
 
@@ -388,6 +390,7 @@ pub fn detail_from_wire(node: &Value) -> ItemDetail {
                 author: n["author"]["login"].as_str().unwrap_or("ghost").to_string(),
                 created_at: str_of(&n["createdAt"]),
                 body: str_of(&n["body"]),
+                depth: 0,
             })
             .collect(),
         comments_total: comments["totalCount"].as_u64().unwrap_or(0) as usize,
@@ -405,6 +408,7 @@ pub fn detail_from_wire(node: &Value) -> ItemDetail {
         parent: linked(&c["parent"]),
         issue_type: c["issueType"]["name"].as_str().map(String::from),
         linked_prs: nodes(c, prs_key).into_iter().filter_map(linked).collect(),
+        attachments: vec![],
     }
 }
 

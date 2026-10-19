@@ -127,6 +127,7 @@ pub(crate) mod tests {
             views: vec![],
             linked_repos: vec![],
             issue_repos: vec![],
+            linear: None,
         }
     }
 

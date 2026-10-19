@@ -29,9 +29,6 @@ fn key(value: &FieldValue, field: Option<&Field>) -> Key {
 /// Stable sort by the view's sort specs. Items without a value always sort last. Values are
 /// the ones cells show (`Item::field_value`), read through the field the spec resolves to.
 pub fn sort_items(items: &mut [&Item], specs: &[SortSpec], fields: &[Field]) {
-    if specs.is_empty() {
-        return;
-    }
     let specs: Vec<(&SortSpec, Option<&Field>)> = specs
         .iter()
         .map(|spec| (spec, find_field(fields, &spec.field)))
@@ -53,7 +50,7 @@ pub fn sort_items(items: &mut [&Item], specs: &[SortSpec], fields: &[Field]) {
             (keys, *item)
         })
         .collect();
-    keyed.sort_by(|(a, _), (b, _)| {
+    keyed.sort_by(|(a, ia), (b, ib)| {
         for ((spec, _), (ka, kb)) in specs.iter().zip(a.iter().zip(b)) {
             let ord = match (ka, kb) {
                 (None, None) => Ordering::Equal,
@@ -72,7 +69,11 @@ pub fn sort_items(items: &mut [&Item], specs: &[SortSpec], fields: &[Field]) {
                 return ord;
             }
         }
-        Ordering::Equal
+        // Manual order (Linear) last; GitHub items have none, so stability keeps their order.
+        match (ia.content_fields.sort_order, ib.content_fields.sort_order) {
+            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+            _ => Ordering::Equal,
+        }
     });
     for (slot, (_, item)) in items.iter_mut().zip(keyed) {
         *slot = item;
@@ -199,5 +200,44 @@ mod tests {
         let mut items = vec![&a, &b];
         sort_items(&mut items, &[], &[]);
         assert_eq!(items[0].id.as_str(), "a");
+    }
+
+    fn manual(id: &str, order: Option<f64>, p: Option<&str>) -> crate::model::Item {
+        let mut i = with_priority(id, p);
+        i.content_fields.sort_order = order;
+        i
+    }
+
+    fn ids(items: &[&crate::model::Item]) -> Vec<String> {
+        items.iter().map(|i| i.id.as_str().to_string()).collect()
+    }
+
+    #[test]
+    fn manual_order_breaks_ties_and_github_items_keep_their_order() {
+        let (a, b, c) = (
+            manual("a", Some(3.0), Some("P1")),
+            manual("b", Some(1.0), Some("P1")),
+            manual("c", Some(2.0), Some("P0")),
+        );
+        let mut items = vec![&a, &b, &c];
+        sort_items(&mut items, &[], &[]);
+        assert_eq!(ids(&items), ["b", "c", "a"]);
+
+        let spec = SortSpec {
+            field: FieldId::new("P"),
+            direction: SortDirection::Asc,
+        };
+        let mut items = vec![&a, &b, &c];
+        sort_items(&mut items, &[spec], &[priority()]);
+        assert_eq!(ids(&items), ["c", "b", "a"]);
+
+        let (x, y, z) = (
+            manual("x", None, None),
+            manual("y", None, None),
+            manual("z", None, None),
+        );
+        let mut items = vec![&z, &x, &y];
+        sort_items(&mut items, &[], &[]);
+        assert_eq!(ids(&items), ["z", "x", "y"]);
     }
 }

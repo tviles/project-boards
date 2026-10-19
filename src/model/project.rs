@@ -25,6 +25,19 @@ pub struct Project {
     /// The linked repositories the viewer can create issues in (write access, issues on).
     #[serde(default)]
     pub issue_repos: Vec<crate::model::RepoRef>,
+    /// Workspace facts for a Linear board; `None` on GitHub boards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear: Option<LinearMeta>,
+}
+
+/// What a Linear board needs from its workspace beyond the common project fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinearMeta {
+    /// The workspace's URL key.
+    pub url_key: String,
+    /// The viewer's user id, for the `me` filter.
+    pub viewer_id: String,
+    pub team_keys: Vec<String>,
 }
 
 impl Project {
@@ -74,6 +87,7 @@ mod tests {
             views: vec![],
             linked_repos: vec![],
             issue_repos: vec![],
+            linear: None,
         };
         let name = |id: &str| p.field(&FieldId::new(id)).map(|f| f.name.clone());
         assert_eq!(name("PVTSSF_abc").as_deref(), Some("Status"));
@@ -85,5 +99,16 @@ mod tests {
         );
         assert_eq!(name("PVTF_nope"), None);
         assert_eq!(name("abc"), None, "an id without `_` has no suffix");
+    }
+
+    #[test]
+    fn a_github_project_serializes_without_linear_meta() {
+        let p = crate::store::snapshot::tests::project();
+        assert_eq!(p.linear, None);
+        let mut json = serde_json::to_value(&p).unwrap();
+        assert!(json.get("linear").is_none());
+        json.as_object_mut().unwrap().remove("linear");
+        let back: Project = serde_json::from_value(json).unwrap();
+        assert_eq!(back.linear, None);
     }
 }
