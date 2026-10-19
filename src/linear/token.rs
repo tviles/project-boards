@@ -78,10 +78,11 @@ pub fn run_key_command(argv: &[String], timeout: Duration) -> Option<String> {
         .spawn()
         .ok()?;
     let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = stdout.read_to_end(&mut buf);
-        buf
+        let _ = tx.send(buf);
     });
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -97,10 +98,12 @@ pub fn run_key_command(argv: &[String], timeout: Duration) -> Option<String> {
             }
         }
     };
-    // Once the child is gone the pipe closes and the reader finishes. A grandchild that
-    // inherited the pipe could keep it open, so only join after a clean exit.
+    // A background process that inherited stdout can keep the pipe open after the child
+    // exits, so the read shares the overall deadline and the reader is never joined.
     let status = status?;
-    let bytes = reader.join().ok()?;
+    let bytes = rx
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()?;
     status
         .success()
         .then(|| String::from_utf8_lossy(&bytes).into_owned())
@@ -175,7 +178,9 @@ mod tests {
             value: "lin_api_secret".into(),
             source: KeySource::Command,
         };
-        assert!(!format!("{k:?}").contains("lin_api_secret"));
+        let shown = format!("{k:?}");
+        assert!(!shown.contains("lin_api_secret"));
+        assert!(shown.contains("<redacted>"));
     }
 
     #[test]
@@ -201,6 +206,16 @@ mod tests {
         let start = Instant::now();
         let out = run_key_command(&argv(&["sleep", "5"]), Duration::from_millis(200));
         assert_eq!(out, None);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_background_helper_cannot_hold_the_pipe_open() {
+        let start = Instant::now();
+        let _ = run_key_command(
+            &argv(&["sh", "-c", "sleep 5 & echo k"]),
+            Duration::from_millis(300),
+        );
         assert!(start.elapsed() < Duration::from_secs(2));
     }
 
