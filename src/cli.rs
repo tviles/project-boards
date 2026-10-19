@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 #[command(
     name = "project-boards",
     version,
-    about = "GitHub Projects boards in herdr"
+    about = "GitHub Projects and Linear boards in herdr"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -18,8 +18,10 @@ pub enum Command {
     Pane,
     /// Open a board pane through herdr, or focus it if it is already open.
     Open {
-        /// Board to open, as OWNER/NUMBER.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Board to open: OWNER/NUMBER, linear:team:KEY, linear:project:SLUG, or a Linear project URL."
+        )]
         project: Option<String>,
         /// Where to open the pane.
         #[arg(long, value_enum)]
@@ -60,6 +62,27 @@ impl Placement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_names_every_board_form() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        assert_eq!(
+            cmd.get_about().map(|a| a.to_string()).as_deref(),
+            Some("GitHub Projects and Linear boards in herdr")
+        );
+        let open = cmd.find_subcommand("open").unwrap();
+        let project = open
+            .get_arguments()
+            .find(|a| a.get_id() == "project")
+            .unwrap();
+        assert_eq!(
+            project.get_help().map(|h| h.to_string()).as_deref(),
+            Some(
+                "Board to open: OWNER/NUMBER, linear:team:KEY, linear:project:SLUG, or a Linear project URL."
+            )
+        );
+    }
 
     #[test]
     fn parses_open_with_project_and_placement() {

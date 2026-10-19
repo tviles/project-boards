@@ -1,4 +1,4 @@
-//! project-boards: a herdr plugin for GitHub Projects boards.
+//! project-boards: a herdr plugin for GitHub Projects and Linear boards.
 
 pub mod backend;
 pub mod board_choice;
