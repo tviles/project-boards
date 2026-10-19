@@ -1136,7 +1136,7 @@ impl App {
                     state.set_detail(detail, older);
                 }
             }
-            SyncEvent::Projects(list) => self.show_projects(list),
+            SyncEvent::Projects { boards, notes } => self.show_projects(boards, notes),
             SyncEvent::Rate(rate) => self.status.rate_low = rate.is_low(),
             SyncEvent::Failed { task, error } => {
                 if self.lookup_failed(&task, &error) {
@@ -1193,7 +1193,7 @@ impl App {
         cmds
     }
 
-    fn show_projects(&mut self, list: Vec<ProjectSummary>) {
+    fn show_projects(&mut self, list: Vec<ProjectSummary>, notes: Vec<String>) {
         // No picker is waiting: the user cancelled it, or is reading a board (maybe in
         // detail). Only with no board at all is a picker still required.
         if self.picker.is_none() && self.snapshot().is_some() {
@@ -1205,7 +1205,7 @@ impl App {
             .map(|p| p.required)
             .unwrap_or(self.snapshot().is_none());
         let typed = self.picker.take().map(|p| p.input).unwrap_or_default();
-        let mut picker = PickerState::with(list, required);
+        let mut picker = PickerState::with(list, notes, required);
         picker.input = typed;
         self.picker = Some(picker);
         self.mode = Mode::Picker;
@@ -1253,12 +1253,15 @@ mod tests {
     fn picker_choice_becomes_a_command_and_required_esc_stays_but_ctrl_c_quits() {
         let mut a = app();
         a.picker = Some(PickerState::loading(false)); // `B` was pressed
-        a.on_sync(SyncEvent::Projects(vec![ProjectSummary {
-            id: ProjectId::new("x"),
-            board: "acme/7".parse().unwrap(),
-            title: "Sprint".into(),
-            closed: false,
-        }]));
+        a.on_sync(SyncEvent::Projects {
+            boards: vec![ProjectSummary {
+                id: ProjectId::new("x"),
+                board: "acme/7".parse().unwrap(),
+                title: "Sprint".into(),
+                closed: false,
+            }],
+            notes: vec![],
+        });
         assert_eq!(a.mode, Mode::Picker);
         assert_eq!(
             a.handle_key(code(KeyCode::Enter)),
@@ -1269,7 +1272,10 @@ mod tests {
             Keymap::defaults(),
             Theme::plain(),
         );
-        empty.on_sync(SyncEvent::Projects(vec![]));
+        empty.on_sync(SyncEvent::Projects {
+            boards: vec![],
+            notes: vec![],
+        });
         assert_eq!(empty.handle_key(code(KeyCode::Esc)), Vec::<Command>::new());
         assert_eq!(empty.mode, Mode::Picker);
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
@@ -1278,13 +1284,14 @@ mod tests {
 
     #[test]
     fn a_late_board_list_does_not_reopen_a_cancelled_picker_or_leave_detail() {
-        let list = || {
-            SyncEvent::Projects(vec![ProjectSummary {
+        let list = || SyncEvent::Projects {
+            boards: vec![ProjectSummary {
                 id: ProjectId::new("x"),
                 board: "acme/7".parse().unwrap(),
                 title: "Sprint".into(),
                 closed: false,
-            }])
+            }],
+            notes: vec![],
         };
         let mut a = app();
         a.picker = Some(PickerState::loading(false));
@@ -1320,7 +1327,10 @@ mod tests {
         a.picker = Some(PickerState::loading(true));
         a.mode = Mode::Picker;
         a.handle_key(key('s'));
-        a.on_sync(SyncEvent::Projects(vec![]));
+        a.on_sync(SyncEvent::Projects {
+            boards: vec![],
+            notes: vec![],
+        });
         assert_eq!(a.picker.as_ref().unwrap().input, "s");
     }
 

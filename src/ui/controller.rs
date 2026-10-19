@@ -584,7 +584,7 @@ impl Controller {
                     return match after_repo_projects(list.clone()) {
                         AfterRepo::Use(board) => self.open_board(board, now),
                         AfterRepo::Pick(list) => {
-                            self.app.picker = Some(PickerState::with(list, true));
+                            self.app.picker = Some(PickerState::with(list, Vec::new(), true));
                             self.app.mode = Mode::Picker;
                             Vec::new()
                         }
@@ -604,7 +604,7 @@ impl Controller {
 
         // A board list nobody waits for any more (its picker was cancelled). A picker is
         // required only while no board is chosen; reopening one now could trap the user in it.
-        if matches!(event, SyncEvent::Projects(_))
+        if matches!(event, SyncEvent::Projects { .. })
             && self.app.picker.is_none()
             && self.board.is_some()
         {
@@ -1496,7 +1496,16 @@ mod tests {
         assert_eq!(c.app.mode, Mode::Picker);
         c.handle(Input::Key(code(crossterm::event::KeyCode::Esc)), t0);
         assert_eq!(c.app.mode, Mode::Normal);
-        c.handle(at(&c, SyncEvent::Projects(vec![summary("tviles/4")])), t0);
+        c.handle(
+            at(
+                &c,
+                SyncEvent::Projects {
+                    boards: vec![summary("tviles/4")],
+                    notes: vec![],
+                },
+            ),
+            t0,
+        );
         assert_eq!(c.app.mode, Mode::Normal);
         assert!(c.app.picker.is_none());
     }
@@ -1899,7 +1908,7 @@ mod tests {
         let e = at(&c, complete("2026-10-01T12:00:00Z"));
         c.handle(e, t0);
         let old = c.generation();
-        c.app.picker = Some(PickerState::with(vec![summary("tviles/4")], false));
+        c.app.picker = Some(PickerState::with(vec![summary("tviles/4")], vec![], false));
         c.app.mode = Mode::Picker;
         // One Enter, after idling: the idle poll starts on the old board, then the pick switches.
         let enter = Input::Key(crate::ui::fixtures::code(crossterm::event::KeyCode::Enter));
@@ -2521,6 +2530,130 @@ mod tests {
                 provider: Some(Provider::Github),
             }]
         );
+    }
+
+    /// Runs the picker's `Projects` job as the runtime would, on a syncer over `backends`,
+    /// and hands every event it sends to the controller.
+    async fn run_picker_job(
+        c: &mut Controller,
+        effects: &[Effect],
+        backends: crate::backend::Backends,
+    ) {
+        let [
+            Effect::Spawn {
+                job: SyncJob::Projects(repo),
+                provider,
+                ..
+            },
+        ] = effects
+        else {
+            panic!("expected one Projects job, got {effects:?}");
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::sync::syncer::Syncer::new(backends, *provider, tx, 2000)
+            .projects(repo.as_ref())
+            .await;
+        let t0 = Instant::now();
+        while let Ok(event) = rx.try_recv() {
+            c.handle(at(c, event), t0);
+        }
+    }
+
+    fn picker_screen(c: &mut Controller) -> String {
+        crate::ui::fixtures::render_to_string(90, 16, |f| crate::ui::chrome::draw(f, &mut c.app))
+    }
+
+    #[tokio::test]
+    async fn a_linear_only_user_never_reaches_setup_through_the_picker() {
+        use crate::backend::{Backend, Backends};
+        use crate::github::fixture::FixtureTransport;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), None);
+        let effects = c.start(Ok(vec![Provider::Linear]), t0);
+        assert_eq!(c.app.mode, Mode::Picker);
+        let lin = Arc::new(FixtureTransport::new());
+        lin.push(
+            "ListBoards",
+            json!({"projects": {"nodes": [{"id": "p1", "name": "Launch"}]},
+                   "teams": {"nodes": [{"id": "t1", "key": "TBA", "name": "Testbed A"}]}}),
+        );
+        let backends = Backends {
+            github: None,
+            linear: Some(Arc::new(Backend::Linear(crate::linear::Linear::new(
+                lin.clone(),
+            )))),
+        };
+        run_picker_job(&mut c, &effects, backends).await;
+        assert_eq!(c.app.mode, Mode::Picker, "never the GitHub setup screen");
+        assert_eq!(c.app.setup, None);
+        let picker = c.app.picker.as_ref().unwrap();
+        assert!(!picker.loading);
+        assert_eq!(picker.visible().len(), 2);
+        let screen = picker_screen(&mut c);
+        assert!(
+            screen.contains("GitHub boards: run `gh auth login` or set GH_TOKEN"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("Linear projects") && screen.contains("Launch"),
+            "{screen}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_github_only_users_picker_gains_one_linear_line() {
+        use crate::backend::{Backend, Backends};
+        use crate::github::fixture::FixtureTransport;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(vec![Provider::Github]), t0);
+        let effects = c.handle(Input::Key(key('B')), t0);
+        let gh = Arc::new(FixtureTransport::new());
+        gh.push(
+            "RepoProjects",
+            json!({"repository": {"projectsV2": {"nodes": [
+                {"id": "PVT_3", "number": 3, "title": "App board", "closed": false,
+                 "owner": {"__typename": "User", "login": "tviles"}}]}}}),
+        );
+        gh.push(
+            "ViewerProjects",
+            json!({"viewer": {"login": "tviles", "projectsV2": {"nodes": [
+                {"id": "PVT_1", "number": 1, "title": "Roadmap", "closed": false,
+                 "owner": {"__typename": "User", "login": "tviles"}}]},
+                "organizations": {"nodes": []}}}),
+        );
+        let backends = Backends {
+            github: Some(Arc::new(Backend::Github(crate::github::Github::new(
+                gh.clone(),
+            )))),
+            linear: None,
+        };
+        run_picker_job(&mut c, &effects, backends).await;
+        assert_eq!(c.app.mode, Mode::Picker);
+        let picker = c.app.picker.as_ref().unwrap();
+        let boards: Vec<String> = picker
+            .visible()
+            .iter()
+            .map(|p| p.board.to_string())
+            .collect();
+        assert_eq!(boards, ["tviles/3", "tviles/1"], "linked first, as today");
+        assert_eq!(
+            picker.notes,
+            ["Linear boards: set LINEAR_API_KEY or linear_api_key_command"]
+        );
+        let screen = picker_screen(&mut c);
+        assert!(
+            screen.contains("tviles/3  App board") && screen.contains("tviles/1  Roadmap"),
+            "{screen}"
+        );
+        assert_eq!(
+            c.handle(Input::Key(code(crossterm::event::KeyCode::Down)), t0),
+            Vec::new()
+        );
+        assert!(matches!(
+            c.app.handle_key(code(crossterm::event::KeyCode::Enter)).as_slice(),
+            [Command::PickBoard(b)] if b.to_string() == "tviles/1"
+        ));
     }
 
     #[test]

@@ -64,6 +64,25 @@ pub struct ProjectSummary {
     pub closed: bool,
 }
 
+/// The picker's sections, in the order it draws them (Decision 11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PickerSection {
+    Github,
+    LinearProjects,
+    LinearTeams,
+}
+
+impl ProjectSummary {
+    /// The picker section this board is listed under, from its provider and kind.
+    pub fn section(&self) -> PickerSection {
+        match self.board {
+            BoardKey::Github(_) => PickerSection::Github,
+            BoardKey::LinearProject { .. } => PickerSection::LinearProjects,
+            BoardKey::LinearTeam { .. } => PickerSection::LinearTeams,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

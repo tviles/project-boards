@@ -820,14 +820,15 @@ mod tests {
     fn picker_and_setup_overlays_render_and_tiny_sizes_do_not_panic() {
         let mut a = app();
         a.picker = Some(crate::ui::picker::PickerState::loading(false)); // `B` was pressed
-        a.on_sync(crate::sync::SyncEvent::Projects(vec![
-            crate::model::ProjectSummary {
+        a.on_sync(crate::sync::SyncEvent::Projects {
+            boards: vec![crate::model::ProjectSummary {
                 id: crate::model::ProjectId::new("x"),
                 board: "acme/7".parse().unwrap(),
                 title: "Sprint".into(),
                 closed: false,
-            },
-        ]));
+            }],
+            notes: vec![],
+        });
         let screen = render_to_string(80, 16, |f| draw(f, &mut a));
         assert!(screen.contains("acme/7  Sprint") && screen.contains("esc cancels"));
         render_to_string(0, 0, |f| draw(f, &mut a));

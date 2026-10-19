@@ -17,6 +17,38 @@ fn disagree() -> BackendError {
     BackendError::Decode("board and backend disagree".into())
 }
 
+/// The picker's line for a provider whose credentials did not resolve.
+fn missing_credentials_note(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Github => "GitHub boards: run `gh auth login` or set GH_TOKEN",
+        Provider::Linear => "Linear boards: set LINEAR_API_KEY or linear_api_key_command",
+    }
+}
+
+/// GitHub's boards for the picker: `linked`'s boards first, then every board the viewer sees.
+async fn github_boards(
+    backend: &Backend,
+    linked: Option<&RepoSlug>,
+) -> Result<Vec<ProjectSummary>, BackendError> {
+    let Backend::Github(gh) = backend else {
+        return Err(disagree());
+    };
+    let linked_list = match linked {
+        Some(repo) => gh.list_repo_projects(repo).await?,
+        None => Vec::new(),
+    };
+    let all = gh.list_viewer_projects().await?;
+    Ok(crate::board_choice::picker_candidates(all, &linked_list))
+}
+
+/// Linear's boards for the picker: open projects, then teams.
+async fn linear_boards(backend: &Backend) -> Result<Vec<ProjectSummary>, BackendError> {
+    match backend {
+        Backend::Linear(linear) => linear.list_boards().await,
+        Backend::Github(_) => Err(disagree()),
+    }
+}
+
 fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
@@ -399,34 +431,60 @@ impl Syncer {
         }
     }
 
-    /// Boards for the picker: the repo's linked boards first, then every board the viewer can see.
+    /// Boards for the picker: GitHub's (the repo's linked boards first, then every board the
+    /// viewer can see), then Linear's projects and teams. A provider without credentials, or one
+    /// whose list fails while another's loads, becomes a note; only when every provider with
+    /// credentials fails is the list a failure (GitHub's error, else Linear's).
     pub async fn projects(&self, linked: Option<&RepoSlug>) {
-        let linked_list = match linked {
-            Some(repo) => {
-                let result = match self.github().as_deref() {
-                    Ok(Backend::Github(gh)) => gh.list_repo_projects(repo).await,
-                    Ok(Backend::Linear(_)) => Err(disagree()),
-                    Err(e) => Err(e.clone()),
-                };
-                match result {
-                    Ok(l) => l,
-                    Err(e) => return self.fail(SyncTask::Projects, e),
+        let (github, linear) = tokio::join!(
+            async {
+                match self.backends.github.as_deref() {
+                    Some(backend) => Some(github_boards(backend, linked).await),
+                    None => None,
+                }
+            },
+            async {
+                match self.backends.linear.as_deref() {
+                    Some(backend) => Some(linear_boards(backend).await),
+                    None => None,
+                }
+            },
+        );
+        let mut boards = Vec::new();
+        let mut notes = Vec::new();
+        let mut loaded = false;
+        let mut first_error = None;
+        for (provider, result) in [(Provider::Github, github), (Provider::Linear, linear)] {
+            match result {
+                None => notes.push(missing_credentials_note(provider).to_string()),
+                Some(Ok(list)) => {
+                    boards.extend(list);
+                    loaded = true;
+                }
+                Some(Err(e)) => {
+                    tracing::warn!(
+                        task = SyncTask::Projects.kind(),
+                        provider = %provider,
+                        error = e.kind(),
+                        "board list failed"
+                    );
+                    notes.push(format!(
+                        "{provider} boards could not be loaded ({})",
+                        e.kind()
+                    ));
+                    first_error.get_or_insert(e);
                 }
             }
-            None => Vec::new(),
-        };
-        let result = match self.github().as_deref() {
-            Ok(Backend::Github(gh)) => gh.list_viewer_projects().await,
-            Ok(Backend::Linear(_)) => Err(disagree()),
-            Err(e) => Err(e.clone()),
-        };
-        match result {
-            Ok(all) => self.send(SyncEvent::Projects(crate::board_choice::picker_candidates(
-                all,
-                &linked_list,
-            ))),
-            Err(e) => self.fail(SyncTask::Projects, e),
         }
+        if loaded {
+            return self.send(SyncEvent::Projects { boards, notes });
+        }
+        // No provider loaded: every configured one failed, or none has credentials (the setup
+        // screen's case, reported as GitHub's missing token as before).
+        let error = first_error.unwrap_or(BackendError::NoCredentials {
+            provider: Provider::Github,
+        });
+        self.fail(SyncTask::Projects, error);
     }
 
     pub async fn candidates(&self, repo: &RepoSlug) {
@@ -1072,6 +1130,179 @@ mod tests {
         );
         assert_eq!(lin.requests().len(), 3);
         assert!(gh.requests().is_empty(), "nothing goes to GitHub");
+    }
+
+    fn viewer_projects() -> serde_json::Value {
+        json!({"viewer": {"login": "acme", "projectsV2": {"nodes": [
+            {"id": "PVT_7", "number": 7, "title": "Sprint", "closed": false,
+             "owner": {"__typename": "User", "login": "acme"}}]},
+            "organizations": {"nodes": []}}})
+    }
+
+    fn list_boards() -> serde_json::Value {
+        json!({"projects": {"nodes": [{"id": "p1", "name": "Launch"}]},
+               "teams": {"nodes": [{"id": "t1", "key": "TBA", "name": "Testbed A"}]}})
+    }
+
+    fn boards_and_notes(events: &[SyncEvent]) -> (Vec<String>, Vec<String>) {
+        match events {
+            [SyncEvent::Projects { boards, notes }] => (
+                boards.iter().map(|b| b.board.to_string()).collect(),
+                notes.clone(),
+            ),
+            other => panic!("expected one Projects event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn one_failing_provider_is_a_note_and_both_failing_is_a_failure() {
+        // Both load: GitHub's boards, then Linear's projects and teams, and no note.
+        let (gh, lin, s, mut rx) = setup_both(Provider::Github);
+        gh.push("ViewerProjects", viewer_projects());
+        lin.push("ListBoards", list_boards());
+        s.projects(None).await;
+        assert_eq!(
+            boards_and_notes(&drain(&mut rx)),
+            (
+                vec![
+                    "acme/7".to_string(),
+                    "linear:project:p1".into(),
+                    "linear:team:t1".into()
+                ],
+                vec![]
+            )
+        );
+
+        // GitHub fails: Linear's boards and a note naming GitHub's error kind.
+        gh.push_error("ViewerProjects", BackendError::Network("offline".into()));
+        lin.push("ListBoards", list_boards());
+        s.projects(None).await;
+        assert_eq!(
+            boards_and_notes(&drain(&mut rx)),
+            (
+                vec!["linear:project:p1".to_string(), "linear:team:t1".into()],
+                vec!["GitHub boards could not be loaded (Network)".to_string()]
+            )
+        );
+
+        // The linked list is GitHub's too.
+        let repo: RepoSlug = "acme/app".parse().unwrap();
+        gh.push_error(
+            "RepoProjects",
+            BackendError::Unauthorized {
+                provider: Provider::Github,
+            },
+        );
+        lin.push("ListBoards", list_boards());
+        s.projects(Some(&repo)).await;
+        assert_eq!(
+            boards_and_notes(&drain(&mut rx)).1,
+            ["GitHub boards could not be loaded (Unauthorized)"]
+        );
+
+        // Linear fails: GitHub's boards and a note naming Linear's error kind.
+        gh.push("ViewerProjects", viewer_projects());
+        lin.push_error("ListBoards", BackendError::Network("offline".into()));
+        s.projects(None).await;
+        assert_eq!(
+            boards_and_notes(&drain(&mut rx)),
+            (
+                vec!["acme/7".to_string()],
+                vec!["Linear boards could not be loaded (Network)".to_string()]
+            )
+        );
+
+        // Both fail: GitHub's error, as today.
+        gh.push_error(
+            "ViewerProjects",
+            BackendError::Unauthorized {
+                provider: Provider::Github,
+            },
+        );
+        lin.push_error("ListBoards", BackendError::Network("offline".into()));
+        s.projects(None).await;
+        assert_eq!(
+            drain(&mut rx),
+            [SyncEvent::Failed {
+                task: SyncTask::Projects,
+                error: BackendError::Unauthorized {
+                    provider: Provider::Github
+                },
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provider_without_credentials_is_a_note() {
+        let syncer = |github: Option<&Arc<FixtureTransport>>,
+                      linear: Option<&Arc<FixtureTransport>>| {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let backends = Backends {
+                github: github.map(|t| Arc::new(Backend::Github(Github::new(t.clone())))),
+                linear: linear.map(|t| Arc::new(Backend::Linear(Linear::new(t.clone())))),
+            };
+            (Syncer::new(backends, None, tx, 2000), rx)
+        };
+        let gh = Arc::new(FixtureTransport::new());
+        let lin = Arc::new(FixtureTransport::new());
+
+        // A Linear-only user: Linear's boards and the GitHub fix, never a failure.
+        let (s, mut rx) = syncer(None, Some(&lin));
+        lin.push("ListBoards", list_boards());
+        s.projects(Some(&"acme/app".parse().unwrap())).await;
+        assert_eq!(
+            boards_and_notes(&drain(&mut rx)),
+            (
+                vec!["linear:project:p1".to_string(), "linear:team:t1".into()],
+                vec!["GitHub boards: run `gh auth login` or set GH_TOKEN".to_string()]
+            )
+        );
+
+        // A GitHub-only user: GitHub's boards and the Linear fix; nothing goes to Linear.
+        let (s, mut rx) = syncer(Some(&gh), None);
+        gh.push("ViewerProjects", viewer_projects());
+        s.projects(None).await;
+        assert_eq!(
+            boards_and_notes(&drain(&mut rx)),
+            (
+                vec!["acme/7".to_string()],
+                vec!["Linear boards: set LINEAR_API_KEY or linear_api_key_command".to_string()]
+            )
+        );
+
+        // The only configured provider fails: its own error, never GitHub's missing token.
+        let (s, mut rx) = syncer(None, Some(&lin));
+        lin.push_error(
+            "ListBoards",
+            BackendError::Unauthorized {
+                provider: Provider::Linear,
+            },
+        );
+        s.projects(None).await;
+        assert_eq!(
+            drain(&mut rx),
+            [SyncEvent::Failed {
+                task: SyncTask::Projects,
+                error: BackendError::Unauthorized {
+                    provider: Provider::Linear
+                },
+            }]
+        );
+
+        // No provider at all: GitHub's missing token, as today.
+        let (s, mut rx) = syncer(None, None);
+        s.projects(None).await;
+        assert_eq!(
+            drain(&mut rx),
+            [SyncEvent::Failed {
+                task: SyncTask::Projects,
+                error: BackendError::NoCredentials {
+                    provider: Provider::Github
+                },
+            }]
+        );
+        assert_eq!(lin.requests().len(), 2);
+        assert_eq!(gh.requests().len(), 1);
     }
 
     #[tokio::test]
