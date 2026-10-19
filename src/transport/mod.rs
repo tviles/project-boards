@@ -124,20 +124,42 @@ pub fn interpret_body_keeping_errors(
     Ok((data, errors))
 }
 
+/// Which service's headers and error vocabulary an `HttpTransport` speaks.
+#[derive(Clone, Copy, PartialEq)]
+enum Dialect {
+    Github,
+    Linear,
+}
+
 pub struct HttpTransport {
     client: reqwest::Client,
     endpoint: String,
     token: String,
+    dialect: Dialect,
 }
 
 impl HttpTransport {
     pub const GITHUB_ENDPOINT: &'static str = "https://api.github.com/graphql";
+    pub const LINEAR_ENDPOINT: &'static str = "https://api.linear.app/graphql";
 
     pub fn new(token: String) -> Self {
         Self::with_endpoint(token, Self::GITHUB_ENDPOINT.to_string())
     }
 
     pub fn with_endpoint(token: String, endpoint: String) -> Self {
+        Self::build(token, endpoint, Dialect::Github)
+    }
+
+    /// A transport for Linear's API with a personal API key.
+    pub fn linear(key: String) -> Self {
+        Self::linear_with_endpoint(key, Self::LINEAR_ENDPOINT.to_string())
+    }
+
+    pub fn linear_with_endpoint(key: String, endpoint: String) -> Self {
+        Self::build(key, endpoint, Dialect::Linear)
+    }
+
+    fn build(token: String, endpoint: String, dialect: Dialect) -> Self {
         let client = reqwest::Client::builder()
             .user_agent(concat!("project-boards/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(30))
@@ -147,6 +169,7 @@ impl HttpTransport {
             client,
             endpoint,
             token,
+            dialect,
         }
     }
 }
@@ -183,6 +206,9 @@ impl Transport for HttpTransport {
         &self,
         request: GraphqlRequest,
     ) -> BoxFuture<'_, Result<GraphqlResponse, BackendError>> {
+        if self.dialect == Dialect::Linear {
+            return Box::pin(self.execute_linear(request));
+        }
         Box::pin(async move {
             let operation = request.operation_name.clone();
             let response = self
@@ -265,6 +291,144 @@ impl Transport for HttpTransport {
                 scopes,
                 errors,
             })
+        })
+    }
+}
+
+/// One of Linear's two budgets, as its headers report it.
+struct LinearBudget {
+    remaining: Option<u64>,
+    limit: Option<u64>,
+    /// Epoch seconds (Linear sends milliseconds).
+    reset: Option<u64>,
+}
+
+impl LinearBudget {
+    fn read(headers: &reqwest::header::HeaderMap, kind: &str) -> Self {
+        let get = |what: &str| header_u64(headers, &format!("x-ratelimit-{kind}-{what}"));
+        Self {
+            remaining: get("remaining"),
+            limit: get("limit"),
+            reset: get("reset").map(|ms| ms / 1000),
+        }
+    }
+
+    /// Remaining over limit, scaled by 1e6 so budgets of different sizes compare.
+    fn fraction(&self) -> Option<u64> {
+        match (self.remaining, self.limit) {
+            (Some(remaining), Some(limit)) if limit > 0 => {
+                Some(remaining.saturating_mul(1_000_000) / limit)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The tighter of Linear's request and complexity budgets, and the wait until the later reset.
+fn linear_rate(headers: &reqwest::header::HeaderMap) -> (RateInfo, Option<u64>) {
+    let budgets = [
+        LinearBudget::read(headers, "requests"),
+        LinearBudget::read(headers, "complexity"),
+    ];
+    let tighter = budgets
+        .iter()
+        .filter_map(|b| b.fraction().map(|f| (f, b)))
+        .min_by_key(|(f, _)| *f)
+        .map(|(_, b)| b);
+    let rate = RateInfo {
+        remaining: tighter.and_then(|b| b.remaining).map(|v| v as u32),
+        limit: tighter.and_then(|b| b.limit).map(|v| v as u32),
+        reset_epoch: tighter.and_then(|b| b.reset),
+    };
+    let later_reset = budgets.iter().filter_map(|b| b.reset).max();
+    (rate, later_reset)
+}
+
+impl HttpTransport {
+    /// Linear's dialect: the key goes in `Authorization` as is, errors carry
+    /// `extensions.code`, and nothing is tolerated alongside data.
+    async fn execute_linear(
+        &self,
+        request: GraphqlRequest,
+    ) -> Result<GraphqlResponse, BackendError> {
+        let operation = request.operation_name.clone();
+        let mut key = reqwest::header::HeaderValue::from_str(&self.token).map_err(|_| {
+            BackendError::Unauthorized {
+                provider: Provider::Linear,
+            }
+        })?;
+        key.set_sensitive(true);
+        let response = self
+            .client
+            .post(&self.endpoint)
+            .header(reqwest::header::AUTHORIZATION, key)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| BackendError::Network(e.without_url().to_string()))?;
+        let status = response.status();
+        let (rate, later_reset) = linear_rate(response.headers());
+        tracing::debug!(%operation, status = status.as_u16(), "graphql request");
+        let unauthorized = || BackendError::Unauthorized {
+            provider: Provider::Linear,
+        };
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(unauthorized());
+        }
+        let text = response
+            .text()
+            .await
+            .map_err(|e| BackendError::Decode(e.without_url().to_string()))?;
+        let body = match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(body) => body,
+            Err(_) if !status.is_success() => {
+                return Err(BackendError::Network(format!("HTTP {status}")));
+            }
+            Err(e) => return Err(BackendError::Decode(e.to_string())),
+        };
+        let errors: Vec<GraphqlErrorEntry> = body
+            .get("errors")
+            .and_then(|e| e.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|e| GraphqlErrorEntry {
+                        message: e["message"].as_str().unwrap_or_default().to_string(),
+                        kind: e["extensions"]["code"].as_str().map(str::to_string),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let has_code = |code: &str| errors.iter().any(|e| e.kind.as_deref() == Some(code));
+        if has_code("AUTHENTICATION_ERROR") {
+            return Err(unauthorized());
+        }
+        if has_code("RATELIMITED") {
+            let now = time::OffsetDateTime::now_utc().unix_timestamp().max(0) as u64;
+            return Err(BackendError::RateLimited {
+                retry_after_secs: later_reset
+                    .map(|reset| reset.saturating_sub(now))
+                    .unwrap_or(60),
+            });
+        }
+        if has_code("FORBIDDEN") {
+            return Err(BackendError::MissingPermission {
+                provider: Provider::Linear,
+                needed: vec![],
+            });
+        }
+        if !errors.is_empty() {
+            return Err(BackendError::Api(errors));
+        }
+        if !status.is_success() && body.get("data").is_none() {
+            return Err(BackendError::Network(format!("HTTP {status}")));
+        }
+        let data = body.get("data").cloned().unwrap_or(serde_json::Value::Null);
+        Ok(GraphqlResponse {
+            data,
+            rate,
+            scopes: None,
+            errors: Vec::new(),
         })
     }
 }
@@ -562,5 +726,178 @@ mod tests {
         assert_eq!(interpret_body(body.clone()).unwrap()["x"], 1);
         let (data, errors) = interpret_body_keeping_errors(body).unwrap();
         assert_eq!((data["x"].as_i64(), errors.len()), (Some(1), 1));
+    }
+
+    async fn linear_server_with(template: ResponseTemplate) -> (MockServer, HttpTransport) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(header("authorization", "lin_api_k"))
+            .respond_with(template)
+            .mount(&server)
+            .await;
+        let transport = HttpTransport::linear_with_endpoint(
+            "lin_api_k".into(),
+            format!("{}/graphql", server.uri()),
+        );
+        (server, transport)
+    }
+
+    fn linear_error(code: &str, message: &str) -> serde_json::Value {
+        json!({"data": null, "errors": [{"message": message, "extensions": {"code": code}}]})
+    }
+
+    #[tokio::test]
+    async fn linear_sends_the_key_without_bearer_and_reads_data() {
+        let (_s, t) = linear_server_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"viewer": {"id": "u1"}}})),
+        )
+        .await;
+        let r = t.execute(request()).await.unwrap();
+        assert_eq!(r.data["viewer"]["id"], "u1");
+        assert_eq!(r.rate, RateInfo::default());
+        assert_eq!(r.scopes, None);
+        assert!(r.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn linear_reports_the_tighter_budget() {
+        let (_s, t) = linear_server_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": {}}))
+                .insert_header("x-ratelimit-requests-remaining", "4500")
+                .insert_header("x-ratelimit-requests-limit", "5000")
+                .insert_header("x-ratelimit-requests-reset", "1700000100000")
+                .insert_header("x-ratelimit-complexity-remaining", "100000")
+                .insert_header("x-ratelimit-complexity-limit", "3000000")
+                .insert_header("x-ratelimit-complexity-reset", "1700000200000"),
+        )
+        .await;
+        let r = t.execute(request()).await.unwrap();
+        assert_eq!(r.rate.remaining, Some(100000));
+        assert_eq!(r.rate.limit, Some(3000000));
+        assert_eq!(r.rate.reset_epoch, Some(1700000200));
+        assert!(r.rate.is_low());
+    }
+
+    #[tokio::test]
+    async fn linear_bad_key_is_unauthorized() {
+        let (_s, t) = linear_server_with(ResponseTemplate::new(401).set_body_json(linear_error(
+            "AUTHENTICATION_ERROR",
+            "Authentication required, not authenticated",
+        )))
+        .await;
+        assert_eq!(
+            t.execute(request()).await,
+            Err(BackendError::Unauthorized {
+                provider: Provider::Linear
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn linear_authentication_error_code_is_unauthorized_at_any_status() {
+        let (_s, t) = linear_server_with(
+            ResponseTemplate::new(200)
+                .set_body_json(linear_error("AUTHENTICATION_ERROR", "not authenticated")),
+        )
+        .await;
+        assert_eq!(
+            t.execute(request()).await,
+            Err(BackendError::Unauthorized {
+                provider: Provider::Linear
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn linear_ratelimited_waits_until_the_reset() {
+        let reset_ms = (now() + 120) * 1000;
+        let (_s, t) = linear_server_with(
+            ResponseTemplate::new(400)
+                .set_body_json(linear_error("RATELIMITED", "Rate limit exceeded"))
+                .insert_header("x-ratelimit-requests-remaining", "0")
+                .insert_header("x-ratelimit-requests-limit", "5000")
+                .insert_header("x-ratelimit-requests-reset", reset_ms.to_string().as_str()),
+        )
+        .await;
+        assert_wait_near(t.execute(request()).await, 120);
+    }
+
+    #[tokio::test]
+    async fn linear_ratelimited_without_resets_waits_a_minute() {
+        let (_s, t) = linear_server_with(
+            ResponseTemplate::new(400)
+                .set_body_json(linear_error("RATELIMITED", "Rate limit exceeded")),
+        )
+        .await;
+        assert_eq!(
+            t.execute(request()).await,
+            Err(BackendError::RateLimited {
+                retry_after_secs: 60
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn linear_forbidden_is_missing_permission() {
+        let (_s, t) = linear_server_with(
+            ResponseTemplate::new(200).set_body_json(linear_error("FORBIDDEN", "not allowed")),
+        )
+        .await;
+        assert_eq!(
+            t.execute(request()).await,
+            Err(BackendError::MissingPermission {
+                provider: Provider::Linear,
+                needed: vec![]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn linear_entity_not_found_is_api_with_its_code() {
+        let (_s, t) = linear_server_with(
+            ResponseTemplate::new(200)
+                .set_body_json(linear_error("INPUT_ERROR", "Entity not found: Issue")),
+        )
+        .await;
+        assert_eq!(
+            t.execute(request()).await,
+            Err(BackendError::Api(vec![GraphqlErrorEntry {
+                message: "Entity not found: Issue".into(),
+                kind: Some("INPUT_ERROR".into()),
+            }]))
+        );
+    }
+
+    #[tokio::test]
+    async fn linear_errors_alongside_data_are_still_an_error() {
+        let body = json!({"data": {"x": 1}, "errors": [{"message": "partial", "extensions": {"code": "NOT_FOUND"}}]});
+        let (_s, t) = linear_server_with(ResponseTemplate::new(200).set_body_json(body)).await;
+        assert!(matches!(
+            t.execute(request()).await,
+            Err(BackendError::Api(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn linear_html_502_is_network() {
+        let (_s, t) = linear_server_with(
+            ResponseTemplate::new(502).set_body_string("<html>Bad Gateway</html>"),
+        )
+        .await;
+        match t.execute(request()).await {
+            Err(BackendError::Network(m)) => assert!(m.contains("502"), "{m}"),
+            other => panic!("expected Network, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn linear_non_json_success_is_decode() {
+        let (_s, t) = linear_server_with(ResponseTemplate::new(200).set_body_string("nope")).await;
+        assert!(matches!(
+            t.execute(request()).await,
+            Err(BackendError::Decode(_))
+        ));
     }
 }
