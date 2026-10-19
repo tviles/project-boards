@@ -136,8 +136,13 @@ pub fn render_picker(frame: &mut Frame, area: Rect, state: &PickerState, theme: 
     let mut rows = Vec::new();
     let mut selected_row = 0;
     let mut section = None;
+    // A GitHub-only list draws no header: a GitHub user's picker reads as it always has.
+    let headers = state
+        .candidates
+        .iter()
+        .any(|p| p.section() != PickerSection::Github);
     for (i, p) in state.visible().into_iter().enumerate() {
-        if section != Some(p.section()) {
+        if headers && section != Some(p.section()) {
             section = Some(p.section());
             rows.push(Line::styled(section_title(p.section()), theme.heading()));
         }
@@ -385,8 +390,8 @@ mod tests {
         let drawn: Vec<&str> = shown.iter().map(|(t, _)| t.as_str()).collect();
         assert_eq!(
             drawn[1..],
-            ["GitHub", "tviles/1  Roadmap", "acme/7  Sprint", note],
-            "{drawn:?}"
+            ["tviles/1  Roadmap", "acme/7  Sprint", note],
+            "a GitHub-only list draws no header: {drawn:?}"
         );
         let (_, style) = shown.last().unwrap();
         assert!(style.add_modifier.contains(ratatui::style::Modifier::DIM));

@@ -2646,6 +2646,14 @@ mod tests {
             screen.contains("tviles/3  App board") && screen.contains("tviles/1  Roadmap"),
             "{screen}"
         );
+        assert!(
+            !screen.contains("│GitHub "),
+            "a GitHub-only list draws no header: {screen}"
+        );
+        assert!(
+            screen.contains("Linear boards: set LINEAR_API_KEY or linear_api_key_command"),
+            "{screen}"
+        );
         assert_eq!(
             c.handle(Input::Key(code(crossterm::event::KeyCode::Down)), t0),
             Vec::new()
