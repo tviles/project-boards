@@ -328,7 +328,7 @@ async fn l3_l4_l5_views(linear: &Linear, team_b: &str, project: &str) {
 async fn l6_errors(linear: &Linear) {
     println!("## L6: errors\n");
 
-    let bad = Linear::unguarded("lin_api_invalid0000".into());
+    let bad = Linear::for_error_probe("lin_api_invalid0000".into());
     let body = TestbedViewer::build_query(testbed_viewer::Variables {});
     match bad.post(&body).await {
         Ok(raw) => println!("- bad key, TestbedViewer: {}", describe(&raw)),
@@ -346,7 +346,7 @@ async fn l6_errors(linear: &Linear) {
 
     match std::env::var("PB_LINEAR_REVOKED_KEY") {
         Ok(key) if !key.trim().is_empty() => {
-            let revoked = Linear::unguarded(key.trim().to_string());
+            let revoked = Linear::for_error_probe(key.trim().to_string());
             match revoked.post(&body).await {
                 Ok(raw) if raw.status == 200 && !raw.data().is_null() => println!(
                     "- WARNING: PB_LINEAR_REVOKED_KEY still works \u{2014} it is not revoked (HTTP 200 with data)"

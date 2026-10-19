@@ -3,6 +3,7 @@
 pub mod client;
 pub mod convert;
 pub mod ids;
+pub mod record;
 pub mod token;
 pub mod views;
 
