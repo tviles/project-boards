@@ -1,5 +1,5 @@
-//! Seeds the Linear testbed workspace (tests/linear-testbed.toml). Idempotent: run it again
-//! and it only adds what is missing. Refuses to run against any other workspace.
+//! Seeds the Linear testbed workspace (tests/linear-testbed.toml). Re-runnable: run it again
+//! and it adds what is missing (a duplicate relation lost to an interrupted run is not re-created). Refuses to run against any other workspace.
 //! Run: cargo run --example seed_linear_testbed
 //! Exit status 2: Linear has not created the cycles yet (nothing was created after that point).
 //! Prints counts and invented names only, never a person's name or email, never the key.
