@@ -1,7 +1,7 @@
 //! Wraps a transport and writes every successful response to disk, for PB_RECORD=1 runs.
 
 use crate::error::BackendError;
-use crate::github::transport::{BoxFuture, GraphqlRequest, GraphqlResponse, Transport};
+use crate::transport::{BoxFuture, GraphqlRequest, GraphqlResponse, Transport};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -49,7 +49,7 @@ impl Transport for RecordingTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::fixture::FixtureTransport;
+    use crate::transport::fixture::FixtureTransport;
     use serde_json::json;
 
     #[tokio::test]

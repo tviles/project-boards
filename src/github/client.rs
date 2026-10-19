@@ -94,14 +94,7 @@ impl Github {
     }
 }
 
-/// One page of a connection.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Page<T> {
-    pub nodes: Vec<T>,
-    pub total: usize,
-    /// Cursor for the next page, `None` on the last page.
-    pub next: Option<String>,
-}
+pub use crate::transport::Page;
 
 fn page_meta(conn: &serde_json::Value) -> (usize, Option<String>) {
     let total = conn["totalCount"].as_u64().unwrap_or(0) as usize;

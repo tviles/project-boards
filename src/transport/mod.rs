@@ -1,9 +1,23 @@
+//! The GraphQL transport shared by the GitHub and Linear clients.
+
+pub mod fixture;
+pub mod record;
+
 use crate::error::{BackendError, GraphqlErrorEntry};
 use crate::github::error::{is_tolerable, required_scopes};
 use crate::model::Provider;
 use serde::Serialize;
 use std::future::Future;
 use std::pin::Pin;
+
+/// One page of a connection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Page<T> {
+    pub nodes: Vec<T>,
+    pub total: usize,
+    /// Cursor for the next page, `None` on the last page.
+    pub next: Option<String>,
+}
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 

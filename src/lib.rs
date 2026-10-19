@@ -15,4 +15,5 @@ pub mod ops;
 pub mod state;
 pub mod store;
 pub mod sync;
+pub mod transport;
 pub mod ui;
