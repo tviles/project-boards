@@ -65,6 +65,14 @@ impl State {
             .insert(repo.to_string(), board.to_string());
     }
 
+    /// Forgets `repo`'s board only if it is `board`: another pane may have chosen another.
+    pub fn forget_board(&mut self, repo: &RepoSlug, board: &BoardKey) {
+        let key = repo.to_string();
+        if self.boards_by_repo.get(&key) == Some(&board.to_string()) {
+            self.boards_by_repo.remove(&key);
+        }
+    }
+
     pub fn last_view(&self, board: &BoardKey) -> Option<ViewId> {
         self.last_view.get(&board.to_string()).map(ViewId::new)
     }
@@ -137,6 +145,26 @@ mod tests {
         );
         assert_eq!(s.last_view(&team), Some(ViewId::new("board")));
         assert_eq!(s.last_view(&BoardKey::github("acme", 3)), None);
+    }
+
+    #[test]
+    fn forget_only_removes_the_named_board() {
+        let (app, web): (RepoSlug, RepoSlug) =
+            ("tviles/app".parse().unwrap(), "tviles/web".parse().unwrap());
+        let gone: BoardKey = "tviles/99".parse().unwrap();
+        let team: BoardKey = "linear:team:t1".parse().unwrap();
+        let mut s = State::default();
+        s.remember_board(&app, &team);
+        s.remember_board(&web, &gone);
+        s.forget_board(&app, &gone);
+        assert_eq!(
+            s.remembered_board(&app),
+            Some(team.clone()),
+            "another board"
+        );
+        s.forget_board(&app, &team);
+        assert_eq!(s.remembered_board(&app), None);
+        assert_eq!(s.remembered_board(&web), Some(gone), "another repository");
     }
 
     #[test]

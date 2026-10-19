@@ -51,6 +51,17 @@ impl PaneRegistry {
         Ok(())
     }
 
+    /// Records `pane` under `to` and drops its record under `from` (if it still points at
+    /// `pane`), in one write: a board opened by another key resolved to its canonical one.
+    pub fn rekey(&self, from: &BoardKey, to: &BoardKey, pane: &str) -> std::io::Result<()> {
+        let mut map = self.read();
+        if map.get(&from.to_string()).map(String::as_str) == Some(pane) {
+            map.remove(&from.to_string());
+        }
+        map.insert(to.to_string(), pane.to_string());
+        self.write(&map)
+    }
+
     /// The live pane showing `board`. A record whose pane is gone is discarded.
     pub fn live_pane(&self, cli: &dyn HerdrCli, board: &BoardKey) -> Option<String> {
         let pane = self.lookup(board)?;
@@ -88,6 +99,29 @@ mod tests {
         assert_eq!(reg.live_pane(&fake, &a).as_deref(), Some("p1"));
         assert_eq!(reg.live_pane(&fake, &b), None);
         assert_eq!(reg.lookup(&b), None);
+    }
+
+    #[test]
+    fn rekey_moves_this_panes_record_to_the_new_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = PaneRegistry::new(dir.path());
+        let (key, uuid, other): (BoardKey, BoardKey, BoardKey) = (
+            "linear:team:TBA".parse().unwrap(),
+            "linear:team:1b4e28ba-2fa1-4d3b-a3f5-ef19b5a7633b"
+                .parse()
+                .unwrap(),
+            "tviles/1".parse().unwrap(),
+        );
+        reg.register(&key, "p1").unwrap();
+        reg.register(&other, "p2").unwrap();
+        reg.rekey(&key, &uuid, "p1").unwrap();
+        assert_eq!(reg.lookup(&uuid).as_deref(), Some("p1"));
+        assert_eq!(reg.lookup(&key), None);
+        assert_eq!(reg.lookup(&other).as_deref(), Some("p2"));
+        // The old key now shown by another pane keeps that pane's record.
+        reg.register(&key, "p3").unwrap();
+        reg.rekey(&key, &uuid, "p1").unwrap();
+        assert_eq!(reg.lookup(&key).as_deref(), Some("p3"));
     }
 
     #[test]

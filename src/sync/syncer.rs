@@ -83,8 +83,11 @@ impl Syncer {
         self.send(SyncEvent::Failed { task, error });
     }
 
+    /// Resolves `board` on its own provider's backend, whatever the job's tag: a board opened
+    /// with no board shown (the tag is `None`) still reaches its provider, or reports that
+    /// provider's missing credentials.
     pub async fn resolve(&self, board: &BoardKey) -> Option<Project> {
-        let result = match self.board_backend() {
+        let result = match self.backends.get(board.provider()) {
             Ok(backend) => match (&*backend, board) {
                 (Backend::Github(gh), BoardKey::Github(b)) => gh.resolve_project(b).await,
                 (
@@ -1009,6 +1012,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_resolve_takes_its_backend_from_the_board_not_the_job() {
+        // No board open (the job has no provider), and no Linear credentials.
+        let t = Arc::new(FixtureTransport::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let s = Syncer::new(github_only(&t), None, tx, 2000);
+        assert_eq!(s.resolve(&linear_team()).await, None);
+        assert!(matches!(
+            drain(&mut rx).as_slice(),
+            [SyncEvent::Failed {
+                task: SyncTask::Resolve,
+                error: BackendError::NoCredentials {
+                    provider: Provider::Linear
+                },
+            }]
+        ));
+        assert!(t.requests().is_empty());
+
+        // A GitHub job tag does not send a Linear board to GitHub.
+        let (gh, lin, s, mut rx) = setup_both(Provider::Github);
+        lin.push(
+            "ResolveTeamBoard",
+            json!({"viewer": {"id": "u-1"}, "organization": {"urlKey": "acme"},
+                   "team": {"id": TEAM, "key": "TBA", "name": "Testbed A", "cyclesEnabled": true}}),
+        );
+        let schema = crate::linear::convert::tests::schema_json()
+            .to_string()
+            .replace("team-a", TEAM);
+        lin.push("BoardSchema", serde_json::from_str(&schema).unwrap());
+        lin.push(
+            "TeamProjects",
+            crate::linear::convert::tests::team_projects_json(),
+        );
+        assert!(s.resolve(&linear_team()).await.is_some());
+        assert!(matches!(drain(&mut rx).as_slice(), [SyncEvent::Project(_)]));
+        assert!(gh.requests().is_empty());
+    }
+
+    #[tokio::test]
     async fn a_linear_board_goes_to_the_linear_backend() {
         let (gh, lin, s, mut rx) = setup_both(Provider::Linear);
         lin.push(
@@ -1031,18 +1072,6 @@ mod tests {
         );
         assert_eq!(lin.requests().len(), 3);
         assert!(gh.requests().is_empty(), "nothing goes to GitHub");
-    }
-
-    #[tokio::test]
-    async fn a_board_and_a_backend_of_different_providers_disagree() {
-        let (gh, lin, s, mut rx) = setup_both(Provider::Github);
-        assert_eq!(s.resolve(&linear_team()).await, None);
-        assert!(matches!(
-            drain(&mut rx).as_slice(),
-            [SyncEvent::Failed { task: SyncTask::Resolve, error: BackendError::Decode(m) }]
-                if m == "board and backend disagree"
-        ));
-        assert!(gh.requests().is_empty() && lin.requests().is_empty());
     }
 
     #[tokio::test]
