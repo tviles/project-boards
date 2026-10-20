@@ -74,6 +74,55 @@ pub fn resolve_key() -> Result<String, String> {
 }
 
 /// tests/linear-testbed.toml: invented names only.
+/// Every probe name `PB_PROBES` may select; the first nine run when it is unset.
+pub const ALL_PROBES: [&str; 12] = [
+    "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l11", "l12", "l13",
+];
+/// The 0.4 run order (L1 restores TBA-1 after L6, so it stays where it was).
+const DEFAULT_PROBES: [&str; 9] = ["l2", "l3", "l4", "l5", "l6", "l1", "l7", "l8", "l9"];
+
+/// The probes `PB_PROBES` selects (comma separated, case and spaces ignored, in the order
+/// named, repeats dropped). Unset or blank means L1-L9; the write probes L11-L13 only run when
+/// named. Unknown names are an error that lists them.
+pub fn select_probes(value: Option<&str>) -> Result<Vec<String>, String> {
+    let names: Vec<String> = value
+        .unwrap_or("")
+        .split(',')
+        .map(|n| n.trim().to_lowercase())
+        .filter(|n| !n.is_empty())
+        .collect();
+    if names.is_empty() {
+        return Ok(DEFAULT_PROBES.map(String::from).to_vec());
+    }
+    let unknown: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|n| !ALL_PROBES.contains(n))
+        .collect();
+    if !unknown.is_empty() {
+        return Err(format!(
+            "unknown probe name(s) in PB_PROBES: {}; known: {}",
+            unknown.join(", "),
+            ALL_PROBES.join(", ")
+        ));
+    }
+    let mut picked: Vec<String> = Vec::new();
+    for n in names {
+        if !picked.contains(&n) {
+            picked.push(n);
+        }
+    }
+    Ok(picked)
+}
+
+/// The read-only personal API key for L13, from `PB_LINEAR_READONLY_KEY`. Trimmed, never printed.
+pub fn readonly_key() -> Option<String> {
+    std::env::var("PB_LINEAR_READONLY_KEY")
+        .ok()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Testbed {
     /// The workspace's URL key (linear.app/<url_key>).
@@ -217,9 +266,15 @@ impl Linear {
     /// The testbed client: resolves the testbed key and checks the workspace before
     /// returning, so no other request can reach another workspace.
     pub async fn connect(testbed: &Testbed) -> Result<Self, String> {
+        Self::connect_with_key(resolve_key()?, testbed).await
+    }
+
+    /// Like `connect`, with a key the caller supplies (L13's read-only key); the workspace is
+    /// checked exactly the same way, before any other request.
+    pub async fn connect_with_key(key: String, testbed: &Testbed) -> Result<Self, String> {
         use graphql_client::GraphQLQuery;
         use project_boards_queries::linear::{TestbedViewer, testbed_viewer};
-        let me = Self::build(resolve_key()?, false);
+        let me = Self::build(key, false);
         let raw = me
             .post(&TestbedViewer::build_query(testbed_viewer::Variables {}))
             .await?;

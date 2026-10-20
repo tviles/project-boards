@@ -11,7 +11,7 @@
 mod linear_testbed;
 
 use graphql_client::GraphQLQuery;
-use linear_testbed::{Linear, Raw, testbed};
+use linear_testbed::{Linear, Raw, Testbed, readonly_key, select_probes, testbed};
 use project_boards_queries::linear::*;
 use serde_json::Value;
 use std::time::{Duration, Instant};
@@ -25,13 +25,29 @@ async fn main() {
     let team_a = team_id(&linear, &tb.team_a).await;
     let team_b = team_id(&linear, &tb.team_b).await;
     println!("# Linear phase 0 report\n");
-    l2_page_cost(&linear, &team_a).await;
-    l3_l4_l5_views(&linear, &team_b, &tb.project).await;
-    l6_errors(&linear).await;
-    l1_read_after_write(&linear, &team_a).await;
-    l7_archive_and_trash(&linear, &team_a).await;
-    l8_project_teams(&linear, &tb.project).await;
-    l9_identifier_and_search(&linear, &tb.team_a).await;
+    let picked =
+        select_probes(std::env::var("PB_PROBES").ok().as_deref()).unwrap_or_else(|e| panic!("{e}"));
+    let mut views_done = false;
+    for name in &picked {
+        match name.as_str() {
+            "l1" => l1_read_after_write(&linear, &team_a).await,
+            "l2" => l2_page_cost(&linear, &team_a).await,
+            // L3-L5 are one step (they read the same views): it runs once, whichever is named.
+            "l3" | "l4" | "l5" if views_done => {}
+            "l3" | "l4" | "l5" => {
+                views_done = true;
+                l3_l4_l5_views(&linear, &team_b, &tb.project).await
+            }
+            "l6" => l6_errors(&linear).await,
+            "l7" => l7_archive_and_trash(&linear, &team_a).await,
+            "l8" => l8_project_teams(&linear, &tb.project).await,
+            "l9" => l9_identifier_and_search(&linear, &tb.team_a).await,
+            "l11" => l11_duplicate_ids(&linear, &tb).await,
+            "l12" => l12_sort_order(&linear, &tb).await,
+            "l13" => l13_forbidden(&linear, &tb).await,
+            other => unreachable!("select_probes admits only known names, got {other}"),
+        }
+    }
 }
 
 async fn post(linear: &Linear, body: &impl serde::Serialize) -> Raw {
@@ -696,5 +712,274 @@ async fn l9_identifier_and_search(linear: &Linear, team_key: &str) {
     for (n, v) in endpoint {
         println!("- {n}: {v}");
     }
+    println!();
+}
+
+// ---- L11-L13 (write probes; run only when named in PB_PROBES) -------------------------------
+
+/// A random (version 4) UUID from /dev/urandom. The app's own generator arrives in a later task.
+fn uuid_v4() -> String {
+    use std::io::Read;
+    let mut b = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .unwrap_or_else(|e| panic!("/dev/urandom: {e}"));
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+/// Trashes a throwaway issue and prints only the HTTP status and codes.
+async fn trash_throwaway(linear: &Linear, id: &str) {
+    let raw = post_soft(
+        linear,
+        &ProbeTrash::build_query(probe_trash::Variables { id: id.into() }),
+    )
+    .await;
+    println!(
+        "- trashed throwaway {id}: HTTP {}, success: {}, codes: {}",
+        raw.status,
+        raw.data()["issueDelete"]["success"],
+        codes(&raw)
+    );
+}
+
+fn created_id(raw: &Raw) -> Option<String> {
+    raw.data()["issueCreate"]["issue"]["id"]
+        .as_str()
+        .map(String::from)
+}
+
+async fn create_throwaway(linear: &Linear, team: &str, label: &str) -> Raw {
+    post_soft(
+        linear,
+        &ProbeCreateIssue::build_query(probe_create_issue::Variables {
+            team_id: team.into(),
+            title: format!("[probe] {label}"),
+        }),
+    )
+    .await
+}
+
+async fn issue_order(linear: &Linear, id: &str) -> Raw {
+    post_soft(
+        linear,
+        &ProbeIssueOrder::build_query(probe_issue_order::Variables { id: id.into() }),
+    )
+    .await
+}
+
+/// (sortOrder, prioritySortOrder) of an `issue` read, `None` where the read failed.
+fn orders(raw: &Raw) -> (Option<f64>, Option<f64>) {
+    let issue = &raw.data()["issue"];
+    (
+        issue["sortOrder"].as_f64(),
+        issue["prioritySortOrder"].as_f64(),
+    )
+}
+
+/// L11: what Linear answers when the same client-chosen id is created twice, for an issue and
+/// then for a comment on it. The throwaway issue is trashed at the end; the comment goes with it.
+async fn l11_duplicate_ids(linear: &Linear, testbed: &Testbed) {
+    println!("## L11: duplicate client-chosen ids\n");
+    let team = team_id(linear, &testbed.team_a).await;
+    let id = uuid_v4();
+    println!("- chosen issue id: {id}");
+    let create = || {
+        ProbeCreateIssueWithId::build_query(probe_create_issue_with_id::Variables {
+            id: id.clone(),
+            team_id: team.clone(),
+            title: "[probe] L11 duplicate id".into(),
+        })
+    };
+    let first = post_soft(linear, &create()).await;
+    println!("- issue create, first: {}", describe(&first));
+    let second = post_soft(linear, &create()).await;
+    println!("- issue create, second: {}", describe(&second));
+    println!(
+        "- ids returned: first {}, second {}",
+        first.data()["issueCreate"]["issue"]["id"],
+        second.data()["issueCreate"]["issue"]["id"]
+    );
+    let read = issue_order(linear, &id).await;
+    println!(
+        "- issues carrying that id (ProbeIssueOrder): {} ({})",
+        u8::from(!read.data()["issue"].is_null()),
+        describe(&read)
+    );
+
+    if !read.data()["issue"].is_null() {
+        let comment_id = uuid_v4();
+        println!("- chosen comment id: {comment_id}");
+        let comment = || {
+            ProbeCreateCommentWithId::build_query(probe_create_comment_with_id::Variables {
+                id: comment_id.clone(),
+                issue_id: id.clone(),
+                body: "[probe] L11 duplicate comment id".into(),
+            })
+        };
+        let first = post_soft(linear, &comment()).await;
+        println!("- comment create, first: {}", describe(&first));
+        let second = post_soft(linear, &comment()).await;
+        println!("- comment create, second: {}", describe(&second));
+        println!(
+            "- ids returned: first {}, second {}",
+            first.data()["commentCreate"]["comment"]["id"],
+            second.data()["commentCreate"]["comment"]["id"]
+        );
+        let read = post_soft(
+            linear,
+            &ProbeCommentById::build_query(probe_comment_by_id::Variables {
+                id: comment_id.clone(),
+            }),
+        )
+        .await;
+        println!(
+            "- comments carrying that id (ProbeCommentById): {} ({})",
+            u8::from(!read.data()["comment"].is_null()),
+            describe(&read)
+        );
+    } else {
+        println!("- comment duplicate: not run (the issue was not created)");
+    }
+    // Trash whatever the first create made, by the id it chose or the one it returned.
+    let trash_id = created_id(&first).or_else(|| created_id(&second));
+    match trash_id {
+        Some(t) => trash_throwaway(linear, &t).await,
+        None => println!("- nothing to trash: no create returned an id"),
+    }
+    println!();
+}
+
+/// L12: is a midpoint `sortOrder` kept exactly, and do the neighbours or `prioritySortOrder`
+/// change? Three throwaways, all trashed afterwards (also when something failed).
+async fn l12_sort_order(linear: &Linear, testbed: &Testbed) {
+    println!("## L12: sortOrder\n");
+    let team = team_id(linear, &testbed.team_a).await;
+    let mut ids: Vec<String> = Vec::new();
+    for n in 1..=3 {
+        let raw = create_throwaway(linear, &team, &format!("L12 sort {n}")).await;
+        match created_id(&raw) {
+            Some(id) => ids.push(id),
+            None => println!("- create {n} failed: {}", describe(&raw)),
+        }
+    }
+    if ids.len() == 3 {
+        l12_measure(linear, &ids).await;
+    } else {
+        println!(
+            "- not measured: only {} of 3 throwaways were created",
+            ids.len()
+        );
+    }
+    // Time to look at the manually ordered view in Linear's app before the clean-up.
+    println!("- pausing 20 s before the clean-up");
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    for id in &ids {
+        trash_throwaway(linear, id).await;
+    }
+    println!();
+}
+
+async fn l12_measure(linear: &Linear, ids: &[String]) {
+    let mut before = Vec::new();
+    for (n, id) in ids.iter().enumerate() {
+        let raw = issue_order(linear, id).await;
+        let o = orders(&raw);
+        println!(
+            "- before, issue {}: sortOrder {:?}, prioritySortOrder {:?} ({})",
+            n + 1,
+            o.0,
+            o.1,
+            describe(&raw)
+        );
+        before.push(o);
+    }
+    let (Some(first), Some(second)) = (before[0].0, before[1].0) else {
+        println!("- no midpoint: a sortOrder could not be read");
+        return;
+    };
+    let mid = (first + second) / 2.0;
+    println!("- midpoint of issues 1 and 2: {mid:?}");
+    let set = post_soft(
+        linear,
+        &ProbeSetSortOrder::build_query(probe_set_sort_order::Variables {
+            id: ids[2].clone(),
+            sort_order: mid,
+        }),
+    )
+    .await;
+    println!(
+        "- ProbeSetSortOrder on issue 3: {}; sortOrder returned: {}",
+        describe(&set),
+        set.data()["issueUpdate"]["issue"]["sortOrder"]
+    );
+    let mut after = Vec::new();
+    for (n, id) in ids.iter().enumerate() {
+        let raw = issue_order(linear, id).await;
+        after.push(orders(&raw));
+        println!(
+            "- after, issue {}: sortOrder {:?}, prioritySortOrder {:?}",
+            n + 1,
+            after[n].0,
+            after[n].1
+        );
+    }
+    println!(
+        "- issue 3 kept the midpoint exactly: {}",
+        after[2].0 == Some(mid)
+    );
+    println!(
+        "- issue 1 changed: {}; issue 2 changed: {}",
+        after[0] != before[0],
+        after[1] != before[1]
+    );
+    println!(
+        "- issue 3 prioritySortOrder changed: {}",
+        after[2].1 != before[2].1
+    );
+}
+
+/// L13: a write refused for a read-only key. Needs `PB_LINEAR_READONLY_KEY`; the throwaway is
+/// made with the full key and trashed with it.
+async fn l13_forbidden(linear: &Linear, testbed: &Testbed) {
+    println!("## L13: a refused write\n");
+    let Some(key) = readonly_key() else {
+        println!("- not run (PB_LINEAR_READONLY_KEY is not set)\n");
+        return;
+    };
+    let readonly = match Linear::connect_with_key(key, testbed).await {
+        Ok(client) => client,
+        Err(e) => {
+            println!(
+                "- not run: the read-only key did not connect: {}\n",
+                short(&e)
+            );
+            return;
+        }
+    };
+    let team = team_id(linear, &testbed.team_a).await;
+    let raw = create_throwaway(linear, &team, "L13 forbidden").await;
+    let Some(id) = created_id(&raw) else {
+        println!(
+            "- not run: the throwaway was not created: {}\n",
+            describe(&raw)
+        );
+        return;
+    };
+    let refused = set_priority(&readonly, &id, 2).await;
+    println!(
+        "- ProbeSetPriority with the read-only key: {}",
+        describe(&refused)
+    );
+    trash_throwaway(linear, &id).await;
     println!();
 }

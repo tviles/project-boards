@@ -174,5 +174,10 @@ pub mod linear {
         ProbeTrash,
         ProbeProjectTeams,
         ProbeSearch,
+        ProbeCreateIssueWithId,
+        ProbeCreateCommentWithId,
+        ProbeSetSortOrder,
+        ProbeIssueOrder,
+        ProbeCommentById,
     );
 }
