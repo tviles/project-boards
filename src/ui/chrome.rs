@@ -1,9 +1,9 @@
 //! The whole screen: header, view tabs, body (table, board, detail), status or input line,
 //! and the help, picker and setup overlays.
 
-use crate::backend::read_only_reason;
 use crate::model::Layout;
 use crate::model::Provider;
+use crate::model::caps::provider_caps;
 use crate::ui::app::{App, LineKind, Mode, Popup};
 use crate::ui::board::render_board_with;
 use crate::ui::detail::{build_doc, render_detail};
@@ -226,7 +226,7 @@ fn write_flag_forms(app: &App, now: std::time::Instant) -> Vec<Flag> {
     let mut flags = Vec::new();
     if app
         .project()
-        .is_some_and(|p| !p.viewer_can_update || read_only_reason(p.board.provider()).is_some())
+        .is_some_and(|p| !p.viewer_can_update || provider_caps(p.board.provider()).ops.is_empty())
     {
         flags.push(Flag::same("read-only".into()));
     } else if app.project().is_some() && !app.edit_context().has_project_scope() {
@@ -1228,6 +1228,25 @@ mod tests {
         assert_eq!(write_flags(&a, now), ["writes paused 30s"]);
         a.status.write_pause = Some(now);
         assert!(write_flags(&a, now).is_empty());
+    }
+
+    #[test]
+    fn a_linear_board_without_operations_reads_read_only() {
+        let now = std::time::Instant::now();
+        let mut snap = snapshot();
+        snap.project.board = "linear:team:t1".parse().unwrap();
+        snap.project.viewer_can_update = true;
+        let a = App::new(
+            Box::new(MemoryStore::new(Some(snap))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        assert!(
+            crate::model::caps::provider_caps(crate::model::Provider::Linear)
+                .ops
+                .is_empty()
+        );
+        assert_eq!(write_flags(&a, now), ["read-only"]);
     }
 
     #[test]

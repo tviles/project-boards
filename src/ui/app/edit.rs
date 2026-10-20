@@ -586,6 +586,9 @@ impl App {
                 .project()
                 .map(|p| p.board.provider())
                 .unwrap_or_default(),
+            team_board: self
+                .project()
+                .is_some_and(|p| matches!(p.board, BoardKey::LinearTeam { .. })),
         }
     }
 

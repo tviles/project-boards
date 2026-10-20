@@ -2,7 +2,6 @@
 //! an item allows. The UI offers, hints and runs only what `check` allows, and shows the
 //! `Denial` message for anything else.
 
-use crate::backend::read_only_reason;
 use crate::model::Provider;
 use crate::model::ids::ItemId;
 use crate::model::item::{ContentState, Item, ItemContent};
@@ -90,6 +89,70 @@ pub struct EditContext {
     pub refused: Vec<String>,
     /// The board's provider; a provider that cannot be edited refuses everything first.
     pub provider: Provider,
+    /// The board is a Linear team's board, where every issue of the team is present.
+    pub team_board: bool,
+}
+
+/// Why a provider's boards cannot be edited at all (the 0.4 text).
+pub const LINEAR_READ_ONLY: &str = "Editing Linear boards arrives in 0.5";
+
+/// What a provider can do, apart from what a token or an item allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderCaps {
+    /// The operations the provider supports (`Create` included when it can add items).
+    pub ops: &'static [OpKind],
+    pub drafts: bool,
+    pub milestones: bool,
+    /// The most assignees an item holds; `None` for no limit.
+    pub max_assignees: Option<usize>,
+    /// Whether token scopes gate editing.
+    pub scope_checks: bool,
+    /// Whether an item can be removed from a team board (Linear's team boards hold every
+    /// issue of the team, so there is nothing to remove it from).
+    pub remove_on_team_boards: bool,
+}
+
+const GITHUB_CAPS: ProviderCaps = ProviderCaps {
+    ops: &[
+        OpKind::Move,
+        OpKind::Reorder,
+        OpKind::SetField,
+        OpKind::Archive,
+        OpKind::Unarchive,
+        OpKind::Remove,
+        OpKind::Title,
+        OpKind::Body,
+        OpKind::Assignees,
+        OpKind::Labels,
+        OpKind::Milestone,
+        OpKind::Comment,
+        OpKind::Close,
+        OpKind::Reopen,
+        OpKind::Convert,
+        OpKind::Create,
+    ],
+    drafts: true,
+    milestones: true,
+    max_assignees: None,
+    scope_checks: true,
+    remove_on_team_boards: true,
+};
+
+/// Read-only until the operations are wired in, one by one.
+const LINEAR_CAPS: ProviderCaps = ProviderCaps {
+    ops: &[],
+    drafts: false,
+    milestones: false,
+    max_assignees: Some(1),
+    scope_checks: false,
+    remove_on_team_boards: false,
+};
+
+pub fn provider_caps(provider: Provider) -> &'static ProviderCaps {
+    match provider {
+        Provider::Github => &GITHUB_CAPS,
+        Provider::Linear => &LINEAR_CAPS,
+    }
 }
 
 impl EditContext {
@@ -113,8 +176,13 @@ impl EditContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Denial {
-    /// The board's provider has no editing yet (Linear, until 0.5).
-    ProviderReadOnly(Provider),
+    /// The provider lacks this operation (Linear, for the ones not yet wired in).
+    Unavailable {
+        provider: Provider,
+        kind: OpKind,
+    },
+    /// A team board holds every issue of its team.
+    RemoveOnTeamBoard,
     ReadOnly,
     NoProjectScope,
     NoRepoScope,
@@ -144,9 +212,15 @@ impl Denial {
             None => String::new(),
         };
         match self {
-            Denial::ProviderReadOnly(provider) => read_only_reason(*provider)
-                .unwrap_or("This board is read-only")
-                .into(),
+            Denial::Unavailable { provider, kind } => match (provider, kind) {
+                (Provider::Linear, OpKind::Milestone) => "Linear issues have no milestones".into(),
+                (Provider::Linear, OpKind::Convert) => "Linear has no drafts".into(),
+                _ => LINEAR_READ_ONLY.into(),
+            },
+            Denial::RemoveOnTeamBoard => format!(
+                "Every issue of a team is on its team board; archive it instead{}",
+                hint(OpKind::Archive, "")
+            ),
             Denial::ReadOnly => "This board is read-only for you".into(),
             Denial::NoProjectScope => {
                 "Editing needs the token's project scope: run `gh auth refresh -s project` and reopen the board".into()
@@ -206,48 +280,65 @@ pub fn is_placeholder(id: &ItemId) -> bool {
     id.as_str().starts_with("local:")
 }
 
-/// A provider without editing refuses before any other reason, so it wins over placeholders
-/// and archived items too.
-fn provider_check(ctx: &EditContext) -> Result<(), Denial> {
-    match read_only_reason(ctx.provider) {
-        Some(_) => Err(Denial::ProviderReadOnly(ctx.provider)),
-        None => Ok(()),
-    }
-}
-
-fn board_check(ctx: &EditContext) -> Result<(), Denial> {
-    provider_check(ctx)?;
+fn board_check(caps: &ProviderCaps, ctx: &EditContext) -> Result<(), Denial> {
     if !ctx.viewer_can_update {
         return Err(Denial::ReadOnly);
     }
-    if !ctx.has_project_scope() {
+    if caps.scope_checks && !ctx.has_project_scope() {
         return Err(Denial::NoProjectScope);
     }
     Ok(())
 }
 
 /// Whether a new item can be added: a draft or existing item (`needs_repo: false`) needs
-/// only the board; a new issue also needs the repo scope.
+/// only the board; a new issue also needs the repo scope where scopes matter.
 pub fn check_new(needs_repo: bool, ctx: &EditContext) -> Result<(), Denial> {
-    board_check(ctx)?;
-    if needs_repo && !ctx.has_repo_scope() {
+    check_new_with(provider_caps(ctx.provider), needs_repo, ctx)
+}
+
+fn check_new_with(caps: &ProviderCaps, needs_repo: bool, ctx: &EditContext) -> Result<(), Denial> {
+    unavailable(caps, ctx.provider, OpKind::Create)?;
+    board_check(caps, ctx)?;
+    if needs_repo && caps.scope_checks && !ctx.has_repo_scope() {
         return Err(Denial::NoRepoScope);
     }
     Ok(())
 }
 
+/// A provider without the operation refuses before any other reason, so it wins over
+/// placeholders and archived items too.
+fn unavailable(caps: &ProviderCaps, provider: Provider, kind: OpKind) -> Result<(), Denial> {
+    if caps.ops.contains(&kind) {
+        Ok(())
+    } else {
+        Err(Denial::Unavailable { provider, kind })
+    }
+}
+
 /// Whether `kind` is allowed on `item`; the reason when it is not.
 pub fn check(kind: OpKind, item: &Item, ctx: &EditContext) -> Result<(), Denial> {
+    check_with(provider_caps(ctx.provider), kind, item, ctx)
+}
+
+fn check_with(
+    caps: &ProviderCaps,
+    kind: OpKind,
+    item: &Item,
+    ctx: &EditContext,
+) -> Result<(), Denial> {
     use OpKind::*;
-    provider_check(ctx)?;
+    unavailable(caps, ctx.provider, kind)?;
     if kind == Create {
         // The board decides; which item is selected does not matter.
-        return board_check(ctx);
+        return board_check(caps, ctx);
     }
     if is_placeholder(&item.id) {
         return Err(Denial::Creating);
     }
-    board_check(ctx)?;
+    board_check(caps, ctx)?;
+    if kind == Remove && ctx.team_board && !caps.remove_on_team_boards {
+        return Err(Denial::RemoveOnTeamBoard);
+    }
     if item.archived {
         return if matches!(kind, Unarchive | Remove) {
             Ok(())
@@ -270,7 +361,7 @@ pub fn check(kind: OpKind, item: &Item, ctx: &EditContext) -> Result<(), Denial>
                 Reorder | SetField => Ok(()),
                 Labels | Milestone | Comment => Err(Denial::DraftHasNo(kind)),
                 Close | Reopen => Err(Denial::DraftNotClosable),
-                Convert if ctx.has_repo_scope() => Ok(()),
+                Convert if !caps.scope_checks || ctx.has_repo_scope() => Ok(()),
                 Convert => Err(Denial::NoRepoScope),
                 Move | Archive | Unarchive | Remove | Create => Ok(()),
             };
@@ -297,7 +388,7 @@ pub fn check(kind: OpKind, item: &Item, ctx: &EditContext) -> Result<(), Denial>
     if !matches!(kind, Reorder | SetField) {
         needs_content_id(item)?;
     }
-    if !ctx.has_repo_scope() {
+    if caps.scope_checks && !ctx.has_repo_scope() {
         return Err(Denial::NoRepoScope);
     }
     Ok(())
@@ -314,7 +405,6 @@ pub fn capabilities(item: &Item, ctx: &EditContext) -> Vec<OpKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::LINEAR_READ_ONLY;
     use crate::model::item::tests::issue;
     use crate::model::{ContentRef, ItemId};
 
@@ -324,6 +414,7 @@ mod tests {
             scopes: Some(vec!["project".into(), "repo".into()]),
             refused: vec![],
             provider: Provider::Github,
+            team_board: false,
         }
     }
 
@@ -442,12 +533,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn every_edit_on_a_linear_board_says_it_arrives_in_0_5() {
-        let linear = EditContext {
+    fn linear_ctx() -> EditContext {
+        EditContext {
             provider: Provider::Linear,
+            scopes: None,
             ..ctx()
-        };
+        }
+    }
+
+    #[test]
+    fn github_caps_list_every_operation() {
+        let caps = provider_caps(Provider::Github);
+        for kind in OpKind::ALL {
+            assert!(caps.ops.contains(&kind), "{kind:?}");
+        }
+        assert!(caps.ops.contains(&Create));
+        assert!(caps.drafts && caps.milestones && caps.scope_checks);
+        assert!(caps.remove_on_team_boards);
+        assert_eq!(caps.max_assignees, None);
+    }
+
+    #[test]
+    fn linear_refuses_kinds_it_lacks_with_the_04_text() {
         let none = |_: OpKind| None;
         let mut archived = issue("i", 1, "x");
         archived.archived = true;
@@ -458,14 +565,32 @@ mod tests {
             with(ItemContent::Redacted),
             with(ItemContent::Draft { title: "d".into() }),
         ];
+        let linear = linear_ctx();
         for item in &items {
             for kind in OpKind::ALL.into_iter().chain([Create]) {
                 let denial = check(kind, item, &linear).unwrap_err();
-                assert_eq!(denial, Denial::ProviderReadOnly(Provider::Linear));
-                assert_eq!(denial.message(&none), LINEAR_READ_ONLY, "{kind:?}");
+                let expected = match kind {
+                    Milestone => "Linear issues have no milestones",
+                    Convert => "Linear has no drafts",
+                    _ => LINEAR_READ_ONLY,
+                };
+                assert_eq!(
+                    denial,
+                    Denial::Unavailable {
+                        provider: Provider::Linear,
+                        kind
+                    }
+                );
+                assert_eq!(denial.message(&none), expected, "{kind:?}");
             }
             assert!(capabilities(item, &linear).is_empty());
         }
+        assert_eq!(
+            check(Move, &issue("i", 1, "x"), &linear)
+                .unwrap_err()
+                .message(&none),
+            LINEAR_READ_ONLY
+        );
         for needs_repo in [false, true] {
             let denial = check_new(needs_repo, &linear).unwrap_err();
             assert_eq!(denial.message(&none), LINEAR_READ_ONLY);
@@ -480,6 +605,98 @@ mod tests {
             LINEAR_READ_ONLY,
             "the provider reason wins over every other"
         );
+    }
+
+    #[test]
+    fn linear_milestone_and_convert_have_their_own_reasons() {
+        let none = |_: OpKind| None;
+        let linear = linear_ctx();
+        let i = issue("i", 1, "x");
+        assert_eq!(
+            check(Milestone, &i, &linear).unwrap_err().message(&none),
+            "Linear issues have no milestones"
+        );
+        assert_eq!(
+            check(Convert, &i, &linear).unwrap_err().message(&none),
+            "Linear has no drafts"
+        );
+    }
+
+    const LINEAR_TITLE_ONLY: ProviderCaps = ProviderCaps {
+        ops: &[Title, Remove, Create],
+        drafts: false,
+        milestones: false,
+        max_assignees: Some(1),
+        scope_checks: false,
+        remove_on_team_boards: false,
+    };
+
+    #[test]
+    fn linear_skips_scope_checks() {
+        let c = EditContext {
+            scopes: Some(vec![]),
+            ..linear_ctx()
+        };
+        let i = issue("i", 1, "x");
+        assert_eq!(check_with(&LINEAR_TITLE_ONLY, Title, &i, &c), Ok(()));
+        assert_eq!(check_with(&LINEAR_TITLE_ONLY, Create, &i, &c), Ok(()));
+        assert_eq!(check_new_with(&LINEAR_TITLE_ONLY, true, &c), Ok(()));
+        // A set with scope checks refuses the same context.
+        let gh = ProviderCaps {
+            scope_checks: true,
+            ..LINEAR_TITLE_ONLY
+        };
+        assert_eq!(check_with(&gh, Title, &i, &c), Err(Denial::NoProjectScope));
+        // Read-only boards still refuse.
+        let ro = EditContext {
+            viewer_can_update: false,
+            ..c
+        };
+        assert_eq!(
+            check_with(&LINEAR_TITLE_ONLY, Title, &i, &ro),
+            Err(Denial::ReadOnly)
+        );
+    }
+
+    #[test]
+    fn check_new_needs_create_in_the_ops() {
+        let no_create = ProviderCaps {
+            ops: &[Title],
+            ..LINEAR_TITLE_ONLY
+        };
+        assert!(check_new_with(&no_create, false, &linear_ctx()).is_err());
+        assert_eq!(
+            check_new_with(&LINEAR_TITLE_ONLY, false, &linear_ctx()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn remove_is_refused_on_team_boards_only() {
+        let none = |_: OpKind| None;
+        let i = issue("i", 1, "x");
+        let team = EditContext {
+            team_board: true,
+            ..linear_ctx()
+        };
+        let denial = check_with(&LINEAR_TITLE_ONLY, Remove, &i, &team).unwrap_err();
+        assert_eq!(denial, Denial::RemoveOnTeamBoard);
+        assert_eq!(
+            denial.message(&none),
+            "Every issue of a team is on its team board; archive it instead"
+        );
+        let keys = |k: OpKind| (k == Archive).then(|| "A".to_string());
+        assert!(denial.message(&keys).ends_with("instead (`A`)"));
+        assert_eq!(
+            check_with(&LINEAR_TITLE_ONLY, Remove, &i, &linear_ctx()),
+            Ok(())
+        );
+        // GitHub removes on any board.
+        let gh = EditContext {
+            team_board: true,
+            ..ctx()
+        };
+        assert_eq!(check(Remove, &i, &gh), Ok(()));
     }
 
     #[test]

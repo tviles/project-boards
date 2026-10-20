@@ -55,16 +55,6 @@ pub fn profile_for(provider: Provider) -> SyncProfile {
     }
 }
 
-/// Why a provider's boards cannot be edited, when they cannot.
-pub const LINEAR_READ_ONLY: &str = "Editing Linear boards arrives in 0.5";
-
-pub fn read_only_reason(provider: Provider) -> Option<&'static str> {
-    match provider {
-        Provider::Github => None,
-        Provider::Linear => Some(LINEAR_READ_ONLY),
-    }
-}
-
 pub enum Backend {
     Github(Github),
     Linear(Linear),
