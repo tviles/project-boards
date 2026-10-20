@@ -36,17 +36,15 @@ const FIXTURE_VIEWS: [&str; 4] = [
     "Fixture by due",
 ];
 
-static TRANSPORT: OnceLock<Arc<dyn Transport>> = OnceLock::new();
+static KEY: OnceLock<String> = OnceLock::new();
 static GUARDED: AtomicBool = AtomicBool::new(false);
 
-/// One transport over the testbed key per run, so the key is resolved once.
+/// A new transport over the testbed key, resolved once per run. Each call builds its own HTTP
+/// client: every `#[tokio::test]` has its own runtime, and a connection pooled on a runtime
+/// that has since been dropped fails with `Network`.
 fn transport() -> Arc<dyn Transport> {
-    TRANSPORT
-        .get_or_init(|| {
-            let key = resolve_key().unwrap_or_else(|e| panic!("{e}"));
-            Arc::new(HttpTransport::linear(key))
-        })
-        .clone()
+    let key = KEY.get_or_init(|| resolve_key().unwrap_or_else(|e| panic!("{e}")));
+    Arc::new(HttpTransport::linear(key.clone()))
 }
 
 /// The testbed transport, for clients built after `guarded()` has checked the workspace.
