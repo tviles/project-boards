@@ -131,13 +131,21 @@ const CLI_FORMS: &str =
 impl BoardKey {
     /// What `--project` accepts: any board key, or a Linear project URL
     /// (`https://linear.app/<workspace>/project/<slug>-<slugId>[/...]`), which names the
-    /// project by the slug id after the last `-`.
+    /// project by the slug id after the last `-`. A full slug in `linear:project:<slug>` is
+    /// cut to its slug id the same way; a UUID is kept whole.
     pub fn parse_cli(text: &str) -> Result<BoardKey, String> {
         let Some(rest) = text
             .strip_prefix("https://")
             .or_else(|| text.strip_prefix("http://"))
         else {
-            return text.parse();
+            return match text.parse()? {
+                Self::LinearProject { id } if !is_uuid(&id) && id.contains('-') => id
+                    .rsplit_once('-')
+                    .and_then(|(_, slug_id)| linear_id(slug_id))
+                    .map(|id| Self::LinearProject { id })
+                    .ok_or_else(|| CLI_FORMS.to_string()),
+                key => Ok(key),
+            };
         };
         let rest = rest.split(['?', '#']).next().unwrap_or(rest);
         let mut parts = rest.split('/');
@@ -323,12 +331,23 @@ mod tests {
             BoardKey::parse_cli("linear:team:ENG"),
             Ok(BoardKey::LinearTeam { id: "ENG".into() })
         );
-        assert_eq!(
-            BoardKey::parse_cli("linear:project:launch-plan-1a2b3c4d5e6f"),
-            Ok(BoardKey::LinearProject {
-                id: "launch-plan-1a2b3c4d5e6f".into()
-            })
-        );
+        // A full slug names the project by its slug id, the part after the last `-`, the
+        // only part Linear resolves; a slug id or a UUID is kept as given.
+        for (given, id) in [
+            ("launch-plan-1a2b3c4d5e6f", "1a2b3c4d5e6f"),
+            ("1a2b3c4d5e6f", "1a2b3c4d5e6f"),
+            (
+                "7d0c2f6e-1b7a-4c1e-9a55-0d3c1e2f4a6b",
+                "7d0c2f6e-1b7a-4c1e-9a55-0d3c1e2f4a6b",
+            ),
+        ] {
+            assert_eq!(
+                BoardKey::parse_cli(&format!("linear:project:{given}")),
+                Ok(BoardKey::LinearProject { id: id.into() }),
+                "{given}"
+            );
+        }
+        assert!(BoardKey::parse_cli("linear:project:launch-").is_err());
         assert_eq!(
             BoardKey::parse_cli("acme/3"),
             Ok(BoardKey::github("acme", 3))
