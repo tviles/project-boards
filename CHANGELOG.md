@@ -75,13 +75,9 @@ Item operations: the first release that edits a board.
 - An item you edit stays in place until you leave the view or press `r`, dimmed and marked ⊘ when the view's filter no longer matches it; on a board a temporary "(filtered)" column holds a card moved into a hidden column.
 - `Space` lists everything you can do with the selected item, with its key, and always offers "Open in the browser". The bottom line lists the edit keys the item allows, and an edit key the item does not allow says why. The same keys work in the item detail.
 - The header shows `saving N…` while edits are sending and `writes paused Ns` while GitHub asks the plugin to slow down; `read-only` when you cannot edit the board, and the missing scope when the token lacks `project`.
-- Quitting with edits still sending asks first.
+- Quitting with `q` while edits are still sending asks first; `Ctrl+C` still quits at once, dropping edits not yet sent.
 - `doctor` says whether the token can edit boards and issues.
 - The help overlay scrolls when the pane is short.
-
-### Changed
-
-- `Ctrl+C` quits at once without asking; edits not yet sent are dropped.
 
 ### Fixed
 
