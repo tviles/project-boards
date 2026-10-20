@@ -1,5 +1,5 @@
 //! References to GitHub objects an edit names by node id: users, labels, milestones,
-//! repositories, and an item's own content.
+//! repositories, and an item's own content; and a Linear team's candidates.
 
 use crate::model::ids::RepoSlug;
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,21 @@ pub struct RepoCandidates {
     pub labels: Vec<LabelRef>,
     pub milestones: Vec<MilestoneRef>,
     /// True when users, labels or milestones hit their cap, so a list is partial.
+    pub truncated: bool,
+}
+
+/// What the assignee and label editors offer for one Linear team: the Linear twin of
+/// `RepoCandidates`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TeamCandidates {
+    /// The team's id.
+    pub team: String,
+    /// The team's members; `login` holds the display name.
+    pub users: Vec<UserRef>,
+    /// The team's labels, then the workspace's, without group labels or the children of
+    /// single-select groups (those are set through their group's field).
+    pub labels: Vec<LabelRef>,
+    /// True when members, team labels or workspace labels hit their cap, so a list is partial.
     pub truncated: bool,
 }
 

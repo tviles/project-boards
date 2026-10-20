@@ -40,7 +40,7 @@ fn not_found(board: &BoardKey) -> BackendError {
 }
 
 /// Linear's answer to `project(id:)` or `team(id:)` for an id it does not know.
-fn is_entity_not_found(e: &BackendError) -> bool {
+pub(super) fn is_entity_not_found(e: &BackendError) -> bool {
     matches!(e, BackendError::Api(entries) if entries.iter().any(|e| {
         e.kind.as_deref() == Some("INPUT_ERROR") && e.message.starts_with("Entity not found")
     }))
@@ -121,7 +121,7 @@ impl Linear {
     }
 
     /// Sends `request`, remembers the rate it reports, and returns its data.
-    async fn data(&self, request: GraphqlRequest) -> Result<Value, BackendError> {
+    pub(super) async fn data(&self, request: GraphqlRequest) -> Result<Value, BackendError> {
         let response = self.transport.execute(request).await?;
         *self.rate.lock().unwrap() = response.rate;
         Ok(response.data)
@@ -481,7 +481,7 @@ fn tabs(project_views: &[&Value], schema: &Value, fields: &[Field]) -> Vec<View>
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::error::GraphqlErrorEntry;
     use crate::linear::convert::tests::{issue_json, schema_json, team_projects_json};
@@ -1105,7 +1105,7 @@ mod tests {
     }
 
     /// Every literal `first: N` in a query's text.
-    fn literal_firsts(query: &str) -> Vec<u64> {
+    pub(crate) fn literal_firsts(query: &str) -> Vec<u64> {
         query
             .match_indices("first:")
             .filter_map(|(at, _)| {

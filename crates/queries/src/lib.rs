@@ -134,6 +134,14 @@ pub mod linear {
         IssueDetail,
         ListBoards,
         LinearViewer,
+        IssueUpdate,
+        IssueCreate,
+        IssueArchive,
+        IssueUnarchive,
+        CommentCreate,
+        IssueByKey,
+        CommentById,
+        TeamCandidates,
     );
 
     #[cfg(feature = "live")]

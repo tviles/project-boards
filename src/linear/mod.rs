@@ -6,5 +6,6 @@ pub mod ids;
 pub mod record;
 pub mod token;
 pub mod views;
+pub mod write;
 
 pub use client::Linear;
