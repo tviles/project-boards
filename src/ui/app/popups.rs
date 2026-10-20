@@ -221,6 +221,42 @@ pub(crate) fn iteration_choices(
     out
 }
 
+/// `field` with only the cycles of `item`'s team, on a Linear board's Cycle field (spec
+/// section 6); unchanged otherwise, and while the board does not know the issue's team.
+fn team_cycles(project: &Project, item: &Item, field: &Field) -> Field {
+    let (Some(meta), Some(team)) = (
+        project.linear.as_ref(),
+        crate::model::teams::issue_team(project, item),
+    ) else {
+        return field.clone();
+    };
+    let FieldKind::Iteration {
+        iterations,
+        completed,
+    } = &field.kind
+    else {
+        return field.clone();
+    };
+    if field.id.as_str() != crate::model::teams::CYCLE_FIELD {
+        return field.clone();
+    }
+    let owners = &meta.owners;
+    let own = |cycles: &[Iteration]| -> Vec<Iteration> {
+        cycles
+            .iter()
+            .filter(|c| owners.get(c.id.as_str()) == Some(&team.id))
+            .cloned()
+            .collect()
+    };
+    Field {
+        kind: FieldKind::Iteration {
+            iterations: own(iterations),
+            completed: own(completed),
+        },
+        ..field.clone()
+    }
+}
+
 /// The date at `offset` when it is `now`.
 fn local_date(now: time::OffsetDateTime, offset: time::UtcOffset) -> time::Date {
     now.to_offset(offset).date()
@@ -251,18 +287,26 @@ fn is_unchanged(field: &Field, current: Option<&FieldValue>, new: &FieldValue) -
     }
 }
 
-/// What a submitted line means for a field of `kind`: `Ok(None)` clears it.
+/// Why a Linear estimate with a fraction is not sent (spec section 13).
+const WHOLE_ESTIMATES: &str = "Linear estimates are whole numbers";
+
+/// What a submitted line means for a field of `kind`: `Ok(None)` clears it. A
+/// `linear_estimate` takes whole numbers only.
 fn line_value(
     kind: LineKind,
     input: &str,
     today: time::Date,
+    linear_estimate: bool,
 ) -> Result<Option<FieldValue>, String> {
     match kind {
         LineKind::Text => {
             let t = input.trim();
             Ok((!t.is_empty()).then(|| FieldValue::Text(t.to_string())))
         }
-        LineKind::Number => parse_number_input(input).map(|n| n.map(FieldValue::Number)),
+        LineKind::Number => match parse_number_input(input)? {
+            Some(n) if linear_estimate && n.fract() != 0.0 => Err(WHOLE_ESTIMATES.into()),
+            n => Ok(n.map(FieldValue::Number)),
+        },
         LineKind::Date => {
             parse_date_input(input, today).map(|d| d.map(|d| FieldValue::Date(format_iso_date(d))))
         }
@@ -884,7 +928,10 @@ impl App {
                         Some(Choice::new(b.title.clone(), Some(value)).with_detail(mark))
                     })
                     .collect();
-                if current.is_some() {
+                let may_clear = self
+                    .project()
+                    .is_none_or(|p| crate::model::teams::may_clear(p, &f).is_ok());
+                if current.is_some() && may_clear {
                     choices.push(Choice::new(format!("Clear {}", f.name), None));
                 }
                 Popup::Value {
@@ -894,7 +941,10 @@ impl App {
                 }
             }
             FieldKind::Iteration { .. } => {
-                let choices = iteration_choices(&f, current.as_ref(), self.today());
+                let own = self
+                    .project()
+                    .map_or(f.clone(), |p| team_cycles(p, &it, &f));
+                let choices = iteration_choices(&own, current.as_ref(), self.today());
                 Popup::Value {
                     item,
                     field,
@@ -943,7 +993,7 @@ impl App {
     }
 
     /// Sets or clears a field from a popover; nothing when clearing an empty field.
-    fn submit_value(
+    pub(super) fn submit_value(
         &mut self,
         item: ItemId,
         field: FieldId,
@@ -952,29 +1002,26 @@ impl App {
         self.close_popup();
         // Keep the cursor on this item when the edit re-sorts or regroups the view.
         self.selected_id = Some(item.clone());
-        let current = self
-            .snapshot()
-            .and_then(|s| s.items.get(&item))
-            .and_then(|i| i.value(&field))
-            .cloned();
-        match value {
-            Some(value) => {
-                let same = self
-                    .project()
-                    .and_then(|p| p.field(&field))
-                    .is_some_and(|f| is_unchanged(f, current.as_ref(), &value));
-                if same {
-                    return Vec::new();
-                }
-                self.submit(OpKind::SetField, Op::SetField { item, field, value })
-            }
-            None => {
-                if current.is_some() {
-                    self.submit(OpKind::SetField, Op::ClearField { item, field })
-                } else {
-                    Vec::new()
-                }
-            }
+        let Some(item) = self.item(&item).cloned() else {
+            return self.say(crate::ui::app::edit::NO_LONGER_ON_BOARD);
+        };
+        let Some(field) = self.project().and_then(|p| p.field(&field)).cloned() else {
+            return self.say("That field is no longer on the board");
+        };
+        let current = item.value(&field.id);
+        let value = match value {
+            Some(value) if is_unchanged(&field, current, &value) => return Vec::new(),
+            // A team-owned value is the issue's own team's (spec section 6).
+            Some(value) => match self.team_value(&item, &field, value) {
+                Ok(value) => Some(value),
+                Err(reason) => return self.say(&reason),
+            },
+            None if current.is_none() => return Vec::new(),
+            None => None,
+        };
+        match self.field_op(&item, &field, value) {
+            Ok(op) => self.submit(OpKind::SetField, op),
+            Err(reason) => self.say(&reason),
         }
     }
 
@@ -1319,7 +1366,12 @@ impl App {
                 error,
                 ..
             } => match edit_line(input, &key) {
-                LineOutcome::Submit => match line_value(*kind, input, today) {
+                LineOutcome::Submit => match line_value(
+                    *kind,
+                    input,
+                    today,
+                    self.is_linear() && field.as_str() == crate::linear::ids::ESTIMATE,
+                ) {
                     Ok(value) => {
                         let (item, field) = (item.clone(), field.clone());
                         return self.submit_value(item, field, value);
@@ -1942,17 +1994,29 @@ mod tests {
     }
 
     #[test]
-    fn the_action_menu_on_linear_offers_browser_and_archived_only() {
-        let mut a = test_app();
+    fn the_action_menu_on_linear_offers_only_the_operations_turned_on() {
+        let mut a = crate::ui::app::edit::tests::linear_app();
+        assert!(a.handle_key(key(' ')).is_empty());
+        assert_eq!(
+            menu(&a),
+            [
+                ("Move to the previous column".to_string(), "<".to_string()),
+                ("Move to the next column".to_string(), ">".to_string()),
+                ("Edit a field".to_string(), "e".to_string()),
+                ("Open in the browser".to_string(), "o".to_string()),
+                ("Show archived items".to_string(), String::new()),
+            ]
+        );
+        a.handle_key(code(KeyCode::Esc));
+        // A kind Linear does not have yet keeps the 0.4 text.
+        assert!(a.handle_key(key('A')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Editing Linear boards arrives in 0.5")
+        );
+        // A board the viewer cannot edit offers only the browser and archived items.
         let mut snap = a.snapshot().unwrap().clone();
-        snap.project.board = "linear:team:t1".parse().unwrap();
         snap.project.viewer_can_update = false;
-        snap.project.linear = Some(crate::model::LinearMeta {
-            url_key: "acme".into(),
-            viewer_id: "U_tviles".into(),
-            team_keys: vec!["TBA".into()],
-            ..Default::default()
-        });
         a.store.apply(crate::store::StoreUpdate::Replace(snap));
         assert!(a.handle_key(key(' ')).is_empty());
         assert_eq!(
@@ -1967,7 +2031,7 @@ mod tests {
         assert!(a.handle_key(key('>')).is_empty());
         assert_eq!(
             a.status.flash.as_deref(),
-            Some("Editing Linear boards arrives in 0.5")
+            Some("This board is read-only for you")
         );
     }
 

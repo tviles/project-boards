@@ -1075,7 +1075,7 @@ impl App {
     }
 
     /// Shows `message` on the status line; nothing to do.
-    fn say(&mut self, message: &str) -> Vec<Command> {
+    pub(super) fn say(&mut self, message: &str) -> Vec<Command> {
         self.status.flash = Some(message.to_string());
         Vec::new()
     }
@@ -1163,15 +1163,86 @@ impl App {
             self.status.flash = Some(format!("Can't move to that {} column", field.name));
             return Vec::new();
         };
+        // A merged column's canonical option may be another team's: send the issue's own.
+        let op = self
+            .team_value(&item, &field, value)
+            .and_then(|value| self.field_op(&item, &field, Some(value)));
+        let op = match op {
+            Ok(op) => op,
+            Err(reason) => return self.say(&reason),
+        };
         self.selected_id = Some(item.id.clone());
-        self.submit(
-            OpKind::Move,
-            Op::SetField {
-                item: item.id.clone(),
-                field: field.id.clone(),
+        self.submit(OpKind::Move, op)
+    }
+
+    /// `value` for `item` in `field`: on a Linear board the issue's own team's value (spec
+    /// section 6), else the reason it has none; on GitHub `value` itself.
+    pub(crate) fn team_value(
+        &self,
+        item: &Item,
+        field: &Field,
+        value: FieldValue,
+    ) -> Result<FieldValue, String> {
+        match self.project() {
+            Some(project) => {
+                crate::model::teams::for_issue(project, item, field, value).map_err(|r| r.message())
+            }
+            None => Ok(value),
+        }
+    }
+
+    /// The op that sets (`Some`) or clears (`None`) `field` of `item`. A Linear label group
+    /// is `Op::GroupLabel`, naming the label it replaces (the item's current one in the
+    /// group); every other field is `SetField` or `ClearField`. A clear the board does not
+    /// allow (a Linear issue's status) is refused with its reason.
+    pub(crate) fn field_op(
+        &self,
+        item: &Item,
+        field: &Field,
+        value: Option<FieldValue>,
+    ) -> Result<Op, String> {
+        let project = self.project();
+        if value.is_none()
+            && let Some(project) = project
+        {
+            crate::model::teams::may_clear(project, field).map_err(|r| r.message())?;
+        }
+        let (id, field_id) = (item.id.clone(), field.id.clone());
+        let group = field
+            .id
+            .as_str()
+            .starts_with(crate::model::teams::GROUP_FIELD_PREFIX);
+        if self.is_linear() && group {
+            // The label the group holds now; its id is the option's when `label_ids`
+            // does not name it (an edit still sending changed the value).
+            let replaces = match item.value(&field.id) {
+                Some(FieldValue::SingleSelect { option_id, name }) => Some(
+                    item.content_fields
+                        .label_ids
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| option_id.as_str().to_string()),
+                ),
+                _ => None,
+            };
+            return Ok(Op::GroupLabel {
+                item: id,
+                field: field_id,
+                value,
+                replaces,
+            });
+        }
+        Ok(match value {
+            Some(value) => Op::SetField {
+                item: id,
+                field: field_id,
                 value,
             },
-        )
+            None => Op::ClearField {
+                item: id,
+                field: field_id,
+            },
+        })
     }
 
     /// Moves the item one place up or down among its neighbours: `K` puts it after its upper
@@ -1773,7 +1844,7 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::github::GraphqlErrorEntry;
     use crate::model::{FieldId, FieldValue, OptionId};
@@ -4965,5 +5036,569 @@ mod tests {
                 .any(|i| i.id.as_str() == "local:1"),
             "a draft has no label:bug, yet it stays"
         );
+    }
+
+    // Linear boards (plan 3, PR C).
+
+    const TBA_ID: &str = "team-a";
+    const TBB_ID: &str = "team-b";
+    const TYPE_GROUP: &str = "lg-type";
+
+    fn linear_option(
+        id: &str,
+        name: &str,
+        kind: crate::model::OptionKind,
+    ) -> crate::model::SelectOption {
+        crate::model::SelectOption {
+            id: OptionId::new(id),
+            name: name.into(),
+            color: crate::model::OptionColor::Gray,
+            kind: Some(kind),
+        }
+    }
+
+    /// A Linear project board of teams TBA and TBB, as in Task 6. Status options in rank,
+    /// then position, order: `Todo` is both teams' (the merged column's canonical option is
+    /// TBB's), `In Progress` only TBA's, `In Review` only TBB's, and `Done` both teams' (its
+    /// canonical option is TBA's). Each team has its own cycle; the label group Type
+    /// (Bug, Feature) is TBA's.
+    pub(crate) fn linear_project() -> crate::model::Project {
+        use crate::model::OptionKind::{Completed, Started, Unstarted};
+        use crate::model::{Field, FieldKind, Iteration, IterationId};
+        let field = |id: &str, name: &str, kind: FieldKind| Field {
+            id: FieldId::new(id),
+            name: name.into(),
+            kind,
+        };
+        let plain = |id: &str, name: &str| crate::model::SelectOption {
+            id: OptionId::new(id),
+            name: name.into(),
+            color: crate::model::OptionColor::Gray,
+            kind: None,
+        };
+        let cycle = |id: &str, title: &str| Iteration {
+            id: IterationId::new(id),
+            title: title.into(),
+            start_date: "2026-10-12".into(),
+            duration_days: 14,
+        };
+        let fields = vec![
+            field(crate::linear::ids::TITLE, "Title", FieldKind::Title),
+            field(
+                crate::linear::ids::STATUS,
+                "Status",
+                FieldKind::SingleSelect {
+                    options: vec![
+                        linear_option("s-a-todo", "Todo", Unstarted),
+                        linear_option("s-b-todo", "Todo", Unstarted),
+                        linear_option("s-a-prog", "In Progress", Started),
+                        linear_option("s-b-review", "In Review", Started),
+                        linear_option("s-b-done", "Done", Completed),
+                        linear_option("s-a-done", "Done", Completed),
+                    ],
+                },
+            ),
+            field(
+                crate::linear::ids::PRIORITY,
+                "Priority",
+                FieldKind::SingleSelect {
+                    options: [(1, "Urgent"), (2, "High"), (3, "Medium"), (4, "Low")]
+                        .into_iter()
+                        .map(|(n, name)| crate::model::SelectOption {
+                            id: crate::linear::ids::priority_option(n),
+                            ..plain("", name)
+                        })
+                        .collect(),
+                },
+            ),
+            field(
+                crate::linear::ids::ASSIGNEES,
+                "Assignees",
+                FieldKind::Assignees,
+            ),
+            field(crate::linear::ids::LABELS, "Labels", FieldKind::Labels),
+            Field {
+                id: crate::linear::ids::group(TYPE_GROUP),
+                name: "Type".into(),
+                kind: FieldKind::SingleSelect {
+                    options: vec![plain("l-bug", "Bug"), plain("l-feature", "Feature")],
+                },
+            },
+            field(
+                crate::linear::ids::CYCLE,
+                "Cycle",
+                FieldKind::Iteration {
+                    iterations: vec![cycle("c-a", "TBA Sprint"), cycle("c-b", "TBB Sprint")],
+                    completed: vec![],
+                },
+            ),
+            field(crate::linear::ids::ESTIMATE, "Estimate", FieldKind::Number),
+            field(crate::linear::ids::DUE, "Due date", FieldKind::Date),
+        ];
+        let owners = [
+            ("s-a-todo", TBA_ID),
+            ("s-a-prog", TBA_ID),
+            ("s-a-done", TBA_ID),
+            ("s-b-todo", TBB_ID),
+            ("s-b-review", TBB_ID),
+            ("s-b-done", TBB_ID),
+            ("c-a", TBA_ID),
+            ("c-b", TBB_ID),
+            (TYPE_GROUP, TBA_ID),
+        ]
+        .into_iter()
+        .map(|(id, team)| (id.to_string(), team.to_string()))
+        .collect();
+        let team = |id: &str, key: &str| crate::model::TeamMeta {
+            id: id.into(),
+            key: key.into(),
+        };
+        let mut board = crate::ui::fixtures::project().views[1].clone();
+        board.id = crate::model::ViewId::new("V_board");
+        board.name = "Board".into();
+        board.filter = crate::model::ViewFilter::Linear(serde_json::json!({}));
+        board.visible_fields = vec![
+            FieldId::new(crate::linear::ids::TITLE),
+            FieldId::new(crate::linear::ids::STATUS),
+        ];
+        board.vertical_group_by = vec![FieldId::new(crate::linear::ids::STATUS)];
+        board.group_by = vec![];
+        let mut all = crate::ui::fixtures::project().views[0].clone();
+        all.id = crate::model::ViewId::new("V_all");
+        all.name = "All issues".into();
+        all.filter = crate::model::ViewFilter::Linear(serde_json::json!({}));
+        all.visible_fields = board.visible_fields.clone();
+        all.sort_by = vec![];
+        let id = "linear:project:6f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f";
+        crate::model::Project {
+            id: crate::model::ProjectId::new(id),
+            board: id.parse().unwrap(),
+            owner_kind: crate::model::OwnerKind::Organization,
+            title: "Launch".into(),
+            url: "https://linear.app/acme/project/launch".into(),
+            viewer_can_update: true,
+            fields,
+            views: vec![board, all],
+            linked_repos: vec![],
+            issue_repos: vec![],
+            linear: Some(crate::model::LinearMeta {
+                url_key: "acme".into(),
+                viewer_id: "u-1".into(),
+                team_keys: vec!["TBA".into(), "TBB".into()],
+                teams: vec![team(TBA_ID, "TBA"), team(TBB_ID, "TBB")],
+                owners,
+            }),
+        }
+    }
+
+    /// The Linear issue `<team>-<number>` (item id `i-<team>-<number>`) with its Status.
+    fn linear_issue(team: &str, number: u32, state: (&str, &str)) -> crate::model::Item {
+        let id = format!("i-{}-{number}", team.to_lowercase());
+        let key = format!("{team}-{number}");
+        crate::model::Item {
+            id: ItemId::new(&id),
+            content: crate::model::ItemContent::Issue {
+                reference: crate::model::ContentRef {
+                    container: team.into(),
+                    number,
+                    key: Some(key.clone()),
+                    url: format!("https://linear.app/acme/issue/{key}"),
+                },
+                title: format!("Issue {key}"),
+                state: crate::model::ContentState::Open,
+            },
+            archived: false,
+            updated_at: "2026-10-01T00:00:00Z".into(),
+            values: [(
+                FieldId::new(crate::linear::ids::STATUS),
+                select_value(state.0, state.1),
+            )]
+            .into(),
+            content_fields: crate::model::ContentFields {
+                content_id: Some(id),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// `linear_project`'s board with `TBA-1` Todo (labelled Bug, in Type), `TBA-2` In
+    /// Progress, `TBB-1` Todo and `TBB-2` In Review.
+    pub(crate) fn linear_snapshot() -> crate::store::BoardSnapshot {
+        let mut tba1 = linear_issue("TBA", 1, ("s-a-todo", "Todo"));
+        tba1.values.insert(
+            crate::linear::ids::group(TYPE_GROUP),
+            select_value("l-bug", "Bug"),
+        );
+        tba1.content_fields.label_ids = [("Bug".to_string(), "l-bug".to_string())].into();
+        let mut snap = crate::store::BoardSnapshot::new(linear_project());
+        snap.upsert_items(vec![
+            tba1,
+            linear_issue("TBA", 2, ("s-a-prog", "In Progress")),
+            linear_issue("TBB", 1, ("s-b-todo", "Todo")),
+            linear_issue("TBB", 2, ("s-b-review", "In Review")),
+        ]);
+        snap
+    }
+
+    /// The Linear test board for every PR C UI test: `linear_snapshot` on its Board tab (a
+    /// board by Status); the All issues tab is a manually ordered table.
+    pub(crate) fn linear_app() -> App {
+        app_with(linear_snapshot())
+    }
+
+    /// Selects the card of the Linear issue `key` (`TBA-2`) on the board.
+    pub(crate) fn pick(a: &mut App, key: &str) {
+        let columns = a.board_columns();
+        let (column, index) = columns
+            .iter()
+            .enumerate()
+            .find_map(|(c, col)| {
+                col.items()
+                    .iter()
+                    .position(|i| i.ref_label() == key)
+                    .map(|i| (c, i))
+            })
+            .unwrap_or_else(|| panic!("{key} is not on the board"));
+        a.board_sel = crate::ui::board::BoardSelection { column, index };
+        a.sync_selected_id();
+        assert_eq!(
+            a.selected_item().map(|i| i.ref_label()),
+            Some(key.to_string())
+        );
+    }
+
+    fn linear_status(a: &App, key: &str) -> String {
+        let item = a
+            .snapshot()
+            .unwrap()
+            .all_items()
+            .into_iter()
+            .find(|i| i.ref_label() == key)
+            .unwrap()
+            .clone();
+        item.value(&FieldId::new(crate::linear::ids::STATUS))
+            .map(|v| v.display())
+            .unwrap_or_default()
+    }
+
+    fn set_linear(item: &str, field: &str, value: FieldValue) -> Op {
+        Op::SetField {
+            item: ItemId::new(item),
+            field: FieldId::new(field),
+            value,
+        }
+    }
+
+    fn pending_ops(a: &App) -> Vec<Op> {
+        a.store.pending().iter().map(|p| p.op.clone()).collect()
+    }
+
+    #[test]
+    fn the_linear_test_board_shows_merged_columns_by_status() {
+        let a = linear_app();
+        assert_eq!(a.layout().0, Layout::Board);
+        assert_eq!(
+            column_titles(&a),
+            ["Todo", "In Progress", "In Review", "Done", "No Status"]
+        );
+        let ids = |a: &App| -> Vec<Vec<String>> {
+            a.board_columns()
+                .iter()
+                .map(|c| c.items().iter().map(|i| i.ref_label()).collect())
+                .collect()
+        };
+        assert_eq!(
+            ids(&a),
+            [
+                vec!["TBA-1".to_string(), "TBB-1".to_string()],
+                vec!["TBA-2".to_string()],
+                vec!["TBB-2".to_string()],
+                vec![],
+                vec![],
+            ]
+        );
+    }
+
+    #[test]
+    fn linear_moves_take_the_issues_team_state() {
+        let mut a = linear_app();
+        // `<` on TBA-2 into the merged Todo column, whose canonical option is TBB's.
+        pick(&mut a, "TBA-2");
+        assert_eq!(a.handle_key(key('<')), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [set_linear(
+                "i-tba-2",
+                crate::linear::ids::STATUS,
+                select_value("s-a-todo", "Todo")
+            )]
+        );
+        assert_eq!(linear_status(&a, "TBA-2"), "Todo");
+        // TBB-1 from Todo into In Review, the next column once In Progress is filtered out.
+        let board = crate::model::ViewId::new("V_board");
+        a.extra_filter
+            .insert(board, "-status:\"In Progress\"".into());
+        assert_eq!(column_titles(&a)[..2], ["Todo", "In Review"]);
+        pick(&mut a, "TBB-1");
+        assert_eq!(a.handle_key(key('>')), vec![Command::Send(2)]);
+        assert_eq!(
+            pending_ops(&a)[1],
+            set_linear(
+                "i-tbb-1",
+                crate::linear::ids::STATUS,
+                select_value("s-b-review", "In Review")
+            )
+        );
+        assert_eq!(linear_status(&a, "TBB-1"), "In Review");
+    }
+
+    #[test]
+    fn a_move_into_a_column_the_team_lacks_is_refused() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-2");
+        assert!(a.handle_key(key('>')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("TBA has no \"In Review\" state")
+        );
+        assert!(a.store.pending().is_empty());
+        assert_eq!(linear_status(&a, "TBA-2"), "In Progress");
+        pick(&mut a, "TBB-1");
+        assert!(a.handle_key(key('>')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("TBB has no \"In Progress\" state")
+        );
+        assert!(a.store.pending().is_empty());
+    }
+
+    /// Plan Decision 5.
+    #[test]
+    fn a_move_into_done_shows_the_card_closed_at_once() {
+        let mut a = linear_app();
+        pick(&mut a, "TBB-2");
+        assert_eq!(a.handle_key(key('>')), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [set_linear(
+                "i-tbb-2",
+                crate::linear::ids::STATUS,
+                select_value("s-b-done", "Done")
+            )],
+            "TBB's Done, not the column's canonical (TBA's) option"
+        );
+        let item = &a.snapshot().unwrap().items[&ItemId::new("i-tbb-2")];
+        assert!(matches!(
+            item.content,
+            crate::model::ItemContent::Issue {
+                state: crate::model::ContentState::Closed,
+                ..
+            }
+        ));
+        assert_eq!(
+            a.store.confirmed().unwrap().items[&ItemId::new("i-tbb-2")].content,
+            linear_snapshot().items[&ItemId::new("i-tbb-2")].content,
+            "open until Linear answers"
+        );
+    }
+
+    fn open_field(a: &mut App, field: &str) {
+        assert!(a.handle_key(key('e')).is_empty());
+        type_in(a, field);
+        a.handle_key(code(KeyCode::Enter));
+    }
+
+    fn value_labels(a: &App) -> Vec<String> {
+        match &a.popup {
+            Some(crate::ui::app::Popup::Value { picker, .. }) => {
+                picker.choices.iter().map(|c| c.label.clone()).collect()
+            }
+            other => panic!("expected a value picker, got {other:?}"),
+        }
+    }
+
+    fn backspaces(a: &mut App, n: usize) {
+        for _ in 0..n {
+            a.handle_key(code(KeyCode::Backspace));
+        }
+    }
+
+    #[test]
+    fn e_sets_priority_estimate_due_and_cycle_on_linear() {
+        use crate::linear::ids;
+        let mut a = linear_app();
+        pick(&mut a, "TBB-1");
+        open_field(&mut a, "priority");
+        type_in(&mut a, "high");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        open_field(&mut a, "estimate");
+        type_in(&mut a, "3");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(2)]);
+        open_field(&mut a, "due");
+        type_in(&mut a, "2026-11-02");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(3)]);
+        // The cycle picker offers only TBB's cycles.
+        open_field(&mut a, "cycle");
+        assert_eq!(value_labels(&a), ["TBB Sprint"]);
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(4)]);
+        let item = "i-tbb-1";
+        assert_eq!(
+            pending_ops(&a),
+            [
+                set_linear(
+                    item,
+                    ids::PRIORITY,
+                    select_value("linear:priority:2", "High")
+                ),
+                set_linear(item, ids::ESTIMATE, FieldValue::Number(3.0)),
+                set_linear(item, ids::DUE, FieldValue::Date("2026-11-02".into())),
+                set_linear(
+                    item,
+                    ids::CYCLE,
+                    FieldValue::Iteration {
+                        iteration_id: crate::model::IterationId::new("c-b"),
+                        title: "TBB Sprint".into(),
+                        start_date: "2026-10-12".into(),
+                    }
+                ),
+            ]
+        );
+        // And TBA's issues see only TBA's.
+        pick(&mut a, "TBA-1");
+        open_field(&mut a, "cycle");
+        assert_eq!(value_labels(&a), ["TBA Sprint"]);
+    }
+
+    #[test]
+    fn a_fractional_estimate_is_refused() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        open_field(&mut a, "estimate");
+        type_in(&mut a, "2.5");
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        let Some(crate::ui::app::Popup::Line { error, .. }) = &a.popup else {
+            panic!("the estimate input stays open")
+        };
+        assert_eq!(error.as_deref(), Some("Linear estimates are whole numbers"));
+        assert!(a.store.pending().is_empty());
+        backspaces(&mut a, 3);
+        type_in(&mut a, "2");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+    }
+
+    #[test]
+    fn clearing_the_status_is_refused() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        open_field(&mut a, "status");
+        assert!(
+            !value_labels(&a).iter().any(|l| l.starts_with("Clear")),
+            "{:?}",
+            value_labels(&a)
+        );
+        a.handle_key(code(KeyCode::Esc));
+        a.handle_key(code(KeyCode::Esc));
+        let field = FieldId::new(crate::linear::ids::STATUS);
+        assert!(
+            a.submit_value(ItemId::new("i-tba-1"), field, None)
+                .is_empty()
+        );
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Every Linear issue has a status")
+        );
+        assert!(a.store.pending().is_empty());
+        assert_eq!(linear_status(&a, "TBA-1"), "Todo");
+    }
+
+    #[test]
+    fn a_group_field_swaps_its_label() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        open_field(&mut a, "type");
+        type_in(&mut a, "feature");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [Op::GroupLabel {
+                item: ItemId::new("i-tba-1"),
+                field: crate::linear::ids::group(TYPE_GROUP),
+                value: Some(select_value("l-feature", "Feature")),
+                replaces: Some("l-bug".into()),
+            }]
+        );
+        // Clearing it removes the label.
+        open_field(&mut a, "type");
+        type_in(&mut a, "clear");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(2)]);
+        assert!(matches!(
+            &pending_ops(&a)[1],
+            Op::GroupLabel { value: None, replaces: Some(old), .. } if old == "l-feature"
+        ));
+        // On another team's issue the group is refused.
+        pick(&mut a, "TBB-1");
+        open_field(&mut a, "type");
+        type_in(&mut a, "bug");
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("\"Type\" belongs to team TBA")
+        );
+        assert_eq!(a.store.pending().len(), 2);
+    }
+
+    /// Review Focus 1.
+    #[test]
+    fn a_cached_04_board_refuses_team_owned_edits_until_resolved() {
+        let mut snap = linear_snapshot();
+        let meta = snap.project.linear.as_mut().unwrap();
+        meta.teams.clear();
+        meta.owners.clear();
+        let mut a = app_with(snap);
+        pick(&mut a, "TBA-2");
+        assert!(a.handle_key(key('<')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("This item was loaded by an older version; refresh with r to edit it")
+        );
+        assert!(a.store.pending().is_empty());
+        // A field no team owns is fine.
+        open_field(&mut a, "priority");
+        type_in(&mut a, "urgent");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        // The board resolves: the teams are known now.
+        a.on_sync(SyncEvent::Project(linear_project()));
+        pick(&mut a, "TBA-2");
+        assert_eq!(a.handle_key(key('<')), vec![Command::Send(2)]);
+        assert_eq!(
+            pending_ops(&a)[1],
+            set_linear(
+                "i-tba-2",
+                crate::linear::ids::STATUS,
+                select_value("s-a-todo", "Todo")
+            )
+        );
+    }
+
+    /// Review Focus 5.
+    #[test]
+    fn a_forbidden_edit_is_undone_and_later_edits_still_go() {
+        let mut a = linear_app();
+        pick(&mut a, "TBB-2");
+        assert_eq!(a.handle_key(key('>')), vec![Command::Send(1)]);
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Err(BackendError::MissingPermission {
+                provider: Provider::Linear,
+                needed: vec![],
+            }),
+        });
+        assert_eq!(linear_status(&a, "TBB-2"), "In Review", "the card returns");
+        assert_eq!(a.errors.len(), 1);
+        assert!(a.refused_scopes.is_empty());
+        assert!(a.store.pending().is_empty());
+        pick(&mut a, "TBA-2");
+        assert_eq!(a.handle_key(key('<')), vec![Command::Send(2)]);
+        assert_eq!(linear_status(&a, "TBA-2"), "Todo");
     }
 }

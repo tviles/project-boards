@@ -1232,22 +1232,25 @@ mod tests {
     }
 
     #[test]
-    fn a_linear_board_without_operations_reads_read_only() {
+    fn a_linear_board_reads_read_only_only_when_the_viewer_cannot_edit() {
         let now = std::time::Instant::now();
-        let mut snap = snapshot();
-        snap.project.board = "linear:team:t1".parse().unwrap();
-        snap.project.viewer_can_update = true;
-        let a = App::new(
-            Box::new(MemoryStore::new(Some(snap))),
-            Keymap::defaults(),
-            Theme::plain(),
-        );
+        let board = |can_update: bool| {
+            let mut snap = snapshot();
+            snap.project.board = "linear:team:t1".parse().unwrap();
+            snap.project.viewer_can_update = can_update;
+            App::new(
+                Box::new(MemoryStore::new(Some(snap))),
+                Keymap::defaults(),
+                Theme::plain(),
+            )
+        };
         assert!(
-            crate::model::caps::provider_caps(crate::model::Provider::Linear)
+            !crate::model::caps::provider_caps(crate::model::Provider::Linear)
                 .ops
                 .is_empty()
         );
-        assert_eq!(write_flags(&a, now), ["read-only"]);
+        assert!(write_flags(&board(true), now).is_empty());
+        assert_eq!(write_flags(&board(false), now), ["read-only"]);
     }
 
     #[test]
