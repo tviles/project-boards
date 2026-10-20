@@ -88,7 +88,8 @@ pub enum SyncEvent {
     },
     ItemsUpdated {
         items: Vec<Item>,
-        /// Items the poll reports gone (Linear archives and deletions); GitHub sends none.
+        /// Items the poll found in Linear's trash; GitHub sends none. Archived Linear issues
+        /// are not removed: they arrive in `items` with `archived: true`.
         removed: Vec<ItemId>,
         fetched_at: String,
     },
