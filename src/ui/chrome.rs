@@ -285,7 +285,11 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         .unwrap_or_else(|| "project-boards".into());
     let mut flags = write_flag_forms(app, std::time::Instant::now());
     if let Some((loaded, total)) = app.status.loading {
-        flags.push(Flag::same(format!("loading {loaded}/{total}")));
+        flags.push(Flag::same(if total == 0 {
+            format!("loading {loaded}")
+        } else {
+            format!("loading {loaded}/{total}")
+        }));
     } else if app.status.stale {
         flags.push(Flag::same("stale".into()));
     }
@@ -485,7 +489,11 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, marks: &ItemMarks) {
                     parts.push(note.to_string());
                 }
                 if let Some(list) = app.view_list().filter(|l| l.truncated) {
-                    parts.push(format!("loaded {} of {}", list.ids.len(), list.total));
+                    parts.push(if list.total > list.ids.len() {
+                        format!("loaded {} of {}", list.ids.len(), list.total)
+                    } else {
+                        format!("loaded {}+", list.ids.len())
+                    });
                 }
                 let clear = app
                     .extra_filter()
@@ -1053,6 +1061,88 @@ mod tests {
                 assert!(head.contains("read-only (no scope)"), "{head}");
             }
         }
+    }
+
+    #[test]
+    fn an_unknown_total_reads_as_a_plus() {
+        use crate::model::ItemId;
+        use crate::store::{MemoryStore, ViewList};
+        let mut a = flagged_app();
+        a.status.loading = Some((300, 0));
+        let screen = render_to_string(120, 10, |f| draw(f, &mut a));
+        assert!(screen.lines().next().unwrap().contains("loading 300"));
+        assert!(!screen.contains("loading 300/"), "{screen}");
+        a.status.loading = Some((100, 250));
+        let screen = render_to_string(120, 10, |f| draw(f, &mut a));
+        assert!(screen.lines().next().unwrap().contains("loading 100/250"));
+
+        let mut snap = snapshot();
+        let view = snap.project.views[0].id.clone();
+        let ids: Vec<ItemId> = (0..2000).map(|i| ItemId::new(format!("i{i}"))).collect();
+        snap.set_view_ids(
+            view.clone(),
+            ViewList {
+                ids: ids.clone(),
+                total: 0,
+                truncated: true,
+            },
+        );
+        let mut a = App::new(
+            Box::new(MemoryStore::new(Some(snap.clone()))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        let screen = render_to_string(120, 10, |f| draw(f, &mut a));
+        assert!(screen.contains("loaded 2000+"), "{screen}");
+        assert!(!screen.contains("loaded 2000 of"), "{screen}");
+        snap.set_view_ids(
+            view,
+            ViewList {
+                ids,
+                total: 2400,
+                truncated: true,
+            },
+        );
+        let mut a = App::new(
+            Box::new(MemoryStore::new(Some(snap))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        let screen = render_to_string(120, 10, |f| draw(f, &mut a));
+        assert!(screen.contains("loaded 2000 of 2400"), "{screen}");
+
+        let mut a = App::new(
+            Box::new(MemoryStore::new(Some(snapshot()))),
+            Keymap::defaults(),
+            Theme::plain(),
+        );
+        let items: Vec<_> = (0..2000)
+            .map(|i| crate::model::item::tests::issue(&format!("n{i}"), i + 1, "T"))
+            .collect();
+        a.on_sync(crate::sync::SyncEvent::ItemsComplete {
+            items: items.clone(),
+            fetched_at: "t".into(),
+            total: 0,
+            truncated: true,
+        });
+        assert!(
+            a.status
+                .notes
+                .iter()
+                .any(|n| n == "loaded 2000+ items (max_items)")
+        );
+        a.on_sync(crate::sync::SyncEvent::ItemsComplete {
+            items,
+            fetched_at: "t".into(),
+            total: 2400,
+            truncated: true,
+        });
+        assert!(
+            a.status
+                .notes
+                .iter()
+                .any(|n| n == "loaded 2000 of 2400 items (max_items)")
+        );
     }
 
     #[test]

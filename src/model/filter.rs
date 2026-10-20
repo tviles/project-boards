@@ -1,9 +1,14 @@
-//! Reads what a GitHub view filter says about one field, so the board can hide the columns
-//! the filter excludes. Only that field's qualifiers are read; everything else is ignored.
+//! Reads GitHub-style view filters. `Filter` parses one and evaluates it on the client;
+//! `column_constraint` reads what a filter says about one field, so the board can hide the
+//! columns the filter excludes; `still_matches` estimates whether an edited GitHub item
+//! still belongs in its view.
 
-use crate::model::field::Field;
-use crate::model::item::Item;
+use crate::model::field::{Field, FieldKind, Iteration};
+use crate::model::ids::FieldId;
+use crate::model::input::parse_iso_date;
+use crate::model::item::{ContentState, FieldValue, Item, ItemContent};
 use std::collections::BTreeSet;
+use std::slice;
 
 /// The columns a filter allows for one field. The default constrains nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -130,61 +135,456 @@ fn names_field(key: &str, field: &Field) -> bool {
     key == name || key == name.replace(' ', "-")
 }
 
+/// What a filter is evaluated against.
+#[derive(Debug, Clone, Copy)]
+pub struct FilterContext<'a> {
+    /// The board's fields, which field keys name.
+    pub fields: &'a [Field],
+    /// The viewer's user id, compared with `ContentFields::assignee_ids` values for `@me`.
+    pub me: Option<&'a str>,
+    /// The viewer's date, for `@today` and an iteration's `@current`, `@next` and
+    /// `@previous`. Without it those values match nothing.
+    pub today: Option<time::Date>,
+}
+
+/// A GitHub-style filter, parsed once and evaluated on the client.
+///
+/// Terms are ANDed; a comma in values ORs them; `-` negates a qualifier; keys and values are
+/// case-insensitive; a field key is the field's name, or its name with spaces as hyphens.
+/// A key that names no field matches nothing and is reported by `unknown_keys`. `OR`, `AND`
+/// and parentheses are free text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Filter {
+    terms: Vec<Term>,
+    /// Keys that name nothing: lowercase, in typed order, once each.
+    unknown: Vec<String>,
+    /// `OR`, `AND` or parentheses appear, so `constraint` reads nothing.
+    grouped: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Term {
+    /// Free text (lowercase, quotes removed), found in the title or the reference.
+    Text(String),
+    /// `[-]key:a,b`, values trimmed and lowercase.
+    Qualifier {
+        negated: bool,
+        key: Key,
+        values: Vec<String>,
+    },
+    /// `[-]no:key`
+    NoValue { negated: bool, key: Key },
+    /// `[-]has:key`
+    Has { negated: bool, key: Key },
+    /// `[-]is:a,b`
+    Is { negated: bool, what: Vec<IsWhat> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Key {
+    Field(FieldId),
+    /// `assignee`, `assignees`, or the name of a field of kind `Assignees`.
+    Assignee,
+    /// `label`, `labels`, or the name of a field of kind `Labels`.
+    Label,
+    Unknown(String),
+}
+
+impl Key {
+    /// The key for `key` (lowercase): a field by name first, then the built-in keys.
+    fn resolve(key: &str, fields: &[Field]) -> Key {
+        match fields.iter().find(|f| names_field(key, f)) {
+            Some(f) if matches!(f.kind, FieldKind::Assignees) => Key::Assignee,
+            Some(f) if matches!(f.kind, FieldKind::Labels) => Key::Label,
+            Some(f) => Key::Field(f.id.clone()),
+            None => match key {
+                "assignee" | "assignees" => Key::Assignee,
+                "label" | "labels" => Key::Label,
+                _ => Key::Unknown(key.to_string()),
+            },
+        }
+    }
+
+    /// Whether this key is `field`.
+    fn is(&self, field: &Field) -> bool {
+        matches!(self, Key::Field(id) if *id == field.id)
+    }
+
+    /// Whether `item` has a value for this key; `None` when the key names nothing in `ctx`.
+    fn has_value(&self, item: &Item, ctx: &FilterContext) -> Option<bool> {
+        Some(match self {
+            Key::Unknown(_) => return None,
+            Key::Assignee => !item.assignees().is_empty(),
+            Key::Label => !item.labels().is_empty(),
+            Key::Field(id) => {
+                let field = ctx.fields.iter().find(|f| f.id == *id)?;
+                item.field_value(field).is_some_and(|v| !is_blank(&v))
+            }
+        })
+    }
+
+    /// Whether `item`'s value for this key is one of `values`; `None` when the key names
+    /// nothing in `ctx`.
+    fn matches(&self, values: &[String], item: &Item, ctx: &FilterContext) -> Option<bool> {
+        let any = |names: Vec<&str>, v: &String| names.iter().any(|n| n.to_lowercase() == *v);
+        Some(match self {
+            Key::Unknown(_) => return None,
+            Key::Assignee => values.iter().any(|v| match v.as_str() {
+                "@me" => ctx
+                    .me
+                    .is_some_and(|me| item.content_fields.assignee_ids.values().any(|id| id == me)),
+                _ => any(item.assignees(), v),
+            }),
+            Key::Label => values.iter().any(|v| any(item.label_names(), v)),
+            Key::Field(id) => {
+                let field = ctx.fields.iter().find(|f| f.id == *id)?;
+                item.field_value(field).is_some_and(|value| {
+                    values
+                        .iter()
+                        .any(|v| value_matches(field, &value, v, ctx.today))
+                })
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum IsWhat {
+    Open,
+    Closed,
+    Issue,
+    Archived,
+    /// A value this build does not read; it matches nothing.
+    Other,
+}
+
+impl IsWhat {
+    fn parse(value: &str) -> IsWhat {
+        match value.trim().to_lowercase().as_str() {
+            "open" => IsWhat::Open,
+            "closed" => IsWhat::Closed,
+            "issue" => IsWhat::Issue,
+            "archived" => IsWhat::Archived,
+            _ => IsWhat::Other,
+        }
+    }
+
+    fn matches(self, item: &Item) -> bool {
+        let state = match &item.content {
+            ItemContent::Issue { state, .. } | ItemContent::PullRequest { state, .. } => {
+                Some(*state)
+            }
+            ItemContent::Draft { .. } => Some(ContentState::Open),
+            ItemContent::Redacted | ItemContent::Unknown { .. } => None,
+        };
+        match self {
+            IsWhat::Open => state == Some(ContentState::Open),
+            IsWhat::Closed => matches!(state, Some(ContentState::Closed | ContentState::Merged)),
+            IsWhat::Issue => matches!(item.content, ItemContent::Issue { .. }),
+            IsWhat::Archived => item.archived,
+            IsWhat::Other => false,
+        }
+    }
+}
+
+impl Term {
+    fn matches(&self, item: &Item, ctx: &FilterContext) -> bool {
+        match self {
+            Term::Text(text) => {
+                item.title().to_lowercase().contains(text)
+                    || item.ref_label().to_lowercase().contains(text)
+            }
+            Term::Qualifier {
+                negated,
+                key,
+                values,
+            } => key
+                .matches(values, item, ctx)
+                .is_some_and(|m| m != *negated),
+            Term::NoValue { negated, key } => {
+                key.has_value(item, ctx).is_some_and(|has| has == *negated)
+            }
+            Term::Has { negated, key } => {
+                key.has_value(item, ctx).is_some_and(|has| has != *negated)
+            }
+            Term::Is { negated, what } => what.iter().any(|w| w.matches(item)) != *negated,
+        }
+    }
+
+    fn unknown_key(&self) -> Option<&str> {
+        match self {
+            Term::Qualifier { key, .. } | Term::NoValue { key, .. } | Term::Has { key, .. } => {
+                match key {
+                    Key::Unknown(k) => Some(k),
+                    _ => None,
+                }
+            }
+            Term::Text(_) | Term::Is { .. } => None,
+        }
+    }
+}
+
+/// `OR`, `AND` and parentheses: free text, and a reason not to guess at columns.
+fn is_grouping(token: &str) -> bool {
+    token == "OR" || token == "AND" || token.starts_with('(') || token.ends_with(')')
+}
+
+/// A value present but empty (no users, no labels) counts as no value.
+fn is_blank(value: &FieldValue) -> bool {
+    match value {
+        FieldValue::Text(t) => t.is_empty(),
+        FieldValue::MultiSelect { names, .. } => names.is_empty(),
+        FieldValue::Labels(labels) => labels.is_empty(),
+        FieldValue::Users(users) | FieldValue::Reviewers(users) => users.is_empty(),
+        FieldValue::PullRequests(prs) => prs.is_empty(),
+        _ => false,
+    }
+}
+
+/// Whether `value` (of `field`) is `wanted` (lowercase): an option or iteration by name, a
+/// number or date compared, text contained.
+fn value_matches(
+    field: &Field,
+    value: &FieldValue,
+    wanted: &str,
+    today: Option<time::Date>,
+) -> bool {
+    let named = |name: &str| name.to_lowercase() == wanted;
+    match value {
+        FieldValue::SingleSelect { name, .. } => named(name),
+        FieldValue::MultiSelect { names, .. } => names.iter().any(|n| named(n)),
+        FieldValue::Iteration {
+            iteration_id,
+            title,
+            ..
+        } => {
+            if wanted.starts_with('@') {
+                today
+                    .and_then(|today| relative_iteration(field, wanted, today))
+                    .is_some_and(|i| i.id == *iteration_id)
+            } else {
+                named(title)
+            }
+        }
+        FieldValue::Number(n) => compare(*n, wanted, |b| b.parse().ok()),
+        FieldValue::Date(d) => parse_iso_date(d.get(..10).unwrap_or(d)).is_some_and(|date| {
+            compare(date, wanted, |b| match b {
+                "@today" => today,
+                _ => parse_iso_date(b),
+            })
+        }),
+        FieldValue::Text(t) => t.to_lowercase().contains(wanted),
+        FieldValue::Labels(labels) => labels.iter().any(|l| named(&l.name)),
+        FieldValue::Users(users) | FieldValue::Reviewers(users) => users.iter().any(|u| named(u)),
+        other => named(&other.display()),
+    }
+}
+
+/// Whether `value` satisfies `wanted`: `x`, `>x`, `>=x`, `<x`, `<=x` or `a..b` (both ends
+/// included), each bound read by `bound`. A bound it cannot read matches nothing.
+fn compare<T: PartialOrd>(value: T, wanted: &str, bound: impl Fn(&str) -> Option<T>) -> bool {
+    let check = || {
+        Some(if let Some(b) = wanted.strip_prefix(">=") {
+            value >= bound(b)?
+        } else if let Some(b) = wanted.strip_prefix("<=") {
+            value <= bound(b)?
+        } else if let Some(b) = wanted.strip_prefix('>') {
+            value > bound(b)?
+        } else if let Some(b) = wanted.strip_prefix('<') {
+            value < bound(b)?
+        } else if let Some((low, high)) = wanted.split_once("..") {
+            bound(low)? <= value && value <= bound(high)?
+        } else {
+            value == bound(wanted)?
+        })
+    };
+    check().unwrap_or(false)
+}
+
+/// The iteration of `field` that `at` names on `today`: `@current` (start ≤ today < end),
+/// `@next` (the earliest starting after today) or `@previous` (the latest ended by today).
+fn relative_iteration<'f>(field: &'f Field, at: &str, today: time::Date) -> Option<&'f Iteration> {
+    let FieldKind::Iteration {
+        iterations,
+        completed,
+    } = &field.kind
+    else {
+        return None;
+    };
+    let dated = iterations.iter().chain(completed).filter_map(|i| {
+        let start = parse_iso_date(&i.start_date)?;
+        let end = start.checked_add(time::Duration::days(i.duration_days.into()))?;
+        Some((i, start, end))
+    });
+    let found = match at {
+        "@current" => dated
+            .filter(|(_, start, end)| *start <= today && today < *end)
+            .min_by_key(|(_, start, _)| *start),
+        "@next" => dated
+            .filter(|(_, start, _)| *start > today)
+            .min_by_key(|(_, start, _)| *start),
+        "@previous" => dated
+            .filter(|(_, _, end)| *end <= today)
+            .max_by_key(|(_, _, end)| *end),
+        _ => None,
+    };
+    found.map(|(i, _, _)| i)
+}
+
+impl Filter {
+    /// Parses `text`; field keys are looked up in `fields`.
+    pub fn parse(text: &str, fields: &[Field]) -> Filter {
+        let tokens = tokens(text);
+        let grouped = tokens.iter().any(|t| is_grouping(t));
+        let mut terms = Vec::new();
+        for token in tokens {
+            let parsed = if is_grouping(&token) {
+                None
+            } else {
+                qualifier(&token)
+            };
+            let Some((negated, key, values)) = parsed else {
+                terms.push(Term::Text(token.replace('"', "").to_lowercase()));
+                continue;
+            };
+            let values = split_unquoted(values, ',');
+            match key.as_str() {
+                "no" | "has" => terms.extend(values.iter().map(|v| {
+                    let named = Key::resolve(&v.to_lowercase(), fields);
+                    if key == "no" {
+                        Term::NoValue {
+                            negated,
+                            key: named,
+                        }
+                    } else {
+                        Term::Has {
+                            negated,
+                            key: named,
+                        }
+                    }
+                })),
+                "is" => terms.push(Term::Is {
+                    negated,
+                    what: values.iter().map(|v| IsWhat::parse(v)).collect(),
+                }),
+                _ => terms.push(Term::Qualifier {
+                    negated,
+                    key: Key::resolve(&key, fields),
+                    values: values.iter().map(|v| v.trim().to_lowercase()).collect(),
+                }),
+            }
+        }
+        let mut unknown: Vec<String> = Vec::new();
+        for key in terms.iter().filter_map(Term::unknown_key) {
+            if !unknown.iter().any(|k| k == key) {
+                unknown.push(key.to_string());
+            }
+        }
+        Filter {
+            terms,
+            unknown,
+            grouped,
+        }
+    }
+
+    /// True for a filter with no terms, which every live item matches.
+    pub fn is_empty(&self) -> bool {
+        self.terms.is_empty()
+    }
+
+    /// Keys that name no field (`stauts` in `stauts:Todo`): lowercase, in typed order, once
+    /// each.
+    pub fn unknown_keys(&self) -> &[String] {
+        &self.unknown
+    }
+
+    /// Whether the filter asks for archived items (`is:archived`); they match nothing else.
+    pub fn wants_archived(&self) -> bool {
+        self.terms.iter().any(
+            |t| matches!(t, Term::Is { negated: false, what } if what.contains(&IsWhat::Archived)),
+        )
+    }
+
+    /// Whether `item` matches every term. An archived item matches only a filter with
+    /// `is:archived`, and a live one never does.
+    pub fn matches(&self, item: &Item, ctx: &FilterContext) -> bool {
+        item.archived == self.wants_archived() && self.terms.iter().all(|t| t.matches(item, ctx))
+    }
+
+    /// What the filter says about the columns of `field` (see `column_constraint`). With
+    /// `ctx.today`, `@current`, `@next` and `@previous` on an iteration field name that
+    /// iteration's column.
+    pub fn constraint(&self, field: &Field, ctx: &FilterContext) -> ColumnConstraint {
+        let mut c = ColumnConstraint::default();
+        // Boolean operators and grouping change what a qualifier means; don't guess.
+        if self.grouped {
+            return c;
+        }
+        for term in &self.terms {
+            match term {
+                Term::NoValue { negated, key } | Term::Has { negated, key } if key.is(field) => {
+                    // `no:` and `-has:` keep only the "No <field>" column; `-no:` and `has:`
+                    // hide it.
+                    if matches!(term, Term::NoValue { .. }) != *negated {
+                        c.include.get_or_insert_with(BTreeSet::new);
+                        c.show_no_value = true;
+                    } else {
+                        c.hide_no_value = true;
+                    }
+                }
+                Term::Qualifier {
+                    negated,
+                    key,
+                    values,
+                } if key.is(field) => {
+                    let mut titles = Vec::new();
+                    for v in values {
+                        let relative = match (&field.kind, ctx.today) {
+                            (FieldKind::Iteration { .. }, Some(today))
+                                if matches!(v.as_str(), "@current" | "@next" | "@previous") =>
+                            {
+                                Some(relative_iteration(field, v, today))
+                            }
+                            _ => None,
+                        };
+                        match relative {
+                            Some(found) => titles.extend(found.map(|i| i.title.to_lowercase())),
+                            None if v.is_empty()
+                                || v.starts_with('@')
+                                || v.starts_with(['>', '<'])
+                                || v.contains("..") =>
+                            {
+                                return ColumnConstraint::default();
+                            }
+                            None => titles.push(v.clone()),
+                        }
+                    }
+                    if *negated {
+                        c.exclude.extend(titles);
+                    } else {
+                        c.include.get_or_insert_with(BTreeSet::new).extend(titles);
+                    }
+                }
+                _ => {}
+            }
+        }
+        c
+    }
+}
+
 /// What `filter` says about the columns of `field`.
 ///
 /// Understood for that field: `field:a,"b c"`, `-field:a`, `no:field`, `-no:field` and
 /// `has:field`. Include terms add up; exclude terms always remove. An `@` value or a range
 /// on the field means the filter is not understood, and nothing is constrained.
 pub fn column_constraint(filter: &str, field: &Field) -> ColumnConstraint {
-    let mut c = ColumnConstraint::default();
-    let tokens = tokens(filter);
-    // Boolean operators and grouping change what a qualifier means; don't guess.
-    if tokens
-        .iter()
-        .any(|t| t == "OR" || t == "AND" || t.starts_with('(') || t.ends_with(')'))
-    {
-        return c;
-    }
-    for token in tokens {
-        let Some((negated, key, values)) = qualifier(&token) else {
-            continue;
-        };
-        if key == "no" || key == "has" {
-            let named = split_unquoted(values, ',')
-                .iter()
-                .any(|v| names_field(&v.to_lowercase(), field));
-            if !named {
-                continue;
-            }
-            // `no:` and `-has:` keep only the "No <field>" column; `-no:` and `has:` hide it.
-            if (key == "no") != negated {
-                c.include.get_or_insert_with(BTreeSet::new);
-                c.show_no_value = true;
-            } else {
-                c.hide_no_value = true;
-            }
-            continue;
-        }
-        if !names_field(&key, field) {
-            continue;
-        }
-        let values: Vec<String> = split_unquoted(values, ',')
-            .into_iter()
-            .map(|v| v.trim().to_lowercase())
-            .collect();
-        let unsupported = |v: &String| {
-            v.is_empty() || v.starts_with('@') || v.starts_with(['>', '<']) || v.contains("..")
-        };
-        if values.iter().any(unsupported) {
-            return ColumnConstraint::default();
-        }
-        if negated {
-            c.exclude.extend(values);
-        } else {
-            c.include.get_or_insert_with(BTreeSet::new).extend(values);
-        }
-    }
-    c
+    let fields = slice::from_ref(field);
+    let ctx = FilterContext {
+        fields,
+        me: None,
+        today: None,
+    };
+    Filter::parse(filter, fields).constraint(field, &ctx)
 }
 
 #[cfg(test)]
@@ -382,5 +782,429 @@ mod tests {
         assert!(!still_matches("", &archived, &f));
         assert!(still_matches("is:archived", &archived, &f));
         assert!(!still_matches("is:archived", &with_status("Todo"), &f));
+    }
+
+    // ---- The client-side evaluator (`Filter`) ----
+
+    use crate::model::item::{ItemContent, Label};
+
+    /// A Linear-style board: two selects, a cycle, plain fields, assignees and labels.
+    /// Option and iteration ids equal their names.
+    fn linear_board() -> Vec<Field> {
+        let select = |id: &str, name: &str, options: &[&str]| Field {
+            id: FieldId::new(id),
+            name: name.into(),
+            kind: field(name, options).kind,
+        };
+        let plain = |id: &str, name: &str, kind: FieldKind| Field {
+            id: FieldId::new(id),
+            name: name.into(),
+            kind,
+        };
+        let cycle = |title: &str, start: &str| Iteration {
+            id: IterationId::new(title),
+            title: title.into(),
+            start_date: start.into(),
+            duration_days: 14,
+        };
+        vec![
+            select("status", "Status", &["Todo", "In Progress", "Done"]),
+            select("priority", "Priority", &["Urgent", "High", "Medium", "Low"]),
+            plain(
+                "cycle",
+                "Cycle",
+                FieldKind::Iteration {
+                    iterations: vec![cycle("Cycle 2", "2026-10-19")],
+                    completed: vec![cycle("Cycle 1", "2026-10-05")],
+                },
+            ),
+            plain("estimate", "Estimate", FieldKind::Number),
+            plain("due", "Due date", FieldKind::Date),
+            plain("notes", "Notes", FieldKind::Text),
+            plain("assignees", "Assignees", FieldKind::Assignees),
+            plain("labels", "Labels", FieldKind::Labels),
+        ]
+    }
+
+    /// An issue keyed `key` (`TBA-7`) with `values` as (field name, value) pairs on
+    /// `linear_board()`; assignees and labels are comma-separated.
+    fn item(key: &str, title: &str, values: &[(&str, &str)]) -> Item {
+        let fields = linear_board();
+        let number = key
+            .rsplit('-')
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        let mut i = issue(key, number, title);
+        if let ItemContent::Issue { reference, .. } = &mut i.content {
+            reference.key = Some(key.into());
+        }
+        for (name, value) in values {
+            let f = fields.iter().find(|f| f.name == *name).unwrap();
+            let v = match &f.kind {
+                FieldKind::SingleSelect { .. } | FieldKind::Iteration { .. } => {
+                    f.value_for_bucket(value).unwrap()
+                }
+                FieldKind::Number => FieldValue::Number(value.parse().unwrap()),
+                FieldKind::Date => FieldValue::Date((*value).into()),
+                FieldKind::Text => FieldValue::Text((*value).into()),
+                FieldKind::Assignees => {
+                    FieldValue::Users(value.split(',').map(Into::into).collect())
+                }
+                FieldKind::Labels => FieldValue::Labels(
+                    value
+                        .split(',')
+                        .map(|n| Label {
+                            name: n.into(),
+                            color: "fff".into(),
+                        })
+                        .collect(),
+                ),
+                other => panic!("no test value for {other:?}"),
+            };
+            i.values.insert(f.id.clone(), v);
+        }
+        i
+    }
+
+    fn ctx(fields: &[Field]) -> FilterContext<'_> {
+        FilterContext {
+            fields,
+            me: Some("u-ada"),
+            today: Some(time::macros::date!(2026 - 10 - 20)),
+        }
+    }
+
+    /// Checks each `(filter, item, expected)` row against `ctx`.
+    fn check(fields: &[Field], ctx: &FilterContext, rows: &[(&str, &Item, bool)]) {
+        for (q, i, want) in rows {
+            assert_eq!(
+                Filter::parse(q, fields).matches(i, ctx),
+                *want,
+                "filter {q:?} on {} {:?}",
+                i.ref_label(),
+                i.title()
+            );
+        }
+    }
+
+    #[test]
+    fn free_text_matches_title_and_key() {
+        let f = linear_board();
+        let i = item("TBA-7", "Crash on start", &[]);
+        for (q, want) in [
+            ("crash", true),
+            ("tba-7", true),
+            ("\"on start\"", true),
+            ("crash zzz", false),
+            ("OR", false),
+        ] {
+            assert_eq!(Filter::parse(q, &f).matches(&i, &ctx(&f)), want, "{q}");
+        }
+    }
+
+    #[test]
+    fn unknown_keys_match_nothing_and_are_reported() {
+        let f = linear_board();
+        let parsed = Filter::parse("stauts:Todo label:bug Stauts:Done", &f);
+        assert_eq!(parsed.unknown_keys(), ["stauts"]);
+        assert!(!parsed.matches(&item("TBA-1", "x", &[("Status", "Todo")]), &ctx(&f)));
+        let typo = Filter::parse("-stauts:Todo no:prority", &f);
+        assert_eq!(typo.unknown_keys(), ["stauts", "prority"]);
+        assert!(!typo.matches(&item("TBA-1", "x", &[]), &ctx(&f)));
+        assert!(
+            Filter::parse("status:Todo crash", &f)
+                .unknown_keys()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn select_label_and_assignee_qualifiers() {
+        let f = linear_board();
+        let a = item(
+            "TBA-1",
+            "a",
+            &[
+                ("Status", "In Progress"),
+                ("Priority", "High"),
+                ("Labels", "bug,ui"),
+                ("Assignees", "Ada"),
+            ],
+        );
+        let b = item("TBA-2", "b", &[("Status", "Done"), ("Priority", "Low")]);
+        let c = item("TBA-3", "c", &[]);
+        check(
+            &f,
+            &ctx(&f),
+            &[
+                ("status:\"in progress\"", &a, true),
+                ("status:\"in progress\"", &b, false),
+                ("Status:DONE", &b, true),
+                ("priority:high,urgent", &a, true),
+                ("priority:high,urgent", &b, false),
+                ("priority:high,urgent", &c, false),
+                ("label:bug", &a, true),
+                ("label:bug", &b, false),
+                ("labels:UI", &a, true),
+                ("assignee:Ada", &a, true),
+                ("assignee:Ada", &b, false),
+                ("assignees:ada", &a, true),
+                ("assignees:bob,ada", &a, true),
+                ("-label:bug", &a, false),
+                ("-label:bug", &b, true),
+                ("-status:Done,Todo", &a, true),
+                ("-status:Done,Todo", &b, false),
+                ("-status:Done,Todo", &c, true),
+                ("status:\"in progress\" label:bug", &a, true),
+                ("status:\"in progress\" label:feature", &a, false),
+            ],
+        );
+    }
+
+    #[test]
+    fn no_and_has() {
+        let f = linear_board();
+        let full = item(
+            "TBA-1",
+            "a",
+            &[
+                ("Assignees", "Ada"),
+                ("Labels", "bug"),
+                ("Cycle", "Cycle 2"),
+                ("Priority", "High"),
+                ("Due date", "2026-10-20"),
+            ],
+        );
+        let empty = item("TBA-2", "b", &[]);
+        check(
+            &f,
+            &ctx(&f),
+            &[
+                ("no:assignee", &full, false),
+                ("no:assignee", &empty, true),
+                ("has:label", &full, true),
+                ("has:label", &empty, false),
+                ("no:cycle", &full, false),
+                ("no:cycle", &empty, true),
+                ("-no:priority", &full, true),
+                ("-no:priority", &empty, false),
+                ("has:due-date", &full, true),
+                ("has:due-date", &empty, false),
+                ("has:\"Due date\"", &full, true),
+                ("-has:labels", &empty, true),
+            ],
+        );
+    }
+
+    #[test]
+    fn at_me_uses_the_viewers_user_id() {
+        let f = linear_board();
+        let assigned = |name: &str, id: &str| {
+            let mut i = item("TBA-1", "x", &[("Assignees", name)]);
+            i.content_fields.assignee_ids.insert(name.into(), id.into());
+            i
+        };
+        let ada = assigned("Ada", "u-ada");
+        let bob = assigned("Bob", "u-bob");
+        check(
+            &f,
+            &ctx(&f),
+            &[
+                ("assignee:@me", &ada, true),
+                ("assignee:@me", &bob, false),
+                ("-assignee:@me", &bob, true),
+                ("assignee:bob,@me", &bob, true),
+            ],
+        );
+        let anonymous = FilterContext {
+            me: None,
+            ..ctx(&f)
+        };
+        check(
+            &f,
+            &anonymous,
+            &[("assignee:@me", &ada, false), ("assignee:@me", &bob, false)],
+        );
+    }
+
+    #[test]
+    fn cycle_at_values_use_today() {
+        let f = linear_board();
+        let one = item("TBA-1", "x", &[("Cycle", "Cycle 1")]);
+        let two = item("TBA-2", "x", &[("Cycle", "Cycle 2")]);
+        let none = item("TBA-3", "x", &[]);
+        check(
+            &f,
+            &ctx(&f),
+            &[
+                ("cycle:@current", &two, true),
+                ("cycle:@current", &one, false),
+                ("cycle:@current", &none, false),
+                ("cycle:@previous", &one, true),
+                ("cycle:@previous", &two, false),
+                ("cycle:@next", &one, false),
+                ("cycle:@next", &two, false),
+                ("cycle:\"cycle 1\"", &one, true),
+                ("-cycle:@current", &one, true),
+                ("-cycle:@current", &two, false),
+            ],
+        );
+        let no_today = FilterContext {
+            today: None,
+            ..ctx(&f)
+        };
+        for q in ["cycle:@current", "cycle:@previous", "cycle:@next"] {
+            for i in [&one, &two, &none] {
+                assert!(!Filter::parse(q, &f).matches(i, &no_today), "{q}");
+            }
+        }
+        let start = FilterContext {
+            today: Some(time::macros::date!(2026 - 10 - 18)),
+            ..ctx(&f)
+        };
+        check(
+            &f,
+            &start,
+            &[
+                ("cycle:@current", &one, true),
+                ("cycle:@next", &two, true),
+                ("cycle:@previous", &one, false),
+            ],
+        );
+    }
+
+    #[test]
+    fn numbers_and_dates_compare() {
+        let f = linear_board();
+        let e = |n: &str| item("TBA-1", "x", &[("Estimate", n)]);
+        let (one, three, five) = (e("1"), e("3"), e("5"));
+        let due = |d: &str| item("TBA-2", "x", &[("Due date", d)]);
+        let (soon, later) = (due("2026-10-20"), due("2026-11-05"));
+        let note = |n: &str| item("TBA-3", "x", &[("Notes", n)]);
+        let (flaky, solid) = (note("A Flaky test"), note("solid"));
+        let bare = item("TBA-4", "x", &[]);
+        check(
+            &f,
+            &ctx(&f),
+            &[
+                ("estimate:>2", &three, true),
+                ("estimate:>2", &one, false),
+                ("estimate:>2", &bare, false),
+                ("estimate:>=3", &three, true),
+                ("estimate:<3", &three, false),
+                ("estimate:1..3", &one, true),
+                ("estimate:1..3", &three, true),
+                ("estimate:1..3", &five, false),
+                ("estimate:<=1", &one, true),
+                ("estimate:<=1", &three, false),
+                ("estimate:3", &three, true),
+                ("estimate:3,5", &five, true),
+                ("estimate:3", &one, false),
+                ("estimate:many", &one, false),
+                ("due-date:<2026-11-01", &soon, true),
+                ("due-date:<2026-11-01", &later, false),
+                ("due-date:<2026-11-01", &bare, false),
+                ("due-date:2026-11-05", &later, true),
+                ("due-date:2026-10-01..2026-10-31", &soon, true),
+                ("due-date:2026-10-01..2026-10-31", &later, false),
+                ("due-date:@today", &soon, true),
+                ("due-date:@today", &later, false),
+                ("due-date:>@today", &later, true),
+                ("notes:flaky", &flaky, true),
+                ("notes:flaky", &solid, false),
+                ("-notes:flaky", &solid, true),
+            ],
+        );
+        let no_today = FilterContext {
+            today: None,
+            ..ctx(&f)
+        };
+        check(&f, &no_today, &[("due-date:@today", &soon, false)]);
+    }
+
+    #[test]
+    fn is_reads_the_content_state_and_kind() {
+        let f = linear_board();
+        let open = item("TBA-1", "x", &[]);
+        let mut closed = item("TBA-2", "x", &[]);
+        if let ItemContent::Issue { state, .. } = &mut closed.content {
+            *state = crate::model::ContentState::Closed;
+        }
+        let mut draft = item("TBA-3", "x", &[]);
+        draft.content = ItemContent::Draft { title: "d".into() };
+        check(
+            &f,
+            &ctx(&f),
+            &[
+                ("is:open", &open, true),
+                ("is:open", &closed, false),
+                ("is:open", &draft, true),
+                ("is:closed", &closed, true),
+                ("is:closed", &draft, false),
+                ("-is:closed", &open, true),
+                ("is:issue", &open, true),
+                ("is:issue", &draft, false),
+                ("is:open,closed", &closed, true),
+            ],
+        );
+    }
+
+    #[test]
+    fn archived_items_match_only_is_archived() {
+        let f = linear_board();
+        let mut archived = item("TBA-1", "x", &[("Labels", "bug")]);
+        archived.archived = true;
+        let live = item("TBA-2", "x", &[("Labels", "bug")]);
+        check(
+            &f,
+            &ctx(&f),
+            &[
+                ("", &archived, false),
+                ("label:bug", &archived, false),
+                ("is:archived", &archived, true),
+                ("is:archived label:bug", &archived, true),
+                ("is:archived", &live, false),
+                ("label:bug", &live, true),
+                ("-is:archived", &live, true),
+                ("-is:archived", &archived, false),
+            ],
+        );
+        for (q, want) in [
+            ("is:archived", true),
+            ("label:bug IS:ARCHIVED", true),
+            ("", false),
+            ("label:bug", false),
+            ("-is:archived", false),
+        ] {
+            assert_eq!(Filter::parse(q, &f).wants_archived(), want, "{q}");
+        }
+        assert!(Filter::parse("", &f).is_empty());
+        assert!(!Filter::parse("x", &f).is_empty());
+    }
+
+    #[test]
+    fn constraint_resolves_at_current_when_today_is_known() {
+        let f = linear_board();
+        let cycle = f.iter().find(|x| x.name == "Cycle").unwrap();
+        let current = Filter::parse("cycle:@current", &f).constraint(cycle, &ctx(&f));
+        assert!(current.allows("Cycle 2", false));
+        assert!(!current.allows("Cycle 1", false));
+        assert!(!current.allows("", true));
+        let not_previous = Filter::parse("-cycle:@previous", &f).constraint(cycle, &ctx(&f));
+        assert!(!not_previous.allows("Cycle 1", false));
+        assert!(not_previous.allows("Cycle 2", false));
+        let no_today = FilterContext {
+            today: None,
+            ..ctx(&f)
+        };
+        let unknown = Filter::parse("cycle:@current", &f).constraint(cycle, &no_today);
+        assert!(!unknown.is_constrained());
+        assert_eq!(unknown, column_constraint("cycle:@current", cycle));
+        let status = &f[0];
+        assert_eq!(
+            Filter::parse("status:Todo label:bug", &f).constraint(status, &ctx(&f)),
+            column_constraint("status:Todo label:bug", status)
+        );
     }
 }

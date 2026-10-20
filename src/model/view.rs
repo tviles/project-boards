@@ -8,7 +8,13 @@ pub enum ViewFilter {
     /// GitHub filter syntax, sent as `items(query:)`.
     Github(String),
     /// A Linear custom view by id; Linear applies its stored filter (`customView.issues`).
-    LinearView(String),
+    /// `hide_closed` travels with the view because a cached board asks for lists before it
+    /// resolves.
+    LinearView {
+        id: String,
+        #[serde(default)]
+        hide_closed: bool,
+    },
     /// A Linear `IssueFilter`, built in code for the built-in tabs.
     Linear(serde_json::Value),
 }
@@ -18,7 +24,33 @@ impl ViewFilter {
     pub fn github_query(&self) -> &str {
         match self {
             Self::Github(q) => q,
-            Self::LinearView(_) | Self::Linear(_) => "",
+            Self::LinearView { .. } | Self::Linear(_) => "",
+        }
+    }
+
+    /// Whether the filter selects every item, so no list is needed.
+    pub fn is_everything(&self) -> bool {
+        match self {
+            Self::Github(t) => t.trim().is_empty(),
+            Self::Linear(v) => v.is_null() || v.as_object().is_some_and(|o| o.is_empty()),
+            Self::LinearView { .. } => false,
+        }
+    }
+}
+
+/// A view's list request: which items to list and whether archived ones count.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListQuery {
+    pub filter: ViewFilter,
+    pub include_archived: bool,
+}
+
+impl ListQuery {
+    /// A GitHub list for `text`.
+    pub fn github(text: impl Into<String>) -> Self {
+        Self {
+            filter: ViewFilter::Github(text.into()),
+            include_archived: false,
         }
     }
 }
@@ -198,7 +230,10 @@ mod tests {
         assert_eq!(f.to_string(), "label:bug -status:Done");
         assert_eq!(f.github_query(), "label:bug -status:Done");
         assert_eq!(ViewFilter::default(), ViewFilter::Github(String::new()));
-        let view = ViewFilter::LinearView("cv1".into());
+        let view = ViewFilter::LinearView {
+            id: "cv1".into(),
+            hide_closed: false,
+        };
         let built = ViewFilter::Linear(serde_json::json!({"assignee": {"isMe": {"eq": true}}}));
         assert_eq!(view.github_query(), "");
         assert_eq!(built.to_string(), "");
@@ -208,12 +243,32 @@ mod tests {
     fn view_filters_round_trip_through_the_cache() {
         for f in [
             ViewFilter::Github("is:open".into()),
-            ViewFilter::LinearView("cv1".into()),
+            ViewFilter::LinearView {
+                id: "cv1".into(),
+                hide_closed: false,
+            },
             ViewFilter::Linear(serde_json::json!({"state": {"type": {"nin": ["canceled"]}}})),
         ] {
             let back: ViewFilter =
                 serde_json::from_str(&serde_json::to_string(&f).unwrap()).unwrap();
             assert_eq!(back, f);
         }
+    }
+
+    #[test]
+    fn everything_means_no_list() {
+        use serde_json::{Value, json};
+        assert!(ViewFilter::Github("  ".into()).is_everything());
+        assert!(ViewFilter::Linear(json!({})).is_everything());
+        assert!(ViewFilter::Linear(Value::Null).is_everything());
+        assert!(!ViewFilter::Github("is:open".into()).is_everything());
+        assert!(!ViewFilter::Linear(json!({"assignee": {"isMe": {"eq": true}}})).is_everything());
+        assert!(
+            !ViewFilter::LinearView {
+                id: "cv1".into(),
+                hide_closed: false
+            }
+            .is_everything()
+        );
     }
 }

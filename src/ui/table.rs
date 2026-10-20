@@ -132,9 +132,8 @@ pub fn table_columns<'a>(view: &View, project: &'a Project) -> Vec<&'a Field> {
 
 pub fn cell_text(item: &Item, field: &Field) -> String {
     if field.kind == FieldKind::Title {
-        return match item.number() {
-            Some(n) => format!("#{n} {}", item.title()),
-            None if item.is_placeholder() => format!("new {}", item.title()),
+        return match crate::ui::board::item_label(item) {
+            Some(label) => format!("{label} {}", item.title()),
             None => item.title().to_string(),
         };
     }

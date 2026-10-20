@@ -15,6 +15,12 @@ pub enum StoreUpdate {
     Replace(BoardSnapshot),
     Project(Project),
     UpsertItems(Vec<Item>),
+    /// An incremental poll: items changed and items gone. Removals apply after the recent
+    /// layer is replayed, so a poll that dropped an item wins over a recent edit of it.
+    Polled {
+        upsert: Vec<Item>,
+        remove: Vec<ItemId>,
+    },
     ReplaceItems(Vec<Item>),
     ViewIds {
         view: ViewId,
@@ -40,6 +46,17 @@ impl StoreUpdate {
             Self::Replace(s) => format!("Replace({} items)", s.items.len()),
             Self::Project(p) => format!("Project({})", p.id),
             Self::UpsertItems(items) => format!("UpsertItems({})", ids(items)),
+            Self::Polled { upsert, remove } => {
+                format!(
+                    "Polled({}; removed {})",
+                    ids(upsert),
+                    remove
+                        .iter()
+                        .map(|i| i.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
             Self::ReplaceItems(items) => format!("ReplaceItems({})", ids(items)),
             Self::ViewIds { view, list } => format!("ViewIds({view}, {} ids)", list.ids.len()),
             Self::ClearViewIds(view) => format!("ClearViewIds({view})"),
@@ -177,14 +194,20 @@ impl Store for MemoryStore {
             update,
             StoreUpdate::Replace(_)
                 | StoreUpdate::UpsertItems(_)
+                | StoreUpdate::Polled { .. }
                 | StoreUpdate::ReplaceItems(_)
                 | StoreUpdate::ViewIds { .. }
         );
+        let mut removed = Vec::new();
         match (update, self.confirmed.as_mut()) {
             (StoreUpdate::Replace(s), _) => self.confirmed = Some(s),
             (StoreUpdate::Project(p), Some(s)) => s.set_project(p),
             (StoreUpdate::Project(p), None) => self.confirmed = Some(BoardSnapshot::new(p)),
             (StoreUpdate::UpsertItems(items), Some(s)) => s.upsert_items(items),
+            (StoreUpdate::Polled { upsert, remove }, Some(s)) => {
+                s.upsert_items(upsert);
+                removed = remove;
+            }
             (StoreUpdate::ReplaceItems(items), Some(s)) => s.replace_items(items),
             (StoreUpdate::ViewIds { view, list }, Some(s)) => s.set_view_ids(view, list),
             (StoreUpdate::ClearViewIds(view), Some(s)) => {
@@ -198,6 +221,9 @@ impl Store for MemoryStore {
         }
         if from_server {
             self.reapply_recent();
+        }
+        if let Some(s) = self.confirmed.as_mut() {
+            s.remove_items(&removed);
         }
         self.rebuild();
     }
@@ -403,6 +429,19 @@ mod tests {
         s.begin(set("a", "o_done"));
         s.apply(StoreUpdate::UpsertItems(vec![stale_a()]));
         assert_eq!(status_of(s.snapshot(), "a"), "o_done");
+    }
+
+    #[test]
+    fn a_polled_removal_wins_over_a_recent_edit() {
+        let (mut s, _) = layered();
+        let id = s.begin(set("a", "o_done"));
+        s.settle_ok(id, Confirmed::Applied);
+        s.apply(StoreUpdate::Polled {
+            upsert: vec![],
+            remove: vec![ItemId::new("a")],
+        });
+        assert!(!s.snapshot().unwrap().items.contains_key(&ItemId::new("a")));
+        assert!(!s.confirmed().unwrap().items.contains_key(&ItemId::new("a")));
     }
 
     /// Review Focus 1: GitHub's item index lags writes by over a minute.

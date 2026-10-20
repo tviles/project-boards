@@ -151,6 +151,7 @@ pub fn project() -> Project {
         ],
         linked_repos: vec![],
         issue_repos: vec![],
+        linear: None,
     }
 }
 

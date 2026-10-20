@@ -196,9 +196,8 @@ fn card_lines_marked(
     } else {
         ""
     };
-    let title = match item.number() {
-        Some(n) => format!("{prefix}{marker}#{n} {}", item.title()),
-        None if item.is_placeholder() => format!("{prefix}{marker}new {}", item.title()),
+    let title = match item_label(item) {
+        Some(label) => format!("{prefix}{marker}{label} {}", item.title()),
         None => format!("{prefix}{marker}{}", item.title()),
     };
     let assignees: Vec<String> = item.assignees().iter().map(|a| format!("@{a}")).collect();
@@ -277,6 +276,14 @@ fn border_line(
     ))
 }
 
+/// What names the item in a title: its key or `#number`, `new` while it is being created,
+/// nothing for a draft.
+pub(crate) fn item_label(item: &Item) -> Option<String> {
+    item.reference()
+        .and_then(ContentRef::label)
+        .or_else(|| item.is_placeholder().then(|| "new".to_string()))
+}
+
 /// The state glyph and its style, then the dim reference after it: the repo's short name
 /// and `#number` for issues and pull requests, `Draft` for a draft. Redacted and unknown
 /// content have neither.
@@ -295,6 +302,10 @@ fn card_reference(
             .container
             .split_once('/')
             .map_or(r.container.as_str(), |(_, n)| n);
+        // A keyed reference (`ENG-123`) already names its container.
+        if let Some(key) = &r.key {
+            return (None, Some(sanitize(key)));
+        }
         // An existing issue being added has its number already; only a new one has none.
         let number = if placeholder && r.number == 0 {
             "new".to_string()
@@ -1880,5 +1891,80 @@ mod tests {
         assert!(lines[2].starts_with('┏'), "{screen}");
         assert!(lines[3].contains("⊘ ● t #3"), "{screen}");
         assert!(lines[9].starts_with('┗'), "{screen}");
+    }
+
+    #[test]
+    fn a_keyed_item_shows_its_key_everywhere() {
+        use crate::model::detail::{ItemDetail, LinkedRef};
+        use crate::ui::detail::{DetailState, build_doc};
+        use crate::ui::markdown::line_text;
+
+        let (p, mut all) = (project(), items());
+        let mut item = all.remove(0);
+        if let ItemContent::Issue { reference, .. } = &mut item.content {
+            reference.container = "TBA".into();
+            reference.number = 7;
+            reference.key = Some("TBA-7".into());
+        }
+        item.content_fields.parent = Some(crate::model::ParentIssue {
+            number: 2,
+            title: "Epic".into(),
+            state: ContentState::Open,
+            key: Some("TBA-2".into()),
+        });
+        assert_eq!(
+            item.content_fields.parent.as_ref().unwrap().label(),
+            "TBA-2"
+        );
+
+        let status = field(&p, "Status");
+        let card = card_lines(&item, status, 40, false, &Theme::plain());
+        let title = line_text(&card[0]);
+        assert!(title.contains("TBA-7 "), "{title}");
+        assert!(!title.contains("#7"), "{title}");
+        let (_, _, name, number) = card_reference(&item, &Theme::plain());
+        assert_eq!((name, number), (None, Some("TBA-7".to_string())));
+
+        let title_field = p.title_field().unwrap();
+        assert_eq!(
+            crate::ui::table::cell_text(&item, title_field),
+            format!("TBA-7 {}", item.title())
+        );
+
+        let mut state = DetailState::new(item.id.clone());
+        state.set_detail(
+            ItemDetail {
+                parent: Some(LinkedRef {
+                    number: 2,
+                    title: "Epic".into(),
+                    state: "OPEN".into(),
+                    key: Some("TBA-2".into()),
+                }),
+                sub_issues: vec![LinkedRef {
+                    number: 8,
+                    title: "Child".into(),
+                    state: "OPEN".into(),
+                    key: Some("TBA-8".into()),
+                }],
+                ..ItemDetail::default()
+            },
+            false,
+        );
+        let doc = build_doc(&item, &p, &state, 80, &Theme::plain());
+        let text: Vec<String> = doc.lines.iter().map(line_text).collect();
+        assert!(text[1].starts_with("TBA-7"), "{}", text[1]);
+        assert!(text.iter().any(|l| l == "Parent: TBA-2 Epic"));
+        assert!(text.iter().any(|l| l == "\u{2610} TBA-8 Child"));
+
+        let mut snap = crate::store::BoardSnapshot::new(project());
+        snap.upsert_items(vec![item]);
+        let mut app = crate::ui::app::App::new(
+            Box::new(crate::store::MemoryStore::new(Some(snap))),
+            crate::ui::keymap::Keymap::defaults(),
+            Theme::plain(),
+        );
+        app.confirm_remove();
+        let q = app.confirm.as_ref().unwrap().question.clone();
+        assert!(q.starts_with("Remove TBA-7 '"), "{q}");
     }
 }

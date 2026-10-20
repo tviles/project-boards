@@ -75,6 +75,13 @@ impl OptionKind {
         })
     }
 
+    /// Column order position: Triage 0 through Duplicate 6, an unknown kind (`None`) last at 7.
+    /// Order columns with this, never with `Option<OptionKind>`'s derived `Ord`, which puts
+    /// `None` first.
+    pub fn rank(kind: Option<Self>) -> u8 {
+        kind.map_or(7, |k| k as u8)
+    }
+
     /// Whether an issue in a state of this kind counts as closed.
     pub fn is_closed(self) -> bool {
         matches!(self, Self::Completed | Self::Canceled | Self::Duplicate)
@@ -301,6 +308,24 @@ impl Field {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_kinds_rank_after_known_ones() {
+        let kinds = [
+            OptionKind::Triage,
+            OptionKind::Backlog,
+            OptionKind::Unstarted,
+            OptionKind::Started,
+            OptionKind::Completed,
+            OptionKind::Canceled,
+            OptionKind::Duplicate,
+        ];
+        for (i, kind) in kinds.into_iter().enumerate() {
+            assert_eq!(OptionKind::rank(Some(kind)), i as u8);
+        }
+        assert!(OptionKind::rank(None) > OptionKind::rank(Some(OptionKind::Duplicate)));
+        assert_eq!(OptionKind::rank(None), 7);
+    }
 
     fn opt(id: &str, name: &str) -> SelectOption {
         SelectOption {

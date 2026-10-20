@@ -139,6 +139,17 @@ pub struct ParentIssue {
     pub number: u32,
     pub title: String,
     pub state: ContentState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+impl ParentIssue {
+    /// `ENG-123`, else `#12`.
+    pub fn label(&self) -> String {
+        self.key
+            .clone()
+            .unwrap_or_else(|| format!("#{}", self.number))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +188,10 @@ pub struct ContentFields {
     /// Label name -> label node id, to remove one.
     pub label_ids: BTreeMap<String, String>,
     pub milestone: Option<crate::model::MilestoneRef>,
+    /// Linear's manual order (`sortOrder`), ascending; a tie-break after the view's sorts.
+    /// `None` for GitHub items.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_order: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -381,6 +396,18 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_absent_sort_order_is_not_serialized() {
+        let mut i = issue("a", 1, "A");
+        let json = serde_json::to_value(&i.content_fields).unwrap();
+        assert!(json.get("sort_order").is_none());
+        i.content_fields.sort_order = Some(2.5);
+        let json = serde_json::to_value(&i.content_fields).unwrap();
+        assert_eq!(json["sort_order"], 2.5);
+        let back: ContentFields = serde_json::from_value(json).unwrap();
+        assert_eq!(back.sort_order, Some(2.5));
+    }
+
+    #[test]
     fn numbers_display_without_trailing_zero() {
         assert_eq!(FieldValue::Number(3.0).display(), "3");
         assert_eq!(FieldValue::Number(2.5).display(), "2.5");
@@ -423,6 +450,7 @@ pub(crate) mod tests {
                 number: 3,
                 title: "Epic".into(),
                 state: ContentState::Open,
+                key: None,
             }),
             sub_issues: Some(SubIssuesSummary {
                 total: 4,
