@@ -14,11 +14,28 @@ pub struct OpQueue {
     waiting: VecDeque<(OpId, ItemId)>,
     running: Vec<(OpId, ItemId)>,
     paused_until: Option<Instant>,
+    limit: Option<usize>,
 }
 
 impl OpQueue {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_limit(max: usize) -> Self {
+        Self {
+            limit: Some(max),
+            ..Self::default()
+        }
+    }
+
+    /// Changes how many ops run at once; kept across `clear`.
+    pub fn set_limit(&mut self, max: usize) {
+        self.limit = Some(max);
+    }
+
+    pub fn limit(&self) -> usize {
+        self.limit.unwrap_or(MAX_IN_FLIGHT)
     }
 
     pub fn push(&mut self, id: OpId, item: ItemId) {
@@ -32,10 +49,11 @@ impl OpQueue {
             return Vec::new();
         }
         self.paused_until = None;
+        let limit = self.limit();
         let mut busy: HashSet<ItemId> = self.running.iter().map(|(_, i)| i.clone()).collect();
         let mut out = Vec::new();
         let mut i = 0;
-        while i < self.waiting.len() && self.running.len() < MAX_IN_FLIGHT {
+        while i < self.waiting.len() && self.running.len() < limit {
             if busy.contains(&self.waiting[i].1) {
                 i += 1;
                 continue;
@@ -74,7 +92,10 @@ impl OpQueue {
 
     /// Forgets every op (another board opened).
     pub fn clear(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            limit: self.limit,
+            ..Self::default()
+        };
     }
 }
 
@@ -100,6 +121,29 @@ mod tests {
         assert_eq!(q.ready(now), [2]);
         q.finished(2);
         assert_eq!(q.ready(now), [3]);
+    }
+
+    #[test]
+    fn a_limit_of_two_sends_two() {
+        let now = Instant::now();
+        let mut q = OpQueue::with_limit(2);
+        for (id, i) in [(1, "a"), (2, "b"), (3, "c")] {
+            q.push(id, item(i));
+        }
+        assert_eq!(q.ready(now), [1, 2]);
+        assert_eq!(q.limit(), 2);
+    }
+
+    #[test]
+    fn clear_keeps_the_limit() {
+        let mut q = OpQueue::with_limit(2);
+        q.push(1, item("a"));
+        q.clear();
+        assert_eq!(q.limit(), 2);
+        assert!(q.is_idle());
+        q.set_limit(3);
+        q.clear();
+        assert_eq!(q.limit(), 3);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Every decision the board pane makes, with no terminal and no network: inputs in,
 //! effects out. The runtime shell (runtime.rs) feeds it and carries out its effects.
 
+use crate::backend::profile_for;
 use crate::board_choice::{AfterRepo, FirstStep, after_repo_projects, first_step};
 use crate::config::Config;
 use crate::error::BackendError;
@@ -364,7 +365,11 @@ impl Controller {
 
         let cached = load_cache(&cache_path(&dir, &board)).filter(|c| c.project.board == board);
         self.app.reset_for_new_board();
-        self.app.store = Box::new(MemoryStore::new(cached.clone()));
+        let profile = profile_for(board.provider());
+        self.queue.set_limit(profile.max_in_flight);
+        self.app.store =
+            Box::new(MemoryStore::new(cached.clone()).with_window(profile.recent_window));
+
         self.app.status.stale = cached.is_some();
         if let Some(view) = state.last_view(&board) {
             self.app.select_view(&view);
@@ -943,6 +948,18 @@ mod tests {
             total: 5,
             truncated: false,
         }
+    }
+
+    #[test]
+    fn a_linear_board_gets_linears_window_and_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("linear:team:t1"));
+        c.start(Ok(vec![Provider::Linear]), t0);
+        assert_eq!(c.app.store.window(), Duration::from_secs(30));
+        assert_eq!(c.queue.limit(), 4);
+        c.open_board(board(), t0);
+        assert_eq!(c.app.store.window(), crate::store::RECENT_WINDOW);
+        assert_eq!(c.queue.limit(), 4);
     }
 
     #[test]

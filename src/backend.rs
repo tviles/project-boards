@@ -7,8 +7,11 @@ use crate::github::client::{FULL_PAGE, POLL_PAGE};
 use crate::github::transport::RateInfo;
 use crate::linear::Linear;
 use crate::model::Provider;
+use crate::ops::queue::MAX_IN_FLIGHT;
+use crate::store::RECENT_WINDOW;
 use crate::sync::{INCREMENTAL_MODE, IncrementalMode};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// How a provider is loaded and polled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,19 +21,31 @@ pub struct SyncProfile {
     /// Items per page of an incremental poll.
     pub poll_page: u32,
     pub incremental: IncrementalMode,
+    /// How long an edit the provider confirmed outranks what polls say about it.
+    pub recent_window: Duration,
+    /// Edits sent at once across items.
+    pub max_in_flight: usize,
 }
 
 pub const GITHUB_PROFILE: SyncProfile = SyncProfile {
     full_page: FULL_PAGE,
     poll_page: POLL_PAGE,
     incremental: INCREMENTAL_MODE,
+    recent_window: RECENT_WINDOW,
+    max_in_flight: MAX_IN_FLIGHT,
 };
+
+/// Linear's index is not known to lag writes the way GitHub's does, so an edit outranks polls
+/// for a short while only.
+pub const LINEAR_RECENT_WINDOW: Duration = Duration::from_secs(30);
 
 /// Linear filters `updatedAt` to the instant, so polls ask only for what changed since.
 pub const LINEAR_PROFILE: SyncProfile = SyncProfile {
     full_page: 100,
     poll_page: 50,
     incremental: IncrementalMode::DateTime,
+    recent_window: LINEAR_RECENT_WINDOW,
+    max_in_flight: 4,
 };
 
 pub fn profile_for(provider: Provider) -> SyncProfile {
@@ -127,8 +142,22 @@ mod tests {
                 full_page: 100,
                 poll_page: 20,
                 incremental: IncrementalMode::Date,
+                recent_window: RECENT_WINDOW,
+                max_in_flight: MAX_IN_FLIGHT,
             }
         );
+    }
+
+    #[test]
+    fn linear_keeps_edits_for_thirty_seconds_and_four_in_flight() {
+        assert_eq!(LINEAR_PROFILE.recent_window, Duration::from_secs(30));
+        assert_eq!(LINEAR_PROFILE.max_in_flight, 4);
+    }
+
+    #[test]
+    fn github_limits_are_unchanged() {
+        assert_eq!(GITHUB_PROFILE.recent_window, RECENT_WINDOW);
+        assert_eq!(GITHUB_PROFILE.max_in_flight, MAX_IN_FLIGHT);
     }
 
     #[test]
@@ -142,6 +171,8 @@ mod tests {
                 full_page: 100,
                 poll_page: 50,
                 incremental: IncrementalMode::DateTime,
+                recent_window: Duration::from_secs(30),
+                max_in_flight: 4,
             }
         );
         assert_eq!(profile_for(Provider::Linear), LINEAR_PROFILE);
