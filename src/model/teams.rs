@@ -261,15 +261,21 @@ pub fn column_team<'a>(
     bucket: &Bucket,
 ) -> Option<&'a TeamMeta> {
     let meta = project.linear.as_ref()?;
-    owned(field)?;
+    let owned = owned(field)?;
     let key = bucket.key.as_deref()?;
-    let team = meta.owners.get(key)?;
-    bucket
-        .aliases
-        .iter()
-        .all(|a| meta.owners.get(a) == Some(team))
-        .then(|| meta.teams.iter().find(|t| &t.id == team))
-        .flatten()
+    let team = match owned {
+        // A group's labels are not in `owners`: the group is, whatever the bucket.
+        Owned::Group(group) => meta.owners.get(group)?,
+        Owned::Status | Owned::Cycle => {
+            let team = meta.owners.get(key)?;
+            bucket
+                .aliases
+                .iter()
+                .all(|a| meta.owners.get(a) == Some(team))
+                .then_some(team)?
+        }
+    };
+    meta.teams.iter().find(|t| &t.id == team)
 }
 
 #[cfg(test)]
@@ -754,5 +760,21 @@ mod tests {
         let priority = field(&p, PRIORITY);
         let urgent = &priority.buckets().unwrap()[0];
         assert_eq!(column_team(&p, priority, urgent), None, "no team's");
+
+        let type_group = group(&p, "lg-type");
+        let type_buckets = type_group.buckets().unwrap();
+        let bug = type_buckets.iter().find(|b| b.title == "Bug").unwrap();
+        assert_eq!(
+            column_team(&p, type_group, bug),
+            Some(&tba()),
+            "TBA's group"
+        );
+        let no_type = type_buckets.last().unwrap();
+        assert_eq!(no_type.key, None);
+        assert_eq!(column_team(&p, type_group, no_type), None, "No Type");
+
+        let size = group(&p, "lg-size");
+        let small = &size.buckets().unwrap()[0];
+        assert_eq!(column_team(&p, size, small), None, "the workspace's group");
     }
 }
