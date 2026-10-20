@@ -1020,11 +1020,23 @@ impl App {
                 if body.is_empty() {
                     return self.say(unchanged("Empty comment; nothing was sent"));
                 }
+                // A Linear comment is made with an id of ours, so a resend names the same
+                // comment (GitHub has no such id).
+                let client_id = if self.board_provider() == Provider::Linear {
+                    match crate::uuid::new_v4() {
+                        Ok(id) => Some(id),
+                        Err(e) => {
+                            return self.say(&format!("Could not make an id for the comment: {e}"));
+                        }
+                    }
+                } else {
+                    None
+                };
                 self.submit_content(OpKind::Comment, id, |item, content| Op::Comment {
                     item,
                     content,
                     body,
-                    client_id: None,
+                    client_id,
                 })
             }
             EditPurpose::NewDraft { presets } => match title_and_body(&text) {
@@ -1766,6 +1778,9 @@ impl App {
         };
         let title = crate::ui::text::truncate_to_width(item.title(), 40);
         let question = match (&item.content, item.reference().and_then(ContentRef::label)) {
+            (_, Some(label)) if self.board_provider() == Provider::Linear => {
+                format!("Remove {label} '{title}' from the project? It stays in its team. (y/n)")
+            }
             (ItemContent::Draft { .. }, _) => {
                 format!("Remove the draft '{title}' from the project? The draft is deleted. (y/n)")
             }
@@ -5895,6 +5910,113 @@ pub(crate) mod tests {
             crate::ui::fixtures::render_to_string(100, 20, |f| crate::ui::chrome::draw(f, &mut a));
         assert!(screen.contains("Close as canceled (none)"), "{screen}");
         insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn linear_title_and_body_edits_send() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        a.edit_title();
+        let (purpose, _) = text_form(&a);
+        assert_eq!(purpose, &EditPurpose::Title(ItemId::new("i-tba-1")));
+        a.on_text(
+            EditPurpose::Title(ItemId::new("i-tba-1")),
+            "A better title".into(),
+            false,
+        );
+        let body = "Steps\n1. run\n".to_string();
+        a.on_text(
+            EditPurpose::Body(ItemId::new("i-tba-1")),
+            body.clone(),
+            false,
+        );
+        assert_eq!(
+            pending_ops(&a),
+            [
+                Op::Title {
+                    item: ItemId::new("i-tba-1"),
+                    content: crate::model::ContentId::Issue("i-tba-1".into()),
+                    title: "A better title".into(),
+                },
+                Op::Body {
+                    item: ItemId::new("i-tba-1"),
+                    content: crate::model::ContentId::Issue("i-tba-1".into()),
+                    body: "Steps\n1. run".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_linear_comment_carries_a_client_id_and_r_resends_it() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        assert!(a.handle_key(key('c')).is_empty());
+        type_in(&mut a, "looks good");
+        assert_eq!(a.handle_key(alt_enter()), vec![Command::Send(1)]);
+        let first = match &pending_ops(&a)[0] {
+            Op::Comment {
+                client_id, body, ..
+            } => {
+                assert_eq!(body, "looks good");
+                client_id.clone().expect("a Linear comment has a client id")
+            }
+            other => panic!("expected a comment, got {other:?}"),
+        };
+        assert_eq!(first.len(), 36, "{first}");
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Err(BackendError::Network("reset".into())),
+        });
+        assert_eq!(a.errors.len(), 1);
+        assert!(!a.errors[0].may_exist, "safe to resend");
+        assert!(!a.errors[0].message.contains(MAYBE_POSTED));
+        a.handle_key(key('E'));
+        assert_eq!(a.handle_key(key('R')), vec![Command::Send(2)]);
+        match &pending_ops(&a)[0] {
+            Op::Comment { client_id, .. } => assert_eq!(client_id.as_deref(), Some(first.as_str())),
+            other => panic!("expected a comment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn archive_and_unarchive_on_linear() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        assert_eq!(a.handle_key(key('A')), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [Op::Archive {
+                item: ItemId::new("i-tba-1")
+            }]
+        );
+        // The archived card waits on the board; `A` on it unarchives.
+        assert!(a.selected_item().unwrap().archived);
+        assert_eq!(a.handle_key(key('A')), vec![Command::Send(2)]);
+        assert_eq!(
+            pending_ops(&a)[1],
+            Op::Unarchive {
+                item: ItemId::new("i-tba-1")
+            }
+        );
+    }
+
+    #[test]
+    fn remove_asks_and_clears_the_project() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        assert!(a.confirm_remove().is_empty());
+        assert_eq!(
+            a.confirm.as_ref().unwrap().question,
+            "Remove TBA-1 'Issue TBA-1' from the project? It stays in its team. (y/n)"
+        );
+        assert_eq!(a.handle_key(key('y')), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [Op::Remove {
+                item: ItemId::new("i-tba-1")
+            }]
+        );
     }
 
     /// The Linear table (All issues, manual) with `sortOrder`s 1, 2, 4, 8 for TBA-1, TBA-2,

@@ -2044,7 +2044,7 @@ mod tests {
     }
 
     #[test]
-    fn the_action_menu_on_linear_offers_only_the_operations_turned_on() {
+    fn the_action_menu_on_a_linear_project_board_lists_its_operations() {
         let mut a = crate::ui::app::edit::tests::linear_app();
         assert!(a.handle_key(key(' ')).is_empty());
         assert_eq!(
@@ -2055,18 +2055,17 @@ mod tests {
                 ("Move up".to_string(), "K".to_string()),
                 ("Move down".to_string(), "J".to_string()),
                 ("Edit a field".to_string(), "e".to_string()),
+                ("Comment".to_string(), "c".to_string()),
                 ("Close".to_string(), "X".to_string()),
+                ("Archive".to_string(), "A".to_string()),
+                ("Edit title".to_string(), String::new()),
+                ("Edit body".to_string(), String::new()),
+                ("Remove from project".to_string(), String::new()),
                 ("Open in the browser".to_string(), "o".to_string()),
                 ("Show archived items".to_string(), String::new()),
             ]
         );
         a.handle_key(code(KeyCode::Esc));
-        // A kind Linear does not have yet keeps the 0.4 text.
-        assert!(a.handle_key(key('A')).is_empty());
-        assert_eq!(
-            a.status.flash.as_deref(),
-            Some("Editing Linear boards arrives in 0.5")
-        );
         // A board the viewer cannot edit offers only the browser and archived items.
         let mut snap = a.snapshot().unwrap().clone();
         snap.project.viewer_can_update = false;

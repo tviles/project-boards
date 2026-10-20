@@ -146,6 +146,12 @@ const LINEAR_CAPS: ProviderCaps = ProviderCaps {
         OpKind::SetField,
         OpKind::Close,
         OpKind::Reopen,
+        OpKind::Title,
+        OpKind::Body,
+        OpKind::Comment,
+        OpKind::Archive,
+        OpKind::Unarchive,
+        OpKind::Remove,
     ],
     drafts: false,
     milestones: false,
@@ -605,7 +611,7 @@ mod tests {
             );
         }
         assert_eq!(
-            check(Archive, &issue("i", 1, "x"), &linear)
+            check(Assignees, &issue("i", 1, "x"), &linear)
                 .unwrap_err()
                 .message(&none),
             LINEAR_READ_ONLY
@@ -631,10 +637,18 @@ mod tests {
         let linear = linear_ctx();
         assert_eq!(
             provider_caps(Provider::Linear).ops,
-            [Move, Reorder, SetField, Close, Reopen]
+            [
+                Move, Reorder, SetField, Close, Reopen, Title, Body, Comment, Archive, Unarchive,
+                Remove
+            ]
         );
         let i = issue("i", 1, "x");
-        assert_eq!(capabilities(&i, &linear), [Move, Reorder, SetField, Close]);
+        assert_eq!(
+            capabilities(&i, &linear),
+            [
+                Move, Reorder, SetField, Archive, Remove, Title, Body, Comment, Close
+            ]
+        );
         assert_eq!(
             check(Move, &issue("local:1", 0, "New"), &linear),
             Err(Denial::Creating(Provider::Linear))
