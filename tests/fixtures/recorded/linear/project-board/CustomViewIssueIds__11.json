@@ -1,0 +1,20 @@
+{
+  "data": {
+    "customView": {
+      "issues": {
+        "nodes": [
+          {
+            "id": "c3e10385-09ac-4b8e-84db-21e16627500c"
+          },
+          {
+            "id": "d5249971-cf97-4ced-9dc8-80d78d896682"
+          }
+        ],
+        "pageInfo": {
+          "endCursor": "d5249971-cf97-4ced-9dc8-80d78d896682",
+          "hasNextPage": false
+        }
+      }
+    }
+  }
+}

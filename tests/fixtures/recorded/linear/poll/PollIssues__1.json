@@ -1,0 +1,125 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "archivedAt": null,
+          "assignee": null,
+          "canceledAt": null,
+          "completedAt": null,
+          "createdAt": "2026-10-16T17:47:45.959Z",
+          "cycle": null,
+          "dueDate": null,
+          "estimate": null,
+          "id": "80b38728-b7cc-4db0-acb8-5a420815fcd1",
+          "identifier": "TBA-16",
+          "labels": {
+            "nodes": [
+              {
+                "color": "#4cb782",
+                "id": "252b3a01-2176-46dc-90b8-c787d03131dc",
+                "name": "UI",
+                "parent": null
+              }
+            ]
+          },
+          "number": 16,
+          "parent": {
+            "id": "5acd0f88-a001-4e92-85ae-174f7138d117",
+            "identifier": "TBA-14",
+            "number": 14,
+            "state": {
+              "type": "unstarted"
+            },
+            "title": "Dark theme"
+          },
+          "priority": 3,
+          "project": {
+            "id": "a0821225-6d31-4a7c-b6e0-7d88ee536155",
+            "name": "Testbed project"
+          },
+          "sortOrder": -6832,
+          "state": {
+            "color": "#e2e2e2",
+            "id": "328f9fdf-a493-424a-8dc5-48aa1943b214",
+            "name": "Todo",
+            "position": 1,
+            "type": "unstarted"
+          },
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0",
+            "key": "TBA"
+          },
+          "title": "Dark theme: settings toggle",
+          "trashed": null,
+          "updatedAt": "2026-10-20T03:12:30.197Z",
+          "url": "https://linear.app/testbed-workspace/issue/TBA-16/dark-theme-settings-toggle"
+        },
+        {
+          "archivedAt": null,
+          "assignee": {
+            "displayName": "Avery Quill",
+            "id": "f4af6b5a-208f-4947-b8a3-b6da54a82cce"
+          },
+          "canceledAt": null,
+          "completedAt": null,
+          "createdAt": "2026-10-16T17:47:46.742Z",
+          "cycle": {
+            "endsAt": "2026-10-30T05:00:00.000Z",
+            "id": "b525acc4-a622-4783-9041-e6454882d661",
+            "name": null,
+            "number": 2,
+            "startsAt": "2026-10-23T05:00:00.000Z"
+          },
+          "dueDate": "2026-10-19",
+          "estimate": 1,
+          "id": "ea7a48d9-a787-45f0-83cf-ee292ba99925",
+          "identifier": "TBA-20",
+          "labels": {
+            "nodes": [
+              {
+                "color": "#EB5757",
+                "id": "321a3c2d-ce45-40c8-8c66-49ce0a1317b0",
+                "name": "Bug",
+                "parent": {
+                  "groupType": "singleSelect",
+                  "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b"
+                }
+              },
+              {
+                "color": "#f2c94c",
+                "id": "ec3a49e4-b728-4a0d-b06c-9da15315268f",
+                "name": "API",
+                "parent": null
+              }
+            ]
+          },
+          "number": 20,
+          "parent": null,
+          "priority": 1,
+          "project": null,
+          "sortOrder": -7751,
+          "state": {
+            "color": "#e2e2e2",
+            "id": "328f9fdf-a493-424a-8dc5-48aa1943b214",
+            "name": "Todo",
+            "position": 1,
+            "type": "unstarted"
+          },
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0",
+            "key": "TBA"
+          },
+          "title": "Rate limit errors are swallowed",
+          "trashed": null,
+          "updatedAt": "2026-10-20T03:12:30.046Z",
+          "url": "https://linear.app/testbed-workspace/issue/TBA-20/rate-limit-errors-are-swallowed"
+        }
+      ],
+      "pageInfo": {
+        "endCursor": "ea7a48d9-a787-45f0-83cf-ee292ba99925",
+        "hasNextPage": false
+      }
+    }
+  }
+}
