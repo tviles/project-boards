@@ -58,9 +58,16 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' herdr-plugin.toml | head -n 1)
           test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != v$version"; exit 1; }
+      - name: Release notes from CHANGELOG.md
+        # Fails the job when CHANGELOG.md has no section (or an empty one) for the tag's version.
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          sh scripts/changelog-section.sh "$version" > "$RUNNER_TEMP/release-notes.md"
+          test -s "$RUNNER_TEMP/release-notes.md" || { echo "CHANGELOG.md's $version section is empty"; exit 1; }
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          body_path: ${{ runner.temp }}/release-notes.md
           files: project-boards-*

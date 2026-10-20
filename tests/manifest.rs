@@ -84,3 +84,63 @@ fn actions_have_local_ids_and_valid_placements() {
         }
     }
 }
+
+#[test]
+fn changelog_has_a_section_for_the_version() {
+    let version = manifest()["version"].as_str().unwrap().to_string();
+    let changelog = fs::read_to_string("CHANGELOG.md").expect("CHANGELOG.md exists");
+    let heading = if version.ends_with("-dev") {
+        "## [Unreleased]".to_string()
+    } else {
+        format!("## [{version}] - ")
+    };
+    assert!(
+        changelog.lines().any(|l| l.starts_with(&heading)),
+        "CHANGELOG.md has no `{heading}` section for version {version}"
+    );
+}
+
+fn changelog_section(version: &str) -> std::process::Output {
+    std::process::Command::new("sh")
+        .arg("scripts/changelog-section.sh")
+        .arg(version)
+        .output()
+        .expect("sh runs")
+}
+
+#[test]
+fn changelog_section_prints_one_version_body() {
+    let out = changelog_section("0.3.1");
+    assert!(out.status.success(), "{out:?}");
+    let body = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        body.starts_with("### "),
+        "body starts at its first heading: {body:?}"
+    );
+    assert!(body.ends_with('\n') && !body.ends_with("\n\n"), "{body:?}");
+    assert!(
+        !body.contains("## ["),
+        "stops before the next version: {body:?}"
+    );
+    assert!(
+        !body.contains("]: https://"),
+        "leaves the compare links out: {body:?}"
+    );
+    // The oldest section ends at the compare links, not the end of the file.
+    let oldest = String::from_utf8(changelog_section("0.1.0").stdout).unwrap();
+    assert!(oldest.contains("### Added"), "{oldest:?}");
+    assert!(!oldest.contains("]: https://"), "{oldest:?}");
+    assert!(
+        oldest.ends_with('\n') && !oldest.ends_with("\n\n"),
+        "{oldest:?}"
+    );
+}
+
+#[test]
+fn changelog_section_fails_for_a_missing_version() {
+    for missing in ["9.9.9", "0.3", "0.3.1.0", ""] {
+        let out = changelog_section(missing);
+        assert!(!out.status.success(), "{missing:?} has no section");
+        assert!(out.stdout.is_empty(), "{missing:?}");
+    }
+}
