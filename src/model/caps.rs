@@ -140,7 +140,12 @@ const GITHUB_CAPS: ProviderCaps = ProviderCaps {
 
 /// The operations wired in so far, one by one; the rest keep the 0.4 text.
 const LINEAR_CAPS: ProviderCaps = ProviderCaps {
-    ops: &[OpKind::Move, OpKind::SetField],
+    ops: &[
+        OpKind::Move,
+        OpKind::SetField,
+        OpKind::Close,
+        OpKind::Reopen,
+    ],
     drafts: false,
     milestones: false,
     max_assignees: Some(1),
@@ -623,9 +628,12 @@ mod tests {
     #[test]
     fn linear_moves_and_sets_fields_by_the_matrix() {
         let linear = linear_ctx();
-        assert_eq!(provider_caps(Provider::Linear).ops, [Move, SetField]);
+        assert_eq!(
+            provider_caps(Provider::Linear).ops,
+            [Move, SetField, Close, Reopen]
+        );
         let i = issue("i", 1, "x");
-        assert_eq!(capabilities(&i, &linear), [Move, SetField]);
+        assert_eq!(capabilities(&i, &linear), [Move, SetField, Close]);
         assert_eq!(
             check(Move, &issue("local:1", 0, "New"), &linear),
             Err(Denial::Creating(Provider::Linear))

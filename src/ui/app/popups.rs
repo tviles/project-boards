@@ -1370,6 +1370,30 @@ impl App {
                 ListOutcome::Chosen(reason) => {
                     let item = item.clone();
                     self.close_popup();
+                    if self.is_linear() {
+                        // A move to the team's state; a team without one says so.
+                        let goal = match reason {
+                            crate::model::CloseReason::Completed => {
+                                crate::model::teams::StateGoal::Completed
+                            }
+                            crate::model::CloseReason::NotPlanned => {
+                                crate::model::teams::StateGoal::Canceled
+                            }
+                        };
+                        let Some(found) = self.snapshot().and_then(|s| s.items.get(&item)).cloned()
+                        else {
+                            self.status.flash =
+                                Some(crate::ui::app::edit::NO_LONGER_ON_BOARD.into());
+                            return Vec::new();
+                        };
+                        return match self.linear_close_op(&found, goal) {
+                            Ok(op) => self.submit(OpKind::Close, op),
+                            Err(reason) => {
+                                self.status.flash = Some(reason);
+                                Vec::new()
+                            }
+                        };
+                    }
                     // Choosing a reason is the confirmation (Decision 18).
                     let target = item.clone();
                     return self.submit_content_op(OpKind::Close, target, |content| Op::Close {
@@ -2029,6 +2053,7 @@ mod tests {
                 ("Move to the previous column".to_string(), "<".to_string()),
                 ("Move to the next column".to_string(), ">".to_string()),
                 ("Edit a field".to_string(), "e".to_string()),
+                ("Close".to_string(), "X".to_string()),
                 ("Open in the browser".to_string(), "o".to_string()),
                 ("Show archived items".to_string(), String::new()),
             ]

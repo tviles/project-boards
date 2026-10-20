@@ -2,6 +2,7 @@
 //! settles when GitHub answers. Failed edits go to the error log.
 
 use super::*;
+use crate::model::teams::{StateGoal, TeamRefusal, issue_team, state_for};
 use crate::model::{
     CloseReason, ContentId, Denial, EditContext, ItemContent, OpKind, check, check_new,
 };
@@ -1767,6 +1768,74 @@ impl App {
 
     /// `X`: reopen a closed item at once; close an open one after asking (a reason for an
     /// issue, yes or no for a pull request).
+    /// The Status value that closes `item` for `reason`, or reopens it (`None`), as a
+    /// `SetField` on `linear:status`: the state of its team's, or the refusal to flash.
+    pub(crate) fn linear_close_op(&self, item: &Item, goal: StateGoal) -> Result<Op, String> {
+        let refused = |r: TeamRefusal| r.message();
+        let project = self
+            .project()
+            .ok_or_else(|| refused(TeamRefusal::NeedsRefresh))?;
+        let team = issue_team(project, item).ok_or_else(|| refused(TeamRefusal::NeedsRefresh))?;
+        let value = state_for(project, team, goal).map_err(refused)?;
+        Ok(Op::SetField {
+            item: item.id.clone(),
+            field: FieldId::new(crate::model::teams::STATUS_FIELD),
+            value,
+        })
+    }
+
+    /// `close_or_reopen` on a Linear board: both are moves to a state of the issue's team.
+    fn linear_close_or_reopen(
+        &mut self,
+        kind: OpKind,
+        item: &Item,
+        reference: &str,
+    ) -> Vec<Command> {
+        if kind == OpKind::Reopen {
+            return match self.linear_close_op(item, StateGoal::Reopen) {
+                Ok(op) => self.submit(kind, op),
+                Err(reason) => {
+                    self.status.flash = Some(reason);
+                    Vec::new()
+                }
+            };
+        }
+        // The names the two choices lead to; a missing target reads `none` and says why
+        // when chosen.
+        let target = |a: &Self, goal| match a.linear_close_op(item, goal) {
+            Ok(Op::SetField { value, .. }) => Ok(value.display()),
+            Ok(_) => Err(String::new()),
+            Err(reason) => Err(reason),
+        };
+        let (completed, canceled) = (
+            target(self, StateGoal::Completed),
+            target(self, StateGoal::Canceled),
+        );
+        // An issue whose team is not known has no states to name: say so, open nothing.
+        if self.project().and_then(|p| issue_team(p, item)).is_none() {
+            self.status.flash = Some(TeamRefusal::NeedsRefresh.message());
+            return Vec::new();
+        }
+        let label = |what: &str, name: Result<String, String>| {
+            format!(
+                "Close as {what} ({})",
+                name.unwrap_or_else(|_| "none".into())
+            )
+        };
+        let picker = ListPicker::new(
+            format!("Close {reference}?"),
+            vec![
+                Choice::new(label("completed", completed), CloseReason::Completed),
+                Choice::new(label("canceled", canceled), CloseReason::NotPlanned),
+            ],
+        );
+        self.open_popup(Popup::CloseReason {
+            item: item.id.clone(),
+            picker,
+        });
+        Vec::new()
+    }
+
     pub(crate) fn close_or_reopen(&mut self) -> Vec<Command> {
         let Some(item) = self.action_item().cloned() else {
             self.status.flash = Some("Select an item first".into());
@@ -1799,6 +1868,9 @@ impl App {
             Some(label) => format!("{label} '{title}'"),
             None => format!("'{title}'"),
         };
+        if self.is_linear() {
+            return self.linear_close_or_reopen(kind, &item, &reference);
+        }
         match (kind, &content) {
             (OpKind::Reopen, _) => self.submit(
                 kind,
@@ -5060,7 +5132,7 @@ pub(crate) mod tests {
     /// canonical option is TBA's). Each team has its own cycle; the label group Type
     /// (Bug, Feature) is TBA's.
     pub(crate) fn linear_project() -> crate::model::Project {
-        use crate::model::OptionKind::{Completed, Started, Unstarted};
+        use crate::model::OptionKind::{Canceled, Completed, Started, Unstarted};
         use crate::model::{Field, FieldKind, Iteration, IterationId};
         let field = |id: &str, name: &str, kind: FieldKind| Field {
             id: FieldId::new(id),
@@ -5092,6 +5164,8 @@ pub(crate) mod tests {
                         linear_option("s-b-review", "In Review", Started),
                         linear_option("s-b-done", "Done", Completed),
                         linear_option("s-a-done", "Done", Completed),
+                        // TBA only: TBB has no canceled state.
+                        linear_option("s-a-canceled", "Canceled", Canceled),
                     ],
                 },
             ),
@@ -5136,6 +5210,7 @@ pub(crate) mod tests {
             ("s-a-todo", TBA_ID),
             ("s-a-prog", TBA_ID),
             ("s-a-done", TBA_ID),
+            ("s-a-canceled", TBA_ID),
             ("s-b-todo", TBB_ID),
             ("s-b-review", TBB_ID),
             ("s-b-done", TBB_ID),
@@ -5296,7 +5371,14 @@ pub(crate) mod tests {
         assert_eq!(a.layout().0, Layout::Board);
         assert_eq!(
             column_titles(&a),
-            ["Todo", "In Progress", "In Review", "Done", "No Status"]
+            [
+                "Todo",
+                "In Progress",
+                "In Review",
+                "Done",
+                "Canceled",
+                "No Status"
+            ]
         );
         let ids = |a: &App| -> Vec<Vec<String>> {
             a.board_columns()
@@ -5310,6 +5392,7 @@ pub(crate) mod tests {
                 vec!["TBA-1".to_string(), "TBB-1".to_string()],
                 vec!["TBA-2".to_string()],
                 vec!["TBB-2".to_string()],
+                vec![],
                 vec![],
                 vec![],
             ]
@@ -5629,5 +5712,132 @@ pub(crate) mod tests {
         );
         pick(&mut a, "TBB-1");
         assert_eq!(a.handle_key(key('>')), vec![Command::Send(3)]);
+    }
+
+    /// `snap` with the Linear issue `key` closed in `status`.
+    fn close_in_snapshot(a: &mut App, key: &str, status: (&str, &str)) {
+        let mut snap = a.snapshot().unwrap().clone();
+        let item = snap
+            .items
+            .values_mut()
+            .find(|i| i.ref_label() == key)
+            .unwrap();
+        if let crate::model::ItemContent::Issue { state, .. } = &mut item.content {
+            *state = crate::model::ContentState::Closed;
+        }
+        item.values.insert(
+            FieldId::new(crate::linear::ids::STATUS),
+            select_value(status.0, status.1),
+        );
+        a.store.apply(StoreUpdate::Replace(snap));
+    }
+
+    fn close_picker(a: &App) -> (String, Vec<String>) {
+        let Some(crate::ui::app::Popup::CloseReason { picker, .. }) = &a.popup else {
+            panic!("reason picker")
+        };
+        (
+            picker.title.clone(),
+            picker.choices.iter().map(|c| c.label.clone()).collect(),
+        )
+    }
+
+    #[test]
+    fn linear_close_offers_completed_and_canceled_states() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-2");
+        assert!(a.handle_key(key('X')).is_empty());
+        assert_eq!(
+            close_picker(&a),
+            (
+                "Close TBA-2 'Issue TBA-2'?".to_string(),
+                vec![
+                    "Close as completed (Done)".to_string(),
+                    "Close as canceled (Canceled)".to_string()
+                ]
+            )
+        );
+        // Choosing "completed" moves to the team's Done state.
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [set_linear(
+                "i-tba-2",
+                crate::linear::ids::STATUS,
+                select_value("s-a-done", "Done")
+            )]
+        );
+        assert_eq!(linear_status(&a, "TBA-2"), "Done");
+    }
+
+    #[test]
+    fn closing_as_canceled_moves_to_the_canceled_state() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        a.handle_key(key('X'));
+        a.handle_key(code(KeyCode::Down));
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [set_linear(
+                "i-tba-1",
+                crate::linear::ids::STATUS,
+                select_value("s-a-canceled", "Canceled")
+            )]
+        );
+        assert!(a.popup.is_none());
+        assert_eq!(linear_status(&a, "TBA-1"), "Canceled");
+    }
+
+    #[test]
+    fn reopen_moves_to_the_first_unstarted_state() {
+        let mut a = linear_app();
+        close_in_snapshot(&mut a, "TBB-2", ("s-b-done", "Done"));
+        pick(&mut a, "TBB-2");
+        assert_eq!(a.handle_key(key('X')), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [set_linear(
+                "i-tbb-2",
+                crate::linear::ids::STATUS,
+                select_value("s-b-todo", "Todo")
+            )]
+        );
+        assert!(a.popup.is_none());
+        assert_eq!(linear_status(&a, "TBB-2"), "Todo");
+    }
+
+    #[test]
+    fn a_team_without_canceled_says_so() {
+        let mut a = linear_app();
+        pick(&mut a, "TBB-1");
+        a.handle_key(key('X'));
+        assert_eq!(
+            close_picker(&a).1,
+            [
+                "Close as completed (Done)".to_string(),
+                "Close as canceled (none)".to_string()
+            ]
+        );
+        a.handle_key(code(KeyCode::Down));
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        assert_eq!(a.status.flash.as_deref(), Some("TBB has no canceled state"));
+        assert_eq!(a.pending_count(), 0);
+        assert_eq!(linear_status(&a, "TBB-1"), "Todo");
+        // The completed target of the same team still works.
+        a.handle_key(key('X'));
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(linear_status(&a, "TBB-1"), "Done");
+    }
+
+    #[test]
+    fn linear_close_menu() {
+        let mut a = linear_app();
+        pick(&mut a, "TBB-1");
+        a.handle_key(key('X'));
+        let screen =
+            crate::ui::fixtures::render_to_string(100, 20, |f| crate::ui::chrome::draw(f, &mut a));
+        assert!(screen.contains("Close as canceled (none)"), "{screen}");
+        insta::assert_snapshot!(screen);
     }
 }
