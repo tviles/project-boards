@@ -33,6 +33,17 @@ pub fn priority_option(n: u8) -> OptionId {
     OptionId::new(format!("linear:priority:{n}"))
 }
 
+/// Linear's priority (1 Urgent through 4 Low) of a Priority option; `None` for any other
+/// option.
+pub fn priority_of(option: &OptionId) -> Option<u8> {
+    option
+        .as_str()
+        .strip_prefix("linear:priority:")?
+        .parse()
+        .ok()
+        .filter(|n| (1..=4).contains(n))
+}
+
 /// The `IssueFilter` that keeps a board's issues: its project's or its team's. `Null` for a
 /// GitHub board, which has none.
 pub fn board_filter(board: &BoardKey) -> Value {
@@ -64,6 +75,22 @@ mod tests {
         assert_eq!(CYCLE, "linear:cycle");
         assert_eq!(group("g-1"), FieldId::new("linear:group:g-1"));
         assert_eq!(priority_option(2), OptionId::new("linear:priority:2"));
+    }
+
+    #[test]
+    fn a_priority_option_reads_back_as_its_priority() {
+        for n in 1..=4 {
+            assert_eq!(priority_of(&priority_option(n)), Some(n));
+        }
+        for other in [
+            "linear:priority:0",
+            "linear:priority:5",
+            "linear:priority:x",
+            "p0",
+            "s-a-todo",
+        ] {
+            assert_eq!(priority_of(&OptionId::new(other)), None, "{other}");
+        }
     }
 
     #[test]

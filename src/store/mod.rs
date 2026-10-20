@@ -653,6 +653,7 @@ mod tests {
         let id = s.begin(Op::Reorder {
             item: ItemId::new("a"),
             after: Some(ItemId::new("c")),
+            sort_order: None,
         });
         s.settle_ok(id, Confirmed::Applied);
         // GitHub's list still has the old order.
