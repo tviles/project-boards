@@ -83,6 +83,21 @@ pub fn sort_items(items: &mut [&Item], specs: &[SortSpec], fields: &[Field]) {
     }
 }
 
+/// The `sortOrder` for an issue that lands between two others: the midpoint of the two,
+/// one less than the first at the top, one more than the last at the bottom. `None` when no
+/// value fits (the neighbours are equal, out of order, or too close for an f64 between them).
+pub fn sort_order_between(before: Option<f64>, after: Option<f64>) -> Option<f64> {
+    match (before, after) {
+        (Some(a), Some(b)) if a < b => {
+            let mid = a + (b - a) / 2.0;
+            (mid > a && mid < b).then_some(mid)
+        }
+        (None, Some(b)) => Some(b - 1.0),
+        (Some(a), None) => Some(a + 1.0),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +281,25 @@ mod tests {
         let mut items = vec![&a, &b, &c, &d];
         sort_items(&mut items, &[spec], &[priority()]);
         assert_eq!(ids(&items), ["d", "c", "a", "b"]);
+    }
+
+    #[test]
+    fn midpoints_ends_and_ties() {
+        let cases = [
+            (Some(1.0), Some(2.0), Some(1.5)),
+            (None, Some(2.0), Some(1.0)),
+            (Some(3.0), None, Some(4.0)),
+            (Some(2.0), Some(2.0), None),
+            (Some(1.0), Some(1.0_f64.next_up()), None),
+            (Some(3.0), Some(2.0), None),
+            (None, None, None),
+        ];
+        for (before, after, want) in cases {
+            assert_eq!(
+                sort_order_between(before, after),
+                want,
+                "{before:?} {after:?}"
+            );
+        }
     }
 }

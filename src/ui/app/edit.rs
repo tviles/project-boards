@@ -1277,6 +1277,15 @@ impl App {
             );
             return Vec::new();
         };
+        if self.board_provider() == Provider::Linear {
+            // The card lands between the neighbour and the item beyond it.
+            let beyond = if down {
+                scope.get(pos + 2)
+            } else {
+                pos.checked_sub(2).and_then(|p| scope.get(p))
+            };
+            return self.reorder_linear(&item.id, down, &neighbour, beyond.cloned());
+        }
         let after = if down {
             Some(neighbour)
         } else {
@@ -1295,6 +1304,53 @@ impl App {
                 item: item.id,
                 after,
                 sort_order: None,
+            },
+        )
+    }
+
+    /// Linear's reorder: the new `sortOrder` is the midpoint of the two issues the card lands
+    /// between, `neighbour` (the one it passes) and `beyond` (the next one that way, if any).
+    /// Equal or missing values refuse, and nothing is sent.
+    fn reorder_linear(
+        &mut self,
+        id: &ItemId,
+        down: bool,
+        neighbour: &ItemId,
+        beyond: Option<ItemId>,
+    ) -> Vec<Command> {
+        let order_of = |a: &Self, id: &ItemId| -> Option<f64> {
+            a.snapshot()?.items.get(id)?.content_fields.sort_order
+        };
+        let sort_order = order_of(self, neighbour).and_then(|near| match &beyond {
+            // The card lands at the end of the list: one past the neighbour.
+            None if down => sort_order_between(Some(near), None),
+            None => sort_order_between(None, Some(near)),
+            Some(b) => {
+                let far = order_of(self, b)?;
+                if down {
+                    sort_order_between(Some(near), Some(far))
+                } else {
+                    sort_order_between(Some(far), Some(near))
+                }
+            }
+        });
+        // Going down the card lands after the neighbour, going up after the one beyond it.
+        let after = if down {
+            Some(neighbour.clone())
+        } else {
+            beyond
+        };
+        let Some(sort_order) = sort_order else {
+            self.status.flash = Some("Can't place this card here; refresh with r".into());
+            return Vec::new();
+        };
+        self.selected_id = Some(id.clone());
+        self.submit(
+            OpKind::Reorder,
+            Op::Reorder {
+                item: id.clone(),
+                after,
+                sort_order: Some(sort_order),
             },
         )
     }
@@ -5839,5 +5895,131 @@ pub(crate) mod tests {
             crate::ui::fixtures::render_to_string(100, 20, |f| crate::ui::chrome::draw(f, &mut a));
         assert!(screen.contains("Close as canceled (none)"), "{screen}");
         insta::assert_snapshot!(screen);
+    }
+
+    /// The Linear table (All issues, manual) with `sortOrder`s 1, 2, 4, 8 for TBA-1, TBA-2,
+    /// TBB-1, TBB-2, on its first row.
+    fn linear_table(orders: [Option<f64>; 4]) -> App {
+        let mut snap = linear_snapshot();
+        for (id, order) in ["i-tba-1", "i-tba-2", "i-tbb-1", "i-tbb-2"]
+            .iter()
+            .zip(orders)
+        {
+            snap.items
+                .get_mut(&ItemId::new(*id))
+                .unwrap()
+                .content_fields
+                .sort_order = order;
+        }
+        let mut a = app_with(snap);
+        a.select_view(&crate::model::ViewId::new("V_all"));
+        a
+    }
+
+    fn reorder_op(item: &str, after: Option<&str>, sort_order: f64) -> Op {
+        Op::Reorder {
+            item: ItemId::new(item),
+            after: after.map(ItemId::new),
+            sort_order: Some(sort_order),
+        }
+    }
+
+    #[test]
+    fn j_and_k_on_linear_send_the_midpoint() {
+        let mut a = linear_table([Some(1.0), Some(2.0), Some(4.0), Some(8.0)]);
+        assert_eq!(a.layout().0, Layout::Table);
+        // J on TBA-1 lands between TBA-2 (2) and TBB-1 (4).
+        assert_eq!(a.handle_key(key('J')), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [reorder_op("i-tba-1", Some("i-tba-2"), 3.0)]
+        );
+        // K on the last row, TBB-2, lands between TBA-2 (2) and TBB-1 (4).
+        let mut b = linear_table([Some(1.0), Some(2.0), Some(4.0), Some(8.0)]);
+        for _ in 0..3 {
+            b.handle_key(key('j'));
+        }
+        b.handle_key(key('K'));
+        assert_eq!(
+            pending_ops(&b),
+            [reorder_op("i-tbb-2", Some("i-tba-2"), 3.0)]
+        );
+        // K on the second row goes to the top: the first issue's value minus 1.
+        let mut c = linear_table([Some(1.0), Some(2.0), Some(4.0), Some(8.0)]);
+        c.handle_key(key('j'));
+        c.handle_key(key('K'));
+        assert_eq!(pending_ops(&c), [reorder_op("i-tba-2", None, 0.0)]);
+        // J on the second to last goes to the bottom: the last value plus 1.
+        let mut d = linear_table([Some(1.0), Some(2.0), Some(4.0), Some(8.0)]);
+        d.handle_key(key('j'));
+        d.handle_key(key('j'));
+        d.handle_key(key('J'));
+        assert_eq!(
+            pending_ops(&d),
+            [reorder_op("i-tbb-1", Some("i-tbb-2"), 9.0)]
+        );
+        // The card moves at once.
+        let order: Vec<String> = a
+            .table_rows()
+            .iter()
+            .filter_map(|r| match r {
+                Row::Item(i) => Some(i.ref_label()),
+                Row::Group { .. } => None,
+            })
+            .collect();
+        assert_eq!(order, ["TBA-2", "TBA-1", "TBB-1", "TBB-2"]);
+        // The edges still say so.
+        let mut e = linear_table([Some(1.0), Some(2.0), Some(4.0), Some(8.0)]);
+        assert!(e.handle_key(key('K')).is_empty());
+        assert_eq!(e.status.flash.as_deref(), Some("Already first here"));
+    }
+
+    #[test]
+    fn reorder_between_equal_neighbours_is_refused_and_sends_nothing() {
+        let cant = Some("Can't place this card here; refresh with r");
+        // Equal neighbours below TBA-1.
+        let mut a = linear_table([Some(1.0), Some(5.0), Some(5.0), Some(8.0)]);
+        assert!(a.handle_key(key('J')).is_empty());
+        assert_eq!(a.status.flash.as_deref(), cant);
+        assert!(a.store.pending().is_empty());
+        // A neighbour without a sortOrder (those sort last): TBB-2 below TBB-1.
+        let mut b = linear_table([Some(1.0), Some(2.0), Some(4.0), None]);
+        b.handle_key(key('j'));
+        b.handle_key(key('j'));
+        assert!(b.handle_key(key('J')).is_empty());
+        assert_eq!(b.status.flash.as_deref(), cant);
+        assert!(b.store.pending().is_empty());
+        // The item beyond the neighbour has none: TBA-2 passing TBB-1 would land before it.
+        let mut d = linear_table([Some(1.0), Some(2.0), Some(4.0), None]);
+        d.handle_key(key('j'));
+        assert!(d.handle_key(key('J')).is_empty());
+        assert_eq!(d.status.flash.as_deref(), cant);
+        assert!(d.store.pending().is_empty());
+        // Neighbours with nothing between them in f64.
+        let near = 1.0_f64.next_up();
+        let mut c = linear_table([Some(0.0), Some(1.0), Some(near), Some(8.0)]);
+        assert!(c.handle_key(key('J')).is_empty());
+        assert_eq!(c.status.flash.as_deref(), cant);
+        assert!(c.store.pending().is_empty());
+    }
+
+    #[test]
+    fn a_priority_sorted_linear_view_refuses_reorder() {
+        let mut a = linear_table([Some(1.0), Some(2.0), Some(4.0), Some(8.0)]);
+        let mut snap = linear_snapshot();
+        snap.project.views[1].sort_by = vec![crate::model::SortSpec {
+            field: FieldId::new(crate::linear::ids::PRIORITY),
+            direction: crate::model::SortDirection::Desc,
+        }];
+        a.store = Box::new(crate::store::MemoryStore::new(Some(snap)));
+        a.select_view(&crate::model::ViewId::new("V_all"));
+        assert!(a.handle_key(key('J')).is_empty());
+        let flash = a.status.flash.clone().unwrap_or_default();
+        assert!(
+            flash.starts_with("This view is sorted by ")
+                && flash.ends_with("; reordering needs an unsorted view"),
+            "{flash}"
+        );
+        assert!(a.store.pending().is_empty());
     }
 }

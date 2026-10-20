@@ -2052,6 +2052,8 @@ mod tests {
             [
                 ("Move to the previous column".to_string(), "<".to_string()),
                 ("Move to the next column".to_string(), ">".to_string()),
+                ("Move up".to_string(), "K".to_string()),
+                ("Move down".to_string(), "J".to_string()),
                 ("Edit a field".to_string(), "e".to_string()),
                 ("Close".to_string(), "X".to_string()),
                 ("Open in the browser".to_string(), "o".to_string()),

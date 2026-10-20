@@ -142,6 +142,7 @@ const GITHUB_CAPS: ProviderCaps = ProviderCaps {
 const LINEAR_CAPS: ProviderCaps = ProviderCaps {
     ops: &[
         OpKind::Move,
+        OpKind::Reorder,
         OpKind::SetField,
         OpKind::Close,
         OpKind::Reopen,
@@ -630,10 +631,10 @@ mod tests {
         let linear = linear_ctx();
         assert_eq!(
             provider_caps(Provider::Linear).ops,
-            [Move, SetField, Close, Reopen]
+            [Move, Reorder, SetField, Close, Reopen]
         );
         let i = issue("i", 1, "x");
-        assert_eq!(capabilities(&i, &linear), [Move, SetField, Close]);
+        assert_eq!(capabilities(&i, &linear), [Move, Reorder, SetField, Close]);
         assert_eq!(
             check(Move, &issue("local:1", 0, "New"), &linear),
             Err(Denial::Creating(Provider::Linear))
