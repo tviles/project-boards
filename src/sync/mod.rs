@@ -88,7 +88,8 @@ pub enum SyncEvent {
     },
     ItemsUpdated {
         items: Vec<Item>,
-        /// Items the poll reports gone (Linear archives and deletions); GitHub sends none.
+        /// Items the poll found in Linear's trash; GitHub sends none. Archived Linear issues
+        /// are not removed: they arrive in `items` with `archived: true`.
         removed: Vec<ItemId>,
         fetched_at: String,
     },
@@ -101,7 +102,11 @@ pub enum SyncEvent {
     Hydrated(Vec<Item>),
     /// The boards linked to the pane's repository, for the startup decision.
     RepoProjects(Vec<ProjectSummary>),
-    Projects(Vec<ProjectSummary>),
+    /// Boards for the picker, and one line per provider whose boards are missing from it.
+    Projects {
+        boards: Vec<ProjectSummary>,
+        notes: Vec<String>,
+    },
     Rate(RateInfo),
     Detail {
         item: ItemId,
@@ -154,7 +159,7 @@ pub fn store_update(event: &SyncEvent) -> Option<StoreUpdate> {
             list: list.clone(),
         }),
         SyncEvent::RepoProjects(_)
-        | SyncEvent::Projects(_)
+        | SyncEvent::Projects { .. }
         | SyncEvent::Detail { .. }
         | SyncEvent::Rate(_)
         | SyncEvent::OpDone { .. }

@@ -196,11 +196,16 @@ fn card_lines_marked(
     } else {
         ""
     };
-    let title = match item_label(item) {
+    let title = match item.reference_label() {
         Some(label) => format!("{prefix}{marker}{label} {}", item.title()),
         None => format!("{prefix}{marker}{}", item.title()),
     };
-    let assignees: Vec<String> = item.assignees().iter().map(|a| format!("@{a}")).collect();
+    let at = assignee_prefix(item);
+    let assignees: Vec<String> = item
+        .assignees()
+        .iter()
+        .map(|a| format!("{at}{a}"))
+        .collect();
     let style = if selected {
         theme.selected()
     } else {
@@ -276,14 +281,6 @@ fn border_line(
     ))
 }
 
-/// What names the item in a title: its key or `#number`, `new` while it is being created,
-/// nothing for a draft.
-pub(crate) fn item_label(item: &Item) -> Option<String> {
-    item.reference()
-        .and_then(ContentRef::label)
-        .or_else(|| item.is_placeholder().then(|| "new".to_string()))
-}
-
 /// The state glyph and its style, then the dim reference after it: the repo's short name
 /// and `#number` for issues and pull requests, `Draft` for a draft. Redacted and unknown
 /// content have neither.
@@ -340,6 +337,32 @@ fn card_reference(
     }
 }
 
+/// What goes before an assignee on a card: `@` before a GitHub login, nothing before a keyed
+/// (Linear) item's display name.
+fn assignee_prefix(item: &Item) -> &'static str {
+    if item.reference().is_some_and(|r| r.key.is_some()) {
+        ""
+    } else {
+        "@"
+    }
+}
+
+/// A keyed item's state colour: its option's in the Status field, taken from `status` or
+/// else from `column` when that is the Status field. `None` without a Status value or a
+/// matching option.
+fn status_colour(item: &Item, column: &Field, status: Option<&Field>) -> Option<OptionColor> {
+    item.reference()?.key.as_ref()?;
+    let field = status
+        .or(Some(column))
+        .filter(|f| f.id.as_str() == crate::linear::ids::STATUS)?;
+    let key = item.value(&field.id)?.bucket_key()?;
+    field
+        .buckets()?
+        .iter()
+        .find(|b| b.matches(&key))
+        .map(|b| b.color)
+}
+
 /// `name #number` in at most `room` cells: the name is cut first so the number stays.
 fn fit_reference(name: Option<&str>, number: Option<&str>, room: usize) -> String {
     let full = [name, number]
@@ -367,9 +390,11 @@ fn fit_reference(name: Option<&str>, number: Option<&str>, room: usize) -> Strin
 /// A bordered card's first line, exactly `width` cells: the unknown-option marker, the state
 /// dot and the reference on the left; the first assignee (and `+N` more) at the right edge.
 /// When both do not fit the reference is cut first, keeping `#number`, then the assignee.
+/// A keyed (Linear) card's dot is in its Status option's colour (`status_colour`).
 fn card_header(
     item: &Item,
     field: &Field,
+    status: Option<&Field>,
     width: usize,
     prefix: &str,
     theme: &Theme,
@@ -383,10 +408,12 @@ fn card_header(
         }
     );
     let (glyph, dot, name, number) = card_reference(item, theme);
+    let dot = status_colour(item, field, status).map_or(dot, |c| theme.option(c));
+    let at = assignee_prefix(item);
     let mut right = match item.assignees().split_first() {
         None => String::new(),
-        Some((first, [])) => sanitize(&format!("@{first}")),
-        Some((first, rest)) => sanitize(&format!("@{first} +{}", rest.len())),
+        Some((first, [])) => sanitize(&format!("{at}{first}")),
+        Some((first, rest)) => sanitize(&format!("{at}{first} +{}", rest.len())),
     };
     // The marker and the dot; a reference follows after a space.
     let lead = display_width(&marker) + 1;
@@ -472,6 +499,7 @@ fn bordered_card_marked(
         wrap(card_header(
             item,
             field,
+            marks.status_field.as_ref(),
             inner,
             &marks.prefix(&item.id),
             theme,
@@ -1966,5 +1994,114 @@ mod tests {
         app.confirm_remove();
         let q = app.confirm.as_ref().unwrap().question.clone();
         assert!(q.starts_with("Remove TBA-7 '"), "{q}");
+    }
+
+    /// A Linear board's Status field: two workflow states in Linear's hex colours.
+    fn linear_status() -> Field {
+        let state = |id: &str, name: &str, rgb: u32, kind: OptionKind| SelectOption {
+            id: OptionId::new(id),
+            name: name.into(),
+            color: OptionColor::Hex(rgb),
+            kind: Some(kind),
+        };
+        Field {
+            id: FieldId::new(crate::linear::ids::STATUS),
+            name: "Status".into(),
+            kind: FieldKind::SingleSelect {
+                options: vec![
+                    state("s-todo", "Todo", 0xe2e2e2, OptionKind::Unstarted),
+                    state("s-prog", "In Progress", 0xf2c94c, OptionKind::Started),
+                ],
+            },
+        }
+    }
+
+    /// A Linear issue `TBA-<number>` in the state `state`, assigned to `assignee`.
+    fn linear_issue(id: &str, number: u32, state: &str, assignee: Option<&str>) -> Item {
+        use crate::linear::ids;
+        let mut item = items()[1].clone();
+        item.id = ItemId::new(id);
+        item.content = ItemContent::Issue {
+            reference: ContentRef {
+                container: "TBA".into(),
+                number,
+                key: Some(format!("TBA-{number}")),
+                url: format!("https://linear.app/testbed-workspace/issue/TBA-{number}"),
+            },
+            title: format!("Linear issue {number}"),
+            state: ContentState::Open,
+        };
+        item.values.clear();
+        item.values.insert(
+            FieldId::new(ids::STATUS),
+            FieldValue::SingleSelect {
+                option_id: OptionId::new(state),
+                name: state.into(),
+            },
+        );
+        if let Some(name) = assignee {
+            item.values.insert(
+                FieldId::new(ids::ASSIGNEES),
+                FieldValue::Users(vec![name.into()]),
+            );
+        }
+        item
+    }
+
+    #[test]
+    fn a_linear_card_header_has_dot_key_and_assignee() {
+        let status = linear_status();
+        let started = linear_issue("i7", 7, "s-prog", Some("Ada Lovelace"));
+        let todo = linear_issue("i8", 8, "s-todo", None);
+        let yellow = Some(Color::Rgb(0xf2, 0xc9, 0x4c));
+        let dot = |lines: &[Line<'static>]| {
+            lines[1]
+                .spans
+                .iter()
+                .find(|s| s.content == "●")
+                .unwrap()
+                .style
+                .fg
+        };
+        // The dot takes the Status option's colour, not the open/closed colour.
+        let card = bordered_card(&started, &status, &[], 34, false, &colour());
+        assert_eq!(dot(&card), yellow);
+        // On a board grouped by another field the Status field comes with the marks.
+        let p = project();
+        let marks = ItemMarks {
+            status_field: Some(status.clone()),
+            ..Default::default()
+        };
+        let card = bordered_card_marked(
+            &started,
+            field(&p, "Priority"),
+            &[],
+            34,
+            false,
+            &marks,
+            &colour(),
+        );
+        assert_eq!(dot(&card), yellow);
+        // The assignee is a display name, drawn without `@`, on narrow cards too.
+        let [_, meta] = card_lines(&started, &status, 30, false, &Theme::plain());
+        assert_eq!(line_text_of(&meta).trim_end(), "Ada Lovelace");
+
+        let refs = vec![&started, &todo];
+        let cols = build_columns(&refs, &status, None);
+        let sel = BoardSelection {
+            column: 1,
+            index: 0,
+        };
+        let screen = render_to_string(2 * MIN_COLUMN as u16, 8, |f| {
+            render_board(f, f.area(), &cols, &sel, &status, &[], &Theme::plain())
+        });
+        assert!(screen.contains("● TBA-7"), "{screen}");
+        assert!(screen.contains("Ada Lovelace"), "{screen}");
+        assert!(!screen.contains("@Ada"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    fn line_text_of(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 }

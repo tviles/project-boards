@@ -1,5 +1,5 @@
 //! What the table and the board mark on an item: edits still sending, a sticky item the view
-//! no longer matches, and a new item.
+//! no longer matches, a new item, and (on a Linear board) the state a card's dot shows.
 
 use crate::model::ItemId;
 use std::collections::HashSet;
@@ -16,6 +16,9 @@ pub struct ItemMarks {
     pub unmatched: HashSet<ItemId>,
     /// A new item, highlighted until the next key press.
     pub highlight: Option<ItemId>,
+    /// A Linear board's Status field: a keyed card's dot takes its state's colour even when
+    /// the board's columns are another field. `None` on GitHub.
+    pub status_field: Option<crate::model::Field>,
 }
 
 impl ItemMarks {

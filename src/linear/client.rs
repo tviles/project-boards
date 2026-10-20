@@ -243,10 +243,11 @@ impl Linear {
         ))
     }
 
-    /// The UUID of the team with `key`.
+    /// The UUID of the team with `key`. Team keys are uppercase and the lookup is
+    /// case-sensitive, so `eng` is looked up as `ENG`.
     async fn team_by_key(&self, board: &BoardKey, key: &str) -> Result<String, BackendError> {
         let body = ops::TeamByKey::build_query(ops::team_by_key::Variables {
-            key: key.to_string(),
+            key: key.to_ascii_uppercase(),
         });
         let data = self.data(GraphqlRequest::from_body(body)).await?;
         nodes(&data, "teams")
@@ -342,6 +343,14 @@ impl Linear {
         };
         let operation = request.operation_name.clone();
         let data = self.data(request).await?;
+        if matches!(query.filter, ViewFilter::LinearView { .. }) && !data["customView"].is_object()
+        {
+            // The view was deleted after its tab was cached.
+            return Err(BackendError::Api(vec![GraphqlErrorEntry {
+                message: "this view no longer exists in Linear".into(),
+                kind: None,
+            }]));
+        }
         page_of(conn(&data), &operation, id_of)
     }
 
@@ -809,6 +818,45 @@ mod tests {
 
     fn id_page(ids: &[&str]) -> Value {
         issues(ids.iter().map(|id| json!({"id": id})).collect(), None)
+    }
+
+    #[tokio::test]
+    async fn a_lowercase_team_key_is_looked_up_in_uppercase() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push("TeamByKey", json!({"teams": {"nodes": [{"id": TEAM_A}]}}));
+        t.push("ResolveTeamBoard", team_board_json());
+        t.push("BoardSchema", schema_with(vec![]));
+        t.push("TeamProjects", team_projects_json());
+        let p = linear(&t)
+            .resolve(&BoardKey::LinearTeam { id: "tba".into() })
+            .await
+            .unwrap();
+        assert_eq!(t.requests()[0].variables["key"], "TBA");
+        assert_eq!(p.board, team_a());
+    }
+
+    #[tokio::test]
+    async fn a_deleted_custom_view_says_so() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push("CustomViewIssueIds", json!({"customView": null}));
+        let query = ListQuery {
+            filter: ViewFilter::LinearView {
+                id: "cv-gone".into(),
+                hide_closed: false,
+            },
+            include_archived: false,
+        };
+        let err = linear(&t)
+            .view_ids_page(&team_a(), &query, None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            BackendError::Api(vec![GraphqlErrorEntry {
+                message: "this view no longer exists in Linear".into(),
+                kind: None,
+            }])
+        );
     }
 
     #[tokio::test]

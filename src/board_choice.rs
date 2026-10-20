@@ -1,6 +1,6 @@
 //! Pure decisions for which board a pane opens (spec section 5, "Opening a board").
 
-use crate::model::{BoardKey, ProjectSummary, RepoSlug};
+use crate::model::{BoardKey, ProjectSummary, Provider, RepoSlug};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FirstStep {
@@ -9,13 +9,15 @@ pub enum FirstStep {
     PickAll,
 }
 
-/// `--project` wins; `--picker` always picks; then the board remembered for the repo; then
-/// the repo's linked boards; with no repo, the picker.
+/// `--project` wins, as given; `--picker` always picks; then the board remembered for the
+/// repo, if its provider is among `providers` (those whose credentials resolved); then the
+/// repo's linked boards, which only GitHub can list; otherwise the picker.
 pub fn first_step(
     explicit: Option<BoardKey>,
     picker: bool,
     remembered: Option<BoardKey>,
     repo: Option<RepoSlug>,
+    providers: &[Provider],
 ) -> FirstStep {
     if let Some(b) = explicit {
         return FirstStep::Use(b);
@@ -23,12 +25,12 @@ pub fn first_step(
     if picker {
         return FirstStep::PickAll;
     }
-    if let Some(b) = remembered {
+    if let Some(b) = remembered.filter(|b| providers.contains(&b.provider())) {
         return FirstStep::Use(b);
     }
     match repo {
-        Some(r) => FirstStep::FetchRepoProjects(r),
-        None => FirstStep::PickAll,
+        Some(r) if providers.contains(&Provider::Github) => FirstStep::FetchRepoProjects(r),
+        Some(_) | None => FirstStep::PickAll,
     }
 }
 
@@ -85,23 +87,73 @@ mod tests {
 
     #[test]
     fn first_step_order() {
+        const GITHUB: &[Provider] = &[Provider::Github];
         assert_eq!(
-            first_step(Some(b("a/1")), true, Some(b("a/2")), Some(r())),
+            first_step(Some(b("a/1")), true, Some(b("a/2")), Some(r()), GITHUB),
             FirstStep::Use(b("a/1"))
         );
         assert_eq!(
-            first_step(None, true, Some(b("a/2")), Some(r())),
+            first_step(None, true, Some(b("a/2")), Some(r()), GITHUB),
             FirstStep::PickAll
         );
         assert_eq!(
-            first_step(None, false, Some(b("a/2")), Some(r())),
+            first_step(None, false, Some(b("a/2")), Some(r()), GITHUB),
             FirstStep::Use(b("a/2"))
         );
         assert_eq!(
-            first_step(None, false, None, Some(r())),
+            first_step(None, false, None, Some(r()), GITHUB),
             FirstStep::FetchRepoProjects(r())
         );
-        assert_eq!(first_step(None, false, None, None), FirstStep::PickAll);
+        assert_eq!(
+            first_step(None, false, None, None, GITHUB),
+            FirstStep::PickAll
+        );
+        // Without GitHub credentials a repository's linked boards cannot be listed.
+        assert_eq!(
+            first_step(None, false, None, Some(r()), &[]),
+            FirstStep::PickAll
+        );
+        assert_eq!(
+            first_step(Some(b("a/1")), false, None, Some(r()), &[]),
+            FirstStep::Use(b("a/1"))
+        );
+    }
+
+    #[test]
+    fn a_remembered_board_without_credentials_is_skipped() {
+        let team = b("linear:team:t1");
+        // A Linear-only user with a remembered GitHub board gets the picker, not a resolve.
+        assert_eq!(
+            first_step(None, false, Some(b("a/2")), Some(r()), &[Provider::Linear]),
+            FirstStep::PickAll
+        );
+        // A GitHub-only user with a remembered Linear board gets the repository's boards.
+        assert_eq!(
+            first_step(
+                None,
+                false,
+                Some(team.clone()),
+                Some(r()),
+                &[Provider::Github]
+            ),
+            FirstStep::FetchRepoProjects(r())
+        );
+        let both = &[Provider::Github, Provider::Linear];
+        assert_eq!(
+            first_step(None, false, Some(team.clone()), Some(r()), both),
+            FirstStep::Use(team.clone())
+        );
+        // `--project` is used as given; its missing credentials show the setup text.
+        assert_eq!(
+            first_step(
+                Some(team.clone()),
+                false,
+                None,
+                Some(r()),
+                &[Provider::Github]
+            ),
+            FirstStep::Use(team)
+        );
     }
 
     #[test]

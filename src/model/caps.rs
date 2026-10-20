@@ -2,6 +2,8 @@
 //! an item allows. The UI offers, hints and runs only what `check` allows, and shows the
 //! `Denial` message for anything else.
 
+use crate::backend::read_only_reason;
+use crate::model::Provider;
 use crate::model::ids::ItemId;
 use crate::model::item::{ContentState, Item, ItemContent};
 
@@ -86,6 +88,8 @@ pub struct EditContext {
     /// A repo refusal must record both "repo" and "public_repo", because either grants repo
     /// access and only a refusal of every alias counts.
     pub refused: Vec<String>,
+    /// The board's provider; a provider that cannot be edited refuses everything first.
+    pub provider: Provider,
 }
 
 impl EditContext {
@@ -109,6 +113,8 @@ impl EditContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Denial {
+    /// The board's provider has no editing yet (Linear, until 0.5).
+    ProviderReadOnly(Provider),
     ReadOnly,
     NoProjectScope,
     NoRepoScope,
@@ -138,6 +144,9 @@ impl Denial {
             None => String::new(),
         };
         match self {
+            Denial::ProviderReadOnly(provider) => read_only_reason(*provider)
+                .unwrap_or("This board is read-only")
+                .into(),
             Denial::ReadOnly => "This board is read-only for you".into(),
             Denial::NoProjectScope => {
                 "Editing needs the token's project scope: run `gh auth refresh -s project` and reopen the board".into()
@@ -197,7 +206,17 @@ pub fn is_placeholder(id: &ItemId) -> bool {
     id.as_str().starts_with("local:")
 }
 
+/// A provider without editing refuses before any other reason, so it wins over placeholders
+/// and archived items too.
+fn provider_check(ctx: &EditContext) -> Result<(), Denial> {
+    match read_only_reason(ctx.provider) {
+        Some(_) => Err(Denial::ProviderReadOnly(ctx.provider)),
+        None => Ok(()),
+    }
+}
+
 fn board_check(ctx: &EditContext) -> Result<(), Denial> {
+    provider_check(ctx)?;
     if !ctx.viewer_can_update {
         return Err(Denial::ReadOnly);
     }
@@ -220,6 +239,7 @@ pub fn check_new(needs_repo: bool, ctx: &EditContext) -> Result<(), Denial> {
 /// Whether `kind` is allowed on `item`; the reason when it is not.
 pub fn check(kind: OpKind, item: &Item, ctx: &EditContext) -> Result<(), Denial> {
     use OpKind::*;
+    provider_check(ctx)?;
     if kind == Create {
         // The board decides; which item is selected does not matter.
         return board_check(ctx);
@@ -294,6 +314,7 @@ pub fn capabilities(item: &Item, ctx: &EditContext) -> Vec<OpKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::LINEAR_READ_ONLY;
     use crate::model::item::tests::issue;
     use crate::model::{ContentRef, ItemId};
 
@@ -302,6 +323,7 @@ mod tests {
             viewer_can_update: true,
             scopes: Some(vec!["project".into(), "repo".into()]),
             refused: vec![],
+            provider: Provider::Github,
         }
     }
 
@@ -417,6 +439,46 @@ mod tests {
         assert_eq!(
             check(Unarchive, &issue("i", 1, "x"), &ctx()),
             Err(Denial::NotArchived)
+        );
+    }
+
+    #[test]
+    fn every_edit_on_a_linear_board_says_it_arrives_in_0_5() {
+        let linear = EditContext {
+            provider: Provider::Linear,
+            ..ctx()
+        };
+        let none = |_: OpKind| None;
+        let mut archived = issue("i", 1, "x");
+        archived.archived = true;
+        let items = [
+            issue("i", 1, "x"),
+            issue("local:1", 0, "New"),
+            archived,
+            with(ItemContent::Redacted),
+            with(ItemContent::Draft { title: "d".into() }),
+        ];
+        for item in &items {
+            for kind in OpKind::ALL.into_iter().chain([Create]) {
+                let denial = check(kind, item, &linear).unwrap_err();
+                assert_eq!(denial, Denial::ProviderReadOnly(Provider::Linear));
+                assert_eq!(denial.message(&none), LINEAR_READ_ONLY, "{kind:?}");
+            }
+            assert!(capabilities(item, &linear).is_empty());
+        }
+        for needs_repo in [false, true] {
+            let denial = check_new(needs_repo, &linear).unwrap_err();
+            assert_eq!(denial.message(&none), LINEAR_READ_ONLY);
+        }
+        let also_no_scope = EditContext {
+            viewer_can_update: false,
+            scopes: Some(vec![]),
+            ..linear
+        };
+        assert_eq!(
+            check_new(false, &also_no_scope).unwrap_err().message(&none),
+            LINEAR_READ_ONLY,
+            "the provider reason wins over every other"
         );
     }
 

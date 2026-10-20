@@ -144,7 +144,8 @@ pub struct App {
     sticky: Vec<edit::Sticky>,
     search: String,
     layout_toggle: HashMap<ViewId, Layout>,
-    /// Per view, a filter the user added on top of the view's GitHub filter. Session only.
+    /// Per view, a filter the user added on top of the view's own filter. Session only. On
+    /// GitHub it is sent with the view's filter; on Linear it runs on the client.
     extra_filter: HashMap<ViewId, String>,
     /// Classic token scopes GitHub reported, and those it refused an edit for.
     scopes: Option<Vec<String>>,
@@ -227,6 +228,16 @@ pub fn setup_message(error: &BackendError) -> Option<String> {
         ),
         _ => None,
     }
+}
+
+/// The setup screen when no provider has credentials: each error's setup text (or the error
+/// itself), one after another.
+pub fn setup_message_for_all(errors: &[BackendError]) -> String {
+    errors
+        .iter()
+        .map(|e| setup_message(e).unwrap_or_else(|| e.to_string()))
+        .collect::<Vec<_>>()
+        .join("\n\n— or —\n\n")
 }
 
 impl App {
@@ -325,55 +336,109 @@ impl App {
         }
     }
 
-    /// The list request for `view`, or `None` when the view shows every item. Today's
-    /// GitHub rule: the effective filter text decides. A Linear board lists by the view's
-    /// own filter.
-    pub fn list_query(&self, view: &View) -> Option<ListQuery> {
-        let linear = self
-            .project()
-            .is_some_and(|p| p.board.provider() == Provider::Linear);
-        if linear {
-            (!view.filter.is_everything()).then(|| ListQuery {
-                filter: view.filter.clone(),
-                include_archived: false,
-            })
-        } else {
-            let text = self.filter_for(view);
-            (!text.trim().is_empty()).then(|| ListQuery::github(text))
+    fn is_linear(&self) -> bool {
+        self.project()
+            .is_some_and(|p| p.board.provider() == Provider::Linear)
+    }
+
+    /// What a client-side filter is evaluated against: the board's fields, the viewer on a
+    /// Linear board (for `@me`), and today in the pane's UTC offset.
+    pub fn filter_context(&self) -> FilterContext<'_> {
+        let project = self.project();
+        FilterContext {
+            fields: project.map_or(&[], |p| p.fields.as_slice()),
+            me: project
+                .and_then(|p| p.linear.as_ref())
+                .map(|l| l.viewer_id.as_str()),
+            today: Some(self.today()),
         }
     }
 
-    /// Sets (or, when empty, clears) the current view's local filter and refetches the
-    /// view's ids for the new effective filter.
+    /// The view's `f` text, parsed, on a Linear board; `None` on GitHub, which runs the text
+    /// itself. Without `f` text it is the empty filter, which hides archived items.
+    pub fn client_filter(&self, view: &View) -> Option<Filter> {
+        let project = self.project().filter(|_| self.is_linear())?;
+        let text = self.extra_filter.get(&view.id).map_or("", String::as_str);
+        Some(Filter::parse(text, &project.fields))
+    }
+
+    /// The list request for `view`, or `None` when the view shows every item. GitHub: the
+    /// effective filter text decides. Linear: the view's own filter, with archived items when
+    /// the `f` text asks for them.
+    pub fn list_query(&self, view: &View) -> Option<ListQuery> {
+        match self.client_filter(view) {
+            Some(client) => {
+                let include_archived = client.wants_archived();
+                (!view.filter.is_everything() || include_archived).then(|| ListQuery {
+                    filter: view.filter.clone(),
+                    include_archived,
+                })
+            }
+            None => {
+                let text = self.filter_for(view);
+                (!text.trim().is_empty()).then(|| ListQuery::github(text))
+            }
+        }
+    }
+
+    /// The current view's list request; `None` without a view, as for one that lists every
+    /// item.
+    fn current_query(&self) -> Option<ListQuery> {
+        self.current_view().and_then(|v| self.list_query(v))
+    }
+
+    /// Sets (or, when empty, clears) the current view's local filter, and refetches the
+    /// view's ids when its list request changed. On a Linear board most filters change only
+    /// what the client shows, so the list stays.
     fn set_extra_filter(&mut self, extra: &str) -> Vec<Command> {
         let Some(view) = self.current_view().cloned() else {
             return Vec::new();
         };
-        let before = self.effective_filter();
+        let text_before = self.filter_for(&view);
+        let before = self.list_query(&view);
         let extra = extra.trim();
         if extra.is_empty() {
             self.extra_filter.remove(&view.id);
         } else {
             self.extra_filter.insert(view.id.clone(), extra.to_string());
         }
-        let filter = self.effective_filter();
         let query = self.list_query(&view);
-        if filter == before {
+        if self.filter_for(&view) == text_before {
             // Nothing changed: keep the cached list and the cursor.
             return self.revalidate_view().into_iter().collect();
         }
-        // A changed filter invalidates the cached list.
-        self.store.apply(StoreUpdate::ClearViewIds(view.id.clone()));
+        let refetch = query != before;
+        if refetch {
+            // A changed request invalidates the cached list.
+            self.store.apply(StoreUpdate::ClearViewIds(view.id.clone()));
+        }
+        // A changed filter ends the visit's sticky items and moves the cursor to the top.
         self.sticky.clear();
         self.table_selected = 0;
         self.board_sel = BoardSelection::default();
         self.sync_selected_id();
         match query {
-            Some(query) => vec![Command::FetchViewIds {
+            Some(query) if refetch => vec![Command::FetchViewIds {
                 view: view.id,
                 query,
             }],
-            None => Vec::new(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// On a Linear board, the `f` text's keys that name no field, as a flash.
+    fn flash_unknown_keys(&mut self) {
+        let Some(filter) = self.current_view().and_then(|v| self.client_filter(v)) else {
+            return;
+        };
+        let keys: Vec<&str> = filter
+            .unknown_keys()
+            .iter()
+            .map(String::as_str)
+            .filter(|k| !k.is_empty())
+            .collect();
+        if !keys.is_empty() {
+            self.status.flash = Some(format!("unknown filter field: {}", keys.join(", ")));
         }
     }
 
@@ -407,7 +472,8 @@ impl App {
     }
 
     /// Items of the current view: the whole board for an empty filter, else the view's id
-    /// list (`None` until it arrives); then quick search; then the view's sort.
+    /// list (`None` until it arrives); on a Linear board, only those the `f` filter matches;
+    /// then the visit's sticky items, quick search and the view's sort.
     pub fn view_items(&self) -> Option<Vec<&Item>> {
         let snap = self.snapshot()?;
         let view = self.current_view()?;
@@ -419,6 +485,10 @@ impl App {
         } else {
             snap.view_items(&view.id)?
         };
+        if let Some(filter) = self.client_filter(view) {
+            let ctx = self.filter_context();
+            items.retain(|i| filter.matches(i, &ctx));
+        }
         self.add_sticky(snap, &mut items);
         let query = self.search_query();
         if !query.is_empty() {
@@ -461,7 +531,10 @@ impl App {
         };
         let items = self.view_items().unwrap_or_default();
         let columns = build_columns(&items, field, view.group_field(&project.fields));
-        let constraint = column_constraint(&self.effective_filter(), field);
+        let constraint = match self.client_filter(view) {
+            Some(filter) => filter.constraint(field, &self.filter_context()),
+            None => column_constraint(&self.effective_filter(), field),
+        };
         // A filter that allows no column at all was misread: `constrain_columns` shows every
         // column then, and none of them is "filtered".
         let reads = columns
@@ -712,6 +785,22 @@ impl App {
                     ))],
                 }
             }
+            Target::Key(key) => {
+                let on_board = self.snapshot().and_then(|s| {
+                    s.items
+                        .values()
+                        .find(|i| i.reference().and_then(|r| r.key.as_ref()) == Some(&key))
+                        .map(|i| i.id.clone())
+                });
+                match (on_board, self.project().and_then(|p| p.linear.as_ref())) {
+                    (Some(id), _) => self.open_detail(id),
+                    (None, Some(linear)) => vec![Command::OpenUrl(format!(
+                        "https://linear.app/{}/issue/{key}",
+                        linear.url_key
+                    ))],
+                    (None, None) => Vec::new(),
+                }
+            }
         }
     }
 
@@ -776,7 +865,9 @@ impl App {
                 Some(true) => {
                     self.mode = Mode::Normal;
                     let extra = std::mem::take(&mut self.input);
-                    self.set_extra_filter(&extra)
+                    let cmds = self.set_extra_filter(&extra);
+                    self.flash_unknown_keys();
+                    cmds
                 }
                 None => {
                     self.input.clear();
@@ -1000,11 +1091,11 @@ impl App {
             return Vec::new();
         }
         self.sync_selected_id();
-        let filter_before = self.effective_filter();
+        let query_before = self.current_query();
         if let Some(update) = store_update(&event) {
             self.store.apply(update);
         }
-        if matches!(event, SyncEvent::Project(_)) && self.effective_filter() != filter_before {
+        if matches!(event, SyncEvent::Project(_)) && self.current_query() != query_before {
             self.sticky.clear();
         }
         // The first snapshot has just arrived: anchor the cursor so an edit key pressed
@@ -1061,7 +1152,7 @@ impl App {
                     state.set_detail(detail, older);
                 }
             }
-            SyncEvent::Projects(list) => self.show_projects(list),
+            SyncEvent::Projects { boards, notes } => self.show_projects(boards, notes),
             SyncEvent::Rate(rate) => self.status.rate_low = rate.is_low(),
             SyncEvent::Failed { task, error } => {
                 if self.lookup_failed(&task, &error) {
@@ -1118,7 +1209,7 @@ impl App {
         cmds
     }
 
-    fn show_projects(&mut self, list: Vec<ProjectSummary>) {
+    fn show_projects(&mut self, list: Vec<ProjectSummary>, notes: Vec<String>) {
         // No picker is waiting: the user cancelled it, or is reading a board (maybe in
         // detail). Only with no board at all is a picker still required.
         if self.picker.is_none() && self.snapshot().is_some() {
@@ -1130,7 +1221,7 @@ impl App {
             .map(|p| p.required)
             .unwrap_or(self.snapshot().is_none());
         let typed = self.picker.take().map(|p| p.input).unwrap_or_default();
-        let mut picker = PickerState::with(list, required);
+        let mut picker = PickerState::with(list, notes, required);
         picker.input = typed;
         self.picker = Some(picker);
         self.mode = Mode::Picker;
@@ -1178,12 +1269,15 @@ mod tests {
     fn picker_choice_becomes_a_command_and_required_esc_stays_but_ctrl_c_quits() {
         let mut a = app();
         a.picker = Some(PickerState::loading(false)); // `B` was pressed
-        a.on_sync(SyncEvent::Projects(vec![ProjectSummary {
-            id: ProjectId::new("x"),
-            board: "acme/7".parse().unwrap(),
-            title: "Sprint".into(),
-            closed: false,
-        }]));
+        a.on_sync(SyncEvent::Projects {
+            boards: vec![ProjectSummary {
+                id: ProjectId::new("x"),
+                board: "acme/7".parse().unwrap(),
+                title: "Sprint".into(),
+                closed: false,
+            }],
+            notes: vec![],
+        });
         assert_eq!(a.mode, Mode::Picker);
         assert_eq!(
             a.handle_key(code(KeyCode::Enter)),
@@ -1194,7 +1288,10 @@ mod tests {
             Keymap::defaults(),
             Theme::plain(),
         );
-        empty.on_sync(SyncEvent::Projects(vec![]));
+        empty.on_sync(SyncEvent::Projects {
+            boards: vec![],
+            notes: vec![],
+        });
         assert_eq!(empty.handle_key(code(KeyCode::Esc)), Vec::<Command>::new());
         assert_eq!(empty.mode, Mode::Picker);
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
@@ -1203,13 +1300,14 @@ mod tests {
 
     #[test]
     fn a_late_board_list_does_not_reopen_a_cancelled_picker_or_leave_detail() {
-        let list = || {
-            SyncEvent::Projects(vec![ProjectSummary {
+        let list = || SyncEvent::Projects {
+            boards: vec![ProjectSummary {
                 id: ProjectId::new("x"),
                 board: "acme/7".parse().unwrap(),
                 title: "Sprint".into(),
                 closed: false,
-            }])
+            }],
+            notes: vec![],
         };
         let mut a = app();
         a.picker = Some(PickerState::loading(false));
@@ -1245,7 +1343,10 @@ mod tests {
         a.picker = Some(PickerState::loading(true));
         a.mode = Mode::Picker;
         a.handle_key(key('s'));
-        a.on_sync(SyncEvent::Projects(vec![]));
+        a.on_sync(SyncEvent::Projects {
+            boards: vec![],
+            notes: vec![],
+        });
         assert_eq!(a.picker.as_ref().unwrap().input, "s");
     }
 
@@ -1631,6 +1732,263 @@ mod tests {
         assert!(!a.snapshot().unwrap().views.contains_key(&bugs));
     }
 
+    /// A Linear team board, hand-built from the UI fixture: the viewer is `U_tviles` (item
+    /// `a`'s assignee), the Sprint field is the team's Cycle field with cycles around today
+    /// (`a` and `c` in the current one, `b` in the next, `e` in the previous), and `z` is an
+    /// archived bug. Views: All issues, Bugs (a custom view) and Cycles (a board by cycle).
+    fn linear_board() -> App {
+        let mut snap = snapshot();
+        let today = time::OffsetDateTime::now_utc().date();
+        let day = |offset: i64| (today + time::Duration::days(offset)).to_string();
+        let cycle = |id: &str, title: &str, start: i64| Iteration {
+            id: IterationId::new(id),
+            title: title.into(),
+            start_date: day(start),
+            duration_days: 28,
+        };
+        let p = &mut snap.project;
+        p.board = "linear:team:t1".parse().unwrap();
+        p.linear = Some(LinearMeta {
+            url_key: "acme".into(),
+            viewer_id: "U_tviles".into(),
+            team_keys: vec!["TBA".into()],
+        });
+        let sprint = p
+            .fields
+            .iter_mut()
+            .find(|f| f.id == FieldId::new("F_sprint"))
+            .unwrap();
+        sprint.name = "Cycle".into();
+        sprint.kind = FieldKind::Iteration {
+            iterations: vec![cycle("c5", "Cycle 5", -7), cycle("c6", "Cycle 6", 21)],
+            completed: vec![cycle("c4", "Cycle 4", -35)],
+        };
+        let mut all = p.views[0].clone();
+        all.id = ViewId::new("V_all");
+        all.name = "All issues".into();
+        all.filter = ViewFilter::Linear(serde_json::json!({}));
+        let mut bugs = all.clone();
+        bugs.id = ViewId::new("V_bugs");
+        bugs.name = "Bugs".into();
+        bugs.filter = ViewFilter::LinearView {
+            id: "cv1".into(),
+            hide_closed: false,
+        };
+        let mut cycles = p.views[1].clone();
+        cycles.id = ViewId::new("V_cycles");
+        cycles.name = "Cycles".into();
+        cycles.filter = ViewFilter::Linear(serde_json::json!({}));
+        cycles.vertical_group_by = vec![FieldId::new("F_sprint")];
+        cycles.group_by = Vec::new();
+        p.views = vec![all, bugs, cycles];
+        let in_cycle = |id: &str, title: &str| FieldValue::Iteration {
+            iteration_id: IterationId::new(id),
+            title: title.into(),
+            start_date: String::new(),
+        };
+        for (item, id, title) in [
+            ("a", "c5", "Cycle 5"),
+            ("c", "c5", "Cycle 5"),
+            ("b", "c6", "Cycle 6"),
+            ("e", "c4", "Cycle 4"),
+        ] {
+            snap.items
+                .get_mut(&ItemId::new(item))
+                .unwrap()
+                .values
+                .insert(FieldId::new("F_sprint"), in_cycle(id, title));
+        }
+        let mut z = snap.items[&ItemId::new("a")].clone();
+        z.id = ItemId::new("z");
+        z.archived = true;
+        snap.upsert_items(vec![z]);
+        App::new(
+            Box::new(MemoryStore::new(Some(snap))),
+            Keymap::defaults(),
+            Theme::plain(),
+        )
+    }
+
+    fn ids(items: Option<Vec<&Item>>) -> Vec<String> {
+        items
+            .unwrap_or_default()
+            .iter()
+            .map(|i| i.id.0.clone())
+            .collect()
+    }
+
+    fn fetches(cmds: &[Command]) -> Vec<&Command> {
+        cmds.iter()
+            .filter(|c| matches!(c, Command::FetchViewIds { .. }))
+            .collect()
+    }
+
+    #[test]
+    fn linear_f_filters_on_the_client_without_a_request() {
+        let mut a = linear_board();
+        a.select_view(&ViewId::new("V_all"));
+        assert_eq!(ids(a.view_items()), ["a", "b", "c", "d", "e"]);
+        a.handle_key(key('f'));
+        type_text(&mut a, "label:bug");
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert!(fetches(&cmds).is_empty(), "{cmds:?}");
+        assert_eq!(a.status.flash, None);
+        assert_eq!(ids(a.view_items()), ["a"], "the archived bug stays hidden");
+        assert_eq!(a.list_query(a.current_view().unwrap()), None);
+
+        // `@me` is the board's viewer; a custom view's own list is filtered further.
+        a.handle_key(key('x'));
+        a.select_view(&ViewId::new("V_bugs"));
+        a.on_sync(SyncEvent::ViewIds {
+            view: ViewId::new("V_bugs"),
+            query: ListQuery {
+                filter: ViewFilter::LinearView {
+                    id: "cv1".into(),
+                    hide_closed: false,
+                },
+                include_archived: false,
+            },
+            list: ViewList {
+                ids: vec![ItemId::new("a"), ItemId::new("b"), ItemId::new("c")],
+                total: 0,
+                truncated: false,
+            },
+        });
+        a.handle_key(key('f'));
+        type_text(&mut a, "assignee:@me");
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert!(
+            fetches(&cmds).is_empty(),
+            "the view's list is unchanged: {cmds:?}"
+        );
+        assert_eq!(ids(a.view_items()), ["a"]);
+    }
+
+    #[test]
+    fn linear_unknown_filter_field_flashes_and_shows_nothing() {
+        let mut a = linear_board();
+        a.select_view(&ViewId::new("V_all"));
+        a.handle_key(key('f'));
+        type_text(&mut a, "stauts:Todo label:bug prority:High no:");
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("unknown filter field: stauts, prority")
+        );
+        assert_eq!(ids(a.view_items()), Vec::<String>::new());
+        a.handle_key(key('j'));
+        assert_eq!(a.status.flash, None, "the next key clears it");
+    }
+
+    #[test]
+    fn linear_columns_follow_the_filter_exactly() {
+        let mut a = linear_board();
+        a.select_view(&ViewId::new("V_cycles"));
+        assert_eq!(a.layout().0, Layout::Board);
+        let titles = |a: &App| -> Vec<String> {
+            a.board_columns()
+                .iter()
+                .map(|c| c.bucket.title.clone())
+                .collect()
+        };
+        assert!(titles(&a).contains(&"Cycle 6".to_string()));
+        a.handle_key(key('f'));
+        type_text(&mut a, "cycle:@current");
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(titles(&a), ["Cycle 5"]);
+        assert_eq!(ids(a.view_items()), ["a", "c"]);
+    }
+
+    #[test]
+    fn linear_show_archived_lists_with_archived_items() {
+        let mut a = linear_board();
+        a.select_view(&ViewId::new("V_all"));
+        a.handle_key(key(' '));
+        let Some(Popup::Actions { picker, .. }) = &a.popup else {
+            panic!("menu")
+        };
+        let at = picker
+            .choices
+            .iter()
+            .position(|c| c.label == "Show archived items")
+            .unwrap();
+        for _ in 0..at {
+            a.handle_key(key('j'));
+        }
+        let query = ListQuery {
+            filter: ViewFilter::Linear(serde_json::json!({})),
+            include_archived: true,
+        };
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::FetchViewIds {
+                view: ViewId::new("V_all"),
+                query: query.clone(),
+            }]
+        );
+        a.on_sync(SyncEvent::ViewIds {
+            view: ViewId::new("V_all"),
+            query,
+            list: ViewList {
+                ids: vec![ItemId::new("a"), ItemId::new("z"), ItemId::new("b")],
+                total: 0,
+                truncated: false,
+            },
+        });
+        assert_eq!(ids(a.view_items()), ["z"]);
+        assert!(a.handle_key(key('x')).is_empty());
+        assert_eq!(ids(a.view_items()), ["a", "b", "c", "d", "e"]);
+    }
+
+    #[test]
+    fn linear_sticky_items_unmatched_by_the_evaluator() {
+        let mut a = linear_board();
+        a.select_view(&ViewId::new("V_all"));
+        a.handle_key(key('f'));
+        type_text(&mut a, "label:bug");
+        a.handle_key(code(KeyCode::Enter));
+        let id = ItemId::new("a");
+        a.stick(&id);
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.items
+            .get_mut(&id)
+            .unwrap()
+            .values
+            .remove(&FieldId::new("F_labels"));
+        a.store.apply(StoreUpdate::Replace(snap));
+        let items = a.view_items().unwrap();
+        assert_eq!(ids(Some(items.clone())), ["a"], "it stays for this visit");
+        assert!(a.unmatched(items[0]), "no longer labelled bug");
+
+        let mut b = linear_board();
+        b.handle_key(key('f'));
+        type_text(&mut b, "cycle:\"Cycle 5\"");
+        b.handle_key(code(KeyCode::Enter));
+        b.stick(&id);
+        let item = b.snapshot().unwrap().items[&id].clone();
+        assert!(!b.unmatched(&item), "still in Cycle 5");
+    }
+
+    #[test]
+    fn github_filters_still_go_to_the_server() {
+        let mut a = app();
+        a.handle_key(key('f'));
+        type_text(&mut a, "label:bug stauts:x");
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert_eq!(
+            cmds,
+            vec![Command::FetchViewIds {
+                view: ViewId::new("V_table"),
+                query: ListQuery::github("label:bug stauts:x"),
+            }]
+        );
+        assert_eq!(a.status.flash, None, "GitHub reads its own filter");
+        assert_eq!(
+            a.list_query(a.current_view().unwrap()),
+            Some(ListQuery::github("label:bug stauts:x"))
+        );
+    }
+
     #[test]
     fn enter_opens_detail_and_esc_closes_it() {
         let mut a = app();
@@ -1686,6 +2044,79 @@ mod tests {
                 "https://github.com/tviles/t/issues/99".into()
             )]
         );
+    }
+
+    #[test]
+    fn a_key_on_the_board_opens_its_detail_and_others_open_linear() {
+        let mut a = linear_board();
+        let mut snap = a.snapshot().unwrap().clone();
+        for (id, number) in [("a", 1), ("b", 2)] {
+            let item = snap.items.get_mut(&ItemId::new(id)).unwrap();
+            if let ItemContent::Issue { reference, .. } = &mut item.content {
+                reference.container = "TBA".into();
+                reference.key = Some(format!("TBA-{number}"));
+                reference.url = format!("https://linear.app/acme/issue/TBA-{number}");
+            }
+        }
+        a.store.apply(StoreUpdate::Replace(snap));
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert_eq!(
+            cmds,
+            vec![Command::LoadDetail {
+                item: ItemId::new("a"),
+                before: None
+            }]
+        );
+        a.on_sync(SyncEvent::Detail {
+            item: ItemId::new("a"),
+            detail: ItemDetail {
+                body: "see TBA-2, #2 and TBA-99".into(),
+                ..Default::default()
+            },
+            older: false,
+        });
+        assert_eq!(
+            a.detail_targets(),
+            vec![Target::Key("TBA-2".into()), Target::Key("TBA-99".into())]
+        );
+        a.handle_key(code(KeyCode::Tab));
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert_eq!(
+            cmds,
+            vec![Command::LoadDetail {
+                item: ItemId::new("b"),
+                before: None
+            }]
+        );
+        a.on_sync(SyncEvent::Detail {
+            item: ItemId::new("b"),
+            detail: ItemDetail {
+                body: "back to TBA-99".into(),
+                ..Default::default()
+            },
+            older: false,
+        });
+        a.handle_key(code(KeyCode::Tab));
+        let cmds = a.handle_key(code(KeyCode::Enter));
+        assert_eq!(
+            cmds,
+            vec![Command::OpenUrl(
+                "https://linear.app/acme/issue/TBA-99".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_linear_boards_marks_carry_its_status_field() {
+        assert_eq!(app().marks().status_field, None, "GitHub");
+        let mut a = linear_board();
+        assert_eq!(a.marks().status_field, None, "no Status field yet");
+        let mut snap = a.snapshot().unwrap().clone();
+        let mut status = snap.project.fields[1].clone();
+        status.id = FieldId::new(crate::linear::ids::STATUS);
+        snap.project.fields.push(status.clone());
+        a.store.apply(StoreUpdate::Replace(snap));
+        assert_eq!(a.marks().status_field, Some(status));
     }
 
     #[test]
@@ -1781,6 +2212,34 @@ mod tests {
             assert!(text.ends_with("press r."), "{text}");
         }
         assert_eq!(setup_message(&BackendError::Network("x".into())), None);
+    }
+
+    #[test]
+    fn the_setup_screen_lists_every_providers_fix() {
+        let gh = BackendError::NoCredentials {
+            provider: Provider::Github,
+        };
+        let ln = BackendError::NoCredentials {
+            provider: Provider::Linear,
+        };
+        assert_eq!(
+            setup_message_for_all(&[gh.clone(), ln.clone()]),
+            format!(
+                "{}\n\n— or —\n\n{}",
+                setup_message(&gh).unwrap(),
+                setup_message(&ln).unwrap()
+            )
+        );
+        assert_eq!(
+            setup_message_for_all(std::slice::from_ref(&gh)),
+            setup_message(&gh).unwrap()
+        );
+        let odd = BackendError::Network("offline".into());
+        assert_eq!(
+            setup_message_for_all(std::slice::from_ref(&odd)),
+            odd.to_string(),
+            "an error with no setup text shows its own"
+        );
     }
 
     #[test]

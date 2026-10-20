@@ -8,7 +8,19 @@ use unicode_segmentation::UnicodeSegmentation;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Target {
     Link(String),
+    /// `#123` on a GitHub board.
     IssueRef(u32),
+    /// `ENG-123` on a Linear board.
+    Key(String),
+}
+
+/// Which plain-text references become targets.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RefStyle {
+    /// `#123` that starts a word.
+    Github,
+    /// `<KEY>-<digits>` as a whole word, for these team keys; `#123` stays text.
+    Keys(Vec<String>),
 }
 
 pub struct Rendered {
@@ -23,6 +35,7 @@ pub fn line_text(line: &Line) -> String {
 struct Renderer<'t> {
     width: usize,
     theme: &'t Theme,
+    refs: &'t RefStyle,
     lines: Vec<Line<'static>>,
     current: Vec<(String, Style)>,
     styles: Vec<Style>,
@@ -73,6 +86,10 @@ impl<'t> Renderer<'t> {
             cell.push_str(text);
             return;
         }
+        if let RefStyle::Keys(keys) = self.refs {
+            self.push_keyed_text(text, keys);
+            return;
+        }
         let style = self.style();
         let mut rest = text;
         // Split out `#123` references that start a word.
@@ -98,6 +115,39 @@ impl<'t> Renderer<'t> {
         }
         if !rest.is_empty() {
             self.current.push((rest.to_string(), style));
+        }
+    }
+
+    /// `text` with each whole-word `<KEY>-<digits>` for one of `keys` split out as a target.
+    /// A word starts the text or follows whitespace or `(`; it ends at anything but a letter,
+    /// digit, `-` or `_`. Outside a link's text only.
+    fn push_keyed_text(&mut self, text: &str, keys: &[String]) {
+        let style = self.style();
+        let mut plain = 0;
+        let mut at = 0;
+        while at < text.len() {
+            let starts_word =
+                at == 0 || text[..at].ends_with(|c: char| c.is_whitespace() || c == '(');
+            let found = (starts_word && self.link.is_none())
+                .then(|| keys.iter().find_map(|k| key_ref(&text[at..], k)))
+                .flatten();
+            match found {
+                Some(len) => {
+                    let key = &text[at..at + len];
+                    if plain < at {
+                        self.current.push((text[plain..at].to_string(), style));
+                    }
+                    self.current
+                        .push((key.to_string(), style.patch(self.theme.accent())));
+                    self.targets.push(Target::Key(key.to_string()));
+                    at += len;
+                    plain = at;
+                }
+                None => at += text[at..].chars().next().map_or(1, char::len_utf8),
+            }
+        }
+        if plain < text.len() {
+            self.current.push((text[plain..].to_string(), style));
         }
     }
 
@@ -135,6 +185,16 @@ impl<'t> Renderer<'t> {
         self.lines
             .push(Line::from(Span::styled(line, self.theme.code())));
     }
+}
+
+/// The length of the reference `<key>-<digits>` at the start of `text`, when the word ends
+/// right after the digits.
+fn key_ref(text: &str, key: &str) -> Option<usize> {
+    let rest = text.strip_prefix(key)?.strip_prefix('-')?;
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let ends_word =
+        !rest[digits..].starts_with(|c: char| c.is_alphanumeric() || c == '-' || c == '_');
+    (digits > 0 && ends_word).then_some(key.len() + 1 + digits)
 }
 
 /// Word-wraps styled tokens. Words longer than a line are split by grapheme clusters.
@@ -202,16 +262,24 @@ fn finish(mut spans: Vec<Span<'static>>) -> Line<'static> {
 }
 
 pub fn render_markdown(src: &str, width: u16, theme: &Theme) -> Rendered {
-    render_markdown_from(src, width, theme, 0)
+    render_markdown_from(src, width, theme, 0, &RefStyle::Github)
 }
 
 /// Like `render_markdown`, but footnote markers are numbered `first_target + index + 1`, so
-/// several documents can share one list of targets.
-pub fn render_markdown_from(src: &str, width: u16, theme: &Theme, first_target: usize) -> Rendered {
+/// several documents can share one list of targets, and `refs` picks which references in
+/// the text are targets.
+pub fn render_markdown_from(
+    src: &str,
+    width: u16,
+    theme: &Theme,
+    first_target: usize,
+    refs: &RefStyle,
+) -> Rendered {
     let mut r = Renderer {
         // The screen layout shows "widen the pane" below 40 columns, so widths under 10 never arrive.
         width: (width as usize).max(10),
         theme,
+        refs,
         lines: Vec::new(),
         current: Vec::new(),
         styles: Vec::new(),
@@ -525,6 +593,31 @@ mod tests {
     fn exact_fit_words_are_not_cut() {
         let (lines, _) = text("aaaa bbbbb cc dd", 10);
         assert_eq!(lines, vec!["aaaa bbbbb", "cc dd"]);
+    }
+
+    #[test]
+    fn team_keys_link_only_on_linear() {
+        let render = |md: &str, refs: &RefStyle| {
+            let r = render_markdown_from(md, 60, &Theme::plain(), 0, refs);
+            (r.lines.iter().map(line_text).collect::<Vec<_>>(), r.targets)
+        };
+        let keys = RefStyle::Keys(vec!["TBA".into()]);
+        let (lines, targets) = render("see TBA-7 and XYZ-1 and #12", &keys);
+        assert_eq!(lines, ["see TBA-7 and XYZ-1 and #12"]);
+        assert_eq!(targets, vec![Target::Key("TBA-7".into())]);
+        // A key is a whole word: punctuation may follow it, letters may not touch it.
+        let (lines, targets) = render("(TBA-7), TBA-8. xTBA-1 TBA-2a TBA- TBA-x", &keys);
+        assert_eq!(lines, ["(TBA-7), TBA-8. xTBA-1 TBA-2a TBA- TBA-x"]);
+        assert_eq!(
+            targets,
+            vec![Target::Key("TBA-7".into()), Target::Key("TBA-8".into())]
+        );
+        // Not inside a link's text.
+        let (_, targets) = render("[TBA-7](https://e.x)", &keys);
+        assert_eq!(targets, vec![Target::Link("https://e.x".into())]);
+        // GitHub: `#12` as before, keys are plain text.
+        let (_, targets) = render("see TBA-7 and XYZ-1 and #12", &RefStyle::Github);
+        assert_eq!(targets, vec![Target::IssueRef(12)]);
     }
 
     #[test]

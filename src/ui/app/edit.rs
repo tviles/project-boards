@@ -582,6 +582,10 @@ impl App {
             viewer_can_update: self.project().is_some_and(|p| p.viewer_can_update),
             scopes: self.scopes.clone(),
             refused: self.refused_scopes.clone(),
+            provider: self
+                .project()
+                .map(|p| p.board.provider())
+                .unwrap_or_default(),
         }
     }
 
@@ -607,6 +611,11 @@ impl App {
                     .collect()
             },
             highlight: self.highlight.clone(),
+            status_field: self
+                .project()
+                .filter(|_| self.is_linear())
+                .and_then(|p| p.field(&FieldId::new(crate::linear::ids::STATUS)))
+                .cloned(),
         }
     }
 
@@ -770,8 +779,9 @@ impl App {
         self.sticky.iter().any(|s| &s.id == id)
     }
 
-    /// A sticky item the view no longer matches: GitHub's latest list for the view dropped
-    /// it, or its values fail the filter as far as `still_matches` can tell.
+    /// A sticky item the view no longer matches: the latest list for the view dropped it,
+    /// or its values fail the filter: on a Linear board the `f` filter, evaluated here; on
+    /// GitHub as far as `still_matches` can tell.
     pub fn unmatched(&self, item: &Item) -> bool {
         let Some(sticky) = self.sticky.iter().find(|s| s.id == item.id) else {
             return false;
@@ -779,14 +789,19 @@ impl App {
         let (Some(snap), Some(view)) = (self.snapshot(), self.current_view()) else {
             return false;
         };
-        let filter = self.effective_filter();
-        let dropped = !filter.trim().is_empty()
+        let dropped = self.list_query(view).is_some()
             && sticky.listed
             && snap
                 .views
                 .get(&view.id)
                 .is_some_and(|l| !l.ids.contains(&item.id));
-        dropped || !still_matches(&filter, item, &snap.project.fields)
+        if dropped {
+            return true;
+        }
+        match self.client_filter(view) {
+            Some(filter) => !filter.matches(item, &self.filter_context()),
+            None => !still_matches(&self.effective_filter(), item, &snap.project.fields),
+        }
     }
 
     /// Runs an edit key on `action_item`. `None` when `action` is not an edit key.

@@ -125,6 +125,53 @@ impl FromStr for BoardKey {
     }
 }
 
+const CLI_FORMS: &str =
+    "expected OWNER/NUMBER, linear:team:KEY, linear:project:SLUG or a Linear project URL";
+
+impl BoardKey {
+    /// What `--project` accepts: any board key, or a Linear project URL
+    /// (`https://linear.app/<workspace>/project/<slug>-<slugId>[/...]`), which names the
+    /// project by the slug id after the last `-`. A full slug in `linear:project:<slug>` is
+    /// cut to its slug id the same way; a UUID is kept whole.
+    pub fn parse_cli(text: &str) -> Result<BoardKey, String> {
+        let Some(rest) = text
+            .strip_prefix("https://")
+            .or_else(|| text.strip_prefix("http://"))
+        else {
+            return match text.parse()? {
+                Self::LinearProject { id } if !is_uuid(&id) && id.contains('-') => id
+                    .rsplit_once('-')
+                    .and_then(|(_, slug_id)| linear_id(slug_id))
+                    .map(|id| Self::LinearProject { id })
+                    .ok_or_else(|| CLI_FORMS.to_string()),
+                key => Ok(key),
+            };
+        };
+        let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+        let mut parts = rest.split('/');
+        let (host, _workspace, kind, slug) =
+            (parts.next(), parts.next(), parts.next(), parts.next());
+        match (host.map(str::to_ascii_lowercase).as_deref(), kind, slug) {
+            (Some("linear.app"), Some("project"), Some(slug)) => slug
+                .rsplit_once('-')
+                .and_then(|(_, id)| linear_id(id))
+                .map(|id| Self::LinearProject { id })
+                .ok_or_else(|| CLI_FORMS.to_string()),
+            _ => Err(CLI_FORMS.to_string()),
+        }
+    }
+}
+
+/// Whether `text` is a UUID in 8-4-4-4-12 hexadecimal form.
+pub fn is_uuid(text: &str) -> bool {
+    let groups: Vec<&str> = text.split('-').collect();
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(g, n)| g.len() == n && g.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 impl From<BoardKey> for String {
     fn from(b: BoardKey) -> String {
         b.to_string()
@@ -255,5 +302,86 @@ mod tests {
         assert_eq!(r.to_string(), "tviles/project-boards");
         assert!("tviles".parse::<RepoSlug>().is_err());
         assert!("a/b/c".parse::<RepoSlug>().is_err());
+    }
+
+    #[test]
+    fn a_linear_project_url_becomes_its_slug_id() {
+        for url in [
+            "https://linear.app/acme/project/launch-plan-1a2b3c4d5e6f/overview",
+            "https://linear.app/acme/project/launch-plan-1a2b3c4d5e6f",
+            "http://linear.app/acme/project/launch-plan-1a2b3c4d5e6f/",
+            "https://linear.app/acme/project/launch-plan-1a2b3c4d5e6f?utm=x#top",
+            "https://linear.app/acme/project/launch-plan-1a2b3c4d5e6f/overview?x",
+            "https://linear.app/acme/project/launch-plan-1a2b3c4d5e6f#frag",
+            "https://LINEAR.APP/acme/project/launch-plan-1a2b3c4d5e6f",
+        ] {
+            assert_eq!(
+                BoardKey::parse_cli(url),
+                Ok(BoardKey::LinearProject {
+                    id: "1a2b3c4d5e6f".into()
+                }),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn team_keys_and_slugs_parse() {
+        assert_eq!(
+            BoardKey::parse_cli("linear:team:ENG"),
+            Ok(BoardKey::LinearTeam { id: "ENG".into() })
+        );
+        // A full slug names the project by its slug id, the part after the last `-`, the
+        // only part Linear resolves; a slug id or a UUID is kept as given.
+        for (given, id) in [
+            ("launch-plan-1a2b3c4d5e6f", "1a2b3c4d5e6f"),
+            ("1a2b3c4d5e6f", "1a2b3c4d5e6f"),
+            (
+                "7d0c2f6e-1b7a-4c1e-9a55-0d3c1e2f4a6b",
+                "7d0c2f6e-1b7a-4c1e-9a55-0d3c1e2f4a6b",
+            ),
+        ] {
+            assert_eq!(
+                BoardKey::parse_cli(&format!("linear:project:{given}")),
+                Ok(BoardKey::LinearProject { id: id.into() }),
+                "{given}"
+            );
+        }
+        assert!(BoardKey::parse_cli("linear:project:launch-").is_err());
+        assert_eq!(
+            BoardKey::parse_cli("acme/3"),
+            Ok(BoardKey::github("acme", 3))
+        );
+    }
+
+    #[test]
+    fn a_url_from_another_host_is_rejected() {
+        let want =
+            "expected OWNER/NUMBER, linear:team:KEY, linear:project:SLUG or a Linear project URL";
+        for url in [
+            "https://github.com/orgs/acme/projects/3",
+            "https://example.com/acme/project/x-1a2b",
+            "https://linear.app/acme/team/ENG/active",
+            "https://linear.app/acme/project/",
+            "https://linear.app/acme/project/nodash",
+        ] {
+            assert_eq!(BoardKey::parse_cli(url), Err(want.to_string()), "{url}");
+        }
+    }
+
+    #[test]
+    fn uuids_are_recognised() {
+        assert!(is_uuid("7d0c2f6e-1b7a-4c1e-9a55-0d3c1e2f4a6b"));
+        assert!(is_uuid("7D0C2F6E-1B7A-4C1E-9A55-0D3C1E2F4A6B"));
+        for bad in [
+            "",
+            "ENG",
+            "launch-plan-1a2b3c4d5e6f",
+            "7d0c2f6e-1b7a-4c1e-9a55-0d3c1e2f4a6",
+            "7d0c2f6e-1b7a-4c1e-9a55-0d3c1e2f4a6bb",
+            "7d0c2f6e-1b7a-4c1e-9a55-0d3c1e2f4a6g",
+        ] {
+            assert!(!is_uuid(bad), "{bad}");
+        }
     }
 }

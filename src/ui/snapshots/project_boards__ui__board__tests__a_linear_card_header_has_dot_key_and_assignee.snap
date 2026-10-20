@@ -1,0 +1,9 @@
+---
+source: src/ui/board.rs
+expression: screen
+---
+Todo 1                            In Progress 1 ‹ 1–2 of 3 ›
+╭───────────────────────────────╮ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+│● TBA-8                        │ ┃● TBA-7            Ada Lovelace┃
+│Linear issue 8                 │ ┃Linear issue 7                 ┃
+╰───────────────────────────────╯ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛

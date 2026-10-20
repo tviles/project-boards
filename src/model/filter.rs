@@ -449,20 +449,24 @@ impl Filter {
             };
             let values = split_unquoted(values, ',');
             match key.as_str() {
-                "no" | "has" => terms.extend(values.iter().map(|v| {
-                    let named = Key::resolve(&v.to_lowercase(), fields);
-                    if key == "no" {
-                        Term::NoValue {
-                            negated,
-                            key: named,
+                // An empty value (`no:`, `has:status,`) is still being typed: no term, and no
+                // unknown key.
+                "no" | "has" => {
+                    terms.extend(values.iter().filter(|v| !v.trim().is_empty()).map(|v| {
+                        let named = Key::resolve(&v.to_lowercase(), fields);
+                        if key == "no" {
+                            Term::NoValue {
+                                negated,
+                                key: named,
+                            }
+                        } else {
+                            Term::Has {
+                                negated,
+                                key: named,
+                            }
                         }
-                    } else {
-                        Term::Has {
-                            negated,
-                            key: named,
-                        }
-                    }
-                })),
+                    }))
+                }
                 "is" => terms.push(Term::Is {
                     negated,
                     what: values.iter().map(|v| IsWhat::parse(v)).collect(),
@@ -917,6 +921,18 @@ mod tests {
                 .unknown_keys()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn an_empty_no_or_has_value_is_not_an_unknown_key() {
+        let f = linear_board();
+        for q in ["no:", "has:", "has:status,", "-no:,priority", "no:\"\""] {
+            assert!(Filter::parse(q, &f).unknown_keys().is_empty(), "{q}");
+        }
+        let half = Filter::parse("has:status,", &f);
+        assert!(half.matches(&item("TBA-1", "x", &[("Status", "Todo")]), &ctx(&f)));
+        assert!(!half.matches(&item("TBA-2", "x", &[]), &ctx(&f)));
+        assert!(Filter::parse("no:", &f).matches(&item("TBA-3", "x", &[]), &ctx(&f)));
     }
 
     #[test]

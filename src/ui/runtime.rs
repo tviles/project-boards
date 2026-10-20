@@ -1,8 +1,12 @@
-use crate::backend::Backend;
+use crate::backend::{Backend, Backends};
+use crate::error::BackendError;
 use crate::github::Github;
 use crate::github::token::resolve_token_from_system;
 use crate::github::transport::HttpTransport;
 use crate::herdr::cli::{HerdrCli, ProcessHerdr};
+use crate::linear::Linear;
+use crate::linear::token::resolve_key_from_system;
+use crate::model::Provider;
 use crate::sync::syncer::Syncer;
 use crate::ui::chrome;
 use crate::ui::controller::{Controller, Effect, Input, PaneOptions, SyncJob};
@@ -109,6 +113,7 @@ async fn event_loop(
     let settings = StartSettings {
         max_items: options.config.max_items,
         gh_user: options.config.gh_user.clone(),
+        linear_key_command: options.config.linear_api_key_command.clone(),
         state_dir: options.state_dir.clone(),
     };
     // Events arrive tagged with the generation of the job that produced them.
@@ -118,12 +123,8 @@ async fn event_loop(
     if let Err(e) = crate::ui::editor::clear_stale(&edits, crate::ui::editor::pid_alive) {
         tracing::warn!(error = %e, "could not clear old editor files");
     }
-    let mut controller = Controller::new(
-        options,
-        herdr,
-        crate::backend::GITHUB_PROFILE.incremental,
-        Instant::now(),
-    );
+    // No fixed incremental mode: each board polls as its provider does (Decision 18).
+    let mut controller = Controller::new(options, herdr, None, Instant::now());
     let result = drive(terminal, &mut controller, tx, rx, &settings, signals).await;
     // Every exit path (Exit effect, SIGTERM/SIGHUP, a failed draw) unregisters the pane.
     controller.release();
@@ -149,14 +150,18 @@ async fn drive(
         while !pending.is_empty() {
             for effect in std::mem::take(&mut pending) {
                 match effect {
-                    Effect::Spawn { job, generation } => match &runner {
+                    Effect::Spawn {
+                        job,
+                        generation,
+                        provider,
+                    } => match &runner {
                         // The effect carries the generation it was produced under; never read
                         // controller.generation() here (a bump may have happened since).
-                        Some(r) => r.spawn(job, generation),
+                        Some(r) => r.spawn(job, generation, provider),
                         None => {
-                            tracing::warn!(job = job.kind(), "no GitHub client yet; job dropped");
+                            tracing::warn!(job = job.kind(), "no client yet; job dropped");
                             // An edit must still be answered, or it would stay "sending".
-                            if let Some(event) = unanswered_edit(&job) {
+                            if let Some(event) = unanswered_edit(&job, provider) {
                                 let _ = tx.send((generation, event));
                             }
                         }
@@ -208,16 +213,19 @@ async fn drive(
 /// controller generation the job was spawned under, so late events of a previous board are
 /// dropped by `Controller::handle`.
 struct Runner {
-    backend: Arc<Backend>,
+    backends: Backends,
     tx: mpsc::UnboundedSender<Tagged>,
     max_items: usize,
+    /// `linear_api_key_command` is configured (the picker's note names it when it gave no key).
+    linear_key_command: bool,
 }
 
-/// What `start` needs from the config to build the GitHub client and sync jobs, and where
-/// the editor's file goes.
+/// What `start` needs from the config to build the clients and sync jobs, and where the
+/// editor's file goes.
 struct StartSettings {
     max_items: usize,
     gh_user: Option<String>,
+    linear_key_command: Option<Vec<String>>,
     state_dir: PathBuf,
 }
 
@@ -280,31 +288,68 @@ fn drain_input() {
     }
 }
 
-/// Resolves the token, builds the GitHub client, and starts the controller.
+/// Resolves the GitHub token and the Linear key independently, builds a client for each
+/// that resolved, and starts the controller; the setup screen only when neither did.
 fn start(
     controller: &mut Controller,
     runner: &mut Option<Runner>,
     tx: &mpsc::UnboundedSender<Tagged>,
     settings: &StartSettings,
 ) -> Vec<Effect> {
-    match resolve_token_from_system(settings.gh_user.as_deref()) {
-        Ok(token) => {
-            let backend = Arc::new(Backend::Github(Github::new(Arc::new(HttpTransport::new(
-                token.value,
-            )))));
+    let github = resolve_token_from_system(settings.gh_user.as_deref()).map(|t| t.value);
+    let linear = resolve_key_from_system(settings.linear_key_command.as_deref()).map(|k| k.value);
+    match backends_from(github, linear) {
+        Ok(backends) => {
+            let providers = backends.providers();
             *runner = Some(Runner {
-                backend,
+                backends,
                 tx: tx.clone(),
                 max_items: settings.max_items,
+                linear_key_command: settings.linear_key_command.is_some(),
             });
-            controller.start(Ok(()), Instant::now())
+            controller.start(Ok(providers), Instant::now())
         }
-        Err(e) => controller.start(Err(e), Instant::now()),
+        Err(errors) => controller.start(Err(errors), Instant::now()),
+    }
+}
+
+/// A backend for each provider whose credentials resolved; every error when none did. A
+/// provider without credentials is logged by its error kind only, never the error's text.
+fn backends_from(
+    github: Result<String, BackendError>,
+    linear: Result<String, BackendError>,
+) -> Result<Backends, Vec<BackendError>> {
+    let mut backends = Backends::default();
+    let mut errors = Vec::new();
+    match github {
+        Ok(token) => {
+            let transport = Arc::new(HttpTransport::new(token));
+            backends.github = Some(Arc::new(Backend::Github(Github::new(transport))));
+        }
+        Err(e) => {
+            tracing::info!(provider = "github", error = e.kind(), "no credentials");
+            errors.push(e);
+        }
+    }
+    match linear {
+        Ok(key) => {
+            let transport = Arc::new(HttpTransport::linear(key));
+            backends.linear = Some(Arc::new(Backend::Linear(Linear::new(transport))));
+        }
+        Err(e) => {
+            tracing::info!(provider = "linear", error = e.kind(), "no credentials");
+            errors.push(e);
+        }
+    }
+    if backends.providers().is_empty() {
+        Err(errors)
+    } else {
+        Ok(backends)
     }
 }
 
 impl Runner {
-    fn spawn(&self, job: SyncJob, generation: u64) {
+    fn spawn(&self, job: SyncJob, generation: u64, provider: Option<Provider>) {
         let (jtx, mut jrx) = mpsc::unbounded_channel();
         let out = self.tx.clone();
         tokio::spawn(async move {
@@ -314,7 +359,8 @@ impl Runner {
                 }
             }
         });
-        let s = Syncer::new(self.backend.clone(), jtx, self.max_items);
+        let s = Syncer::new(self.backends.clone(), provider, jtx, self.max_items)
+            .with_linear_key_command(self.linear_key_command);
         tokio::spawn(async move {
             match job {
                 SyncJob::Resolve(board) => {
@@ -352,17 +398,18 @@ impl Runner {
     }
 }
 
-/// The event that answers a job nobody could run (no token yet): `OpDone` for an edit, which
-/// would otherwise stay "sending", and `Failed` for a lookup, which would otherwise stay
-/// "loading" for good.
-fn unanswered_edit(job: &SyncJob) -> Option<crate::sync::SyncEvent> {
+/// The event that answers a job nobody could run (no credentials yet): `OpDone` for an edit,
+/// which would otherwise stay "sending", and `Failed` for a lookup, which would otherwise stay
+/// "loading" for good. The error names the job's provider (GitHub when no board was open).
+fn unanswered_edit(job: &SyncJob, provider: Option<Provider>) -> Option<crate::sync::SyncEvent> {
     use crate::sync::{SyncEvent, SyncTask};
+    let missing = || BackendError::NoCredentials {
+        provider: provider.unwrap_or(Provider::Github),
+    };
     let failed = |task| {
         Some(SyncEvent::Failed {
             task,
-            error: crate::error::BackendError::NoCredentials {
-                provider: crate::model::Provider::Github,
-            },
+            error: missing(),
         })
     };
     match job {
@@ -370,11 +417,9 @@ fn unanswered_edit(job: &SyncJob) -> Option<crate::sync::SyncEvent> {
         SyncJob::Repos => failed(SyncTask::Repos),
         SyncJob::LookupRepo(slug) => failed(SyncTask::RepoLookup(slug.clone())),
         SyncJob::Search { query, .. } => failed(SyncTask::Search(query.clone())),
-        SyncJob::Mutate { id, .. } => Some(crate::sync::SyncEvent::OpDone {
+        SyncJob::Mutate { id, .. } => Some(SyncEvent::OpDone {
             id: *id,
-            result: Err(crate::error::BackendError::NoCredentials {
-                provider: crate::model::Provider::Github,
-            }),
+            result: Err(missing()),
         }),
         _ => None,
     }
@@ -463,6 +508,54 @@ mod tests {
     }
 
     #[test]
+    fn a_broken_linear_command_leaves_github_working() {
+        let no_key = BackendError::NoCredentials {
+            provider: Provider::Linear,
+        };
+        let backends = backends_from(Ok("gh-token".into()), Err(no_key.clone()))
+            .expect("GitHub alone is enough");
+        assert_eq!(backends.providers(), vec![Provider::Github]);
+
+        let backends = backends_from(
+            Err(BackendError::NoCredentials {
+                provider: Provider::Github,
+            }),
+            Ok("lin-key".into()),
+        )
+        .expect("Linear alone is enough");
+        assert_eq!(backends.providers(), vec![Provider::Linear]);
+
+        let no_token = BackendError::NoCredentials {
+            provider: Provider::Github,
+        };
+        assert_eq!(
+            backends_from(Err(no_token.clone()), Err(no_key.clone())).err(),
+            Some(vec![no_token, no_key])
+        );
+    }
+
+    #[test]
+    fn a_job_nobody_could_run_is_answered_for_its_provider() {
+        let job = SyncJob::Mutate {
+            id: 4,
+            project: ProjectId::new("linear:team:t1"),
+            op: Op::ClearField {
+                item: ItemId::new("I"),
+                field: FieldId::new("F"),
+            },
+        };
+        assert_eq!(
+            unanswered_edit(&job, Some(Provider::Linear)),
+            Some(SyncEvent::OpDone {
+                id: 4,
+                result: Err(BackendError::NoCredentials {
+                    provider: Provider::Linear
+                }),
+            })
+        );
+    }
+
+    #[test]
     fn an_edit_with_no_client_is_answered_with_an_error() {
         let job = SyncJob::Mutate {
             id: 3,
@@ -473,15 +566,15 @@ mod tests {
             },
         };
         assert!(matches!(
-            unanswered_edit(&job),
+            unanswered_edit(&job, None),
             Some(SyncEvent::OpDone {
                 id: 3,
                 result: Err(_)
             })
         ));
-        assert!(unanswered_edit(&SyncJob::Projects(None)).is_none());
+        assert!(unanswered_edit(&SyncJob::Projects(None), None).is_none());
         assert!(matches!(
-            unanswered_edit(&SyncJob::Repos),
+            unanswered_edit(&SyncJob::Repos, None),
             Some(crate::sync::SyncEvent::Failed {
                 task: crate::sync::SyncTask::Repos,
                 ..

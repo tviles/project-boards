@@ -1,13 +1,55 @@
 //! Runs fetches and reports results as events; never touches the store.
 
-use crate::backend::{Backend, SyncProfile};
+use crate::backend::{Backend, Backends, SyncProfile, profile_for};
 use crate::error::{BackendError, GraphqlErrorEntry};
+use crate::linear::client::board_of;
+use crate::linear::convert::Polled;
 use crate::model::*;
 use crate::store::ViewList;
 use crate::sync::{SyncEvent, SyncTask, incremental_query, search_query};
+use crate::transport::Page;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+/// A board of one provider sent to another provider's backend.
+fn disagree() -> BackendError {
+    BackendError::Decode("board and backend disagree".into())
+}
+
+/// The picker's line for a provider whose credentials did not resolve. `key_command`: a
+/// `linear_api_key_command` is configured, so it ran and gave no key (a dismissed prompt).
+fn missing_credentials_note(provider: Provider, key_command: bool) -> &'static str {
+    match provider {
+        Provider::Github => "GitHub boards: run `gh auth login` or set GH_TOKEN",
+        Provider::Linear if key_command => "Linear boards: linear_api_key_command gave no key",
+        Provider::Linear => "Linear boards: set LINEAR_API_KEY or linear_api_key_command",
+    }
+}
+
+/// GitHub's boards for the picker: `linked`'s boards first, then every board the viewer sees.
+async fn github_boards(
+    backend: &Backend,
+    linked: Option<&RepoSlug>,
+) -> Result<Vec<ProjectSummary>, BackendError> {
+    let Backend::Github(gh) = backend else {
+        return Err(disagree());
+    };
+    let linked_list = match linked {
+        Some(repo) => gh.list_repo_projects(repo).await?,
+        None => Vec::new(),
+    };
+    let all = gh.list_viewer_projects().await?;
+    Ok(crate::board_choice::picker_candidates(all, &linked_list))
+}
+
+/// Linear's boards for the picker: open projects, then teams.
+async fn linear_boards(backend: &Backend) -> Result<Vec<ProjectSummary>, BackendError> {
+    match backend {
+        Backend::Linear(linear) => linear.list_boards().await,
+        Backend::Github(_) => Err(disagree()),
+    }
+}
 
 fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
@@ -18,35 +60,62 @@ fn now_rfc3339() -> String {
 /// Runs fetches and reports results as events. Each method is one unit of work the runtime
 /// spawns; none of them touch the store directly.
 pub struct Syncer {
-    backend: Arc<Backend>,
+    backends: Backends,
+    /// The provider of the board the job was spawned for; `None` when no board was open.
+    provider: Option<Provider>,
     tx: mpsc::UnboundedSender<SyncEvent>,
     max_items: usize,
     profile: SyncProfile,
+    /// `linear_api_key_command` is configured, so a missing Linear key means it gave none.
+    linear_key_command: bool,
 }
 
 impl Syncer {
+    /// A syncer for a job of `provider`'s board, loading and polling as that provider does.
     pub fn new(
-        backend: Arc<Backend>,
+        backends: Backends,
+        provider: Option<Provider>,
         tx: mpsc::UnboundedSender<SyncEvent>,
         max_items: usize,
     ) -> Self {
-        let profile = backend.profile();
-        Self::with_profile(backend, tx, max_items, profile)
+        let profile = profile_for(provider.unwrap_or(Provider::Github));
+        Self::with_profile(backends, provider, tx, max_items, profile)
     }
 
     /// `new` with another profile: tests of other incremental modes.
     pub fn with_profile(
-        backend: Arc<Backend>,
+        backends: Backends,
+        provider: Option<Provider>,
         tx: mpsc::UnboundedSender<SyncEvent>,
         max_items: usize,
         profile: SyncProfile,
     ) -> Self {
         Self {
-            backend,
+            backends,
+            provider,
             tx,
             max_items,
             profile,
+            linear_key_command: false,
         }
+    }
+
+    /// Whether `linear_api_key_command` is configured: the picker's note for missing Linear
+    /// credentials then says the command gave no key.
+    pub fn with_linear_key_command(mut self, configured: bool) -> Self {
+        self.linear_key_command = configured;
+        self
+    }
+
+    /// The backend of the job's board. A job spawned with no board open is GitHub's: only
+    /// the picker's and the editors' lookups run then.
+    fn board_backend(&self) -> Result<Arc<Backend>, BackendError> {
+        self.backends.get(self.provider.unwrap_or(Provider::Github))
+    }
+
+    /// The backend of the GitHub-only lookups (linked boards, candidates, search, repositories).
+    fn github(&self) -> Result<Arc<Backend>, BackendError> {
+        self.backends.get(Provider::Github)
     }
 
     fn send(&self, event: SyncEvent) {
@@ -58,12 +127,24 @@ impl Syncer {
         self.send(SyncEvent::Failed { task, error });
     }
 
+    /// Resolves `board` on its own provider's backend, whatever the job's tag: a board opened
+    /// with no board shown (the tag is `None`) still reaches its provider, or reports that
+    /// provider's missing credentials.
     pub async fn resolve(&self, board: &BoardKey) -> Option<Project> {
-        let result = match (&*self.backend, board) {
-            (Backend::Github(gh), BoardKey::Github(b)) => gh.resolve_project(b).await,
-            (_, other) => Err(BackendError::NoCredentials {
-                provider: other.provider(),
-            }),
+        let result = match self.backends.get(board.provider()) {
+            Ok(backend) => match (&*backend, board) {
+                (Backend::Github(gh), BoardKey::Github(b)) => gh.resolve_project(b).await,
+                (
+                    Backend::Linear(linear),
+                    BoardKey::LinearProject { .. } | BoardKey::LinearTeam { .. },
+                ) => linear.resolve(board).await,
+                (
+                    Backend::Github(_),
+                    BoardKey::LinearProject { .. } | BoardKey::LinearTeam { .. },
+                )
+                | (Backend::Linear(_), BoardKey::Github(_)) => Err(disagree()),
+            },
+            Err(e) => Err(e),
         };
         match result {
             Ok(p) => {
@@ -79,8 +160,12 @@ impl Syncer {
 
     /// `false` after a failure (already reported as `Failed { Resolve }`); the job must stop.
     pub async fn refresh_project(&self, project: &Project) -> bool {
-        let result = match &*self.backend {
-            Backend::Github(gh) => gh.fetch_project(&project.id, &project.board).await,
+        let result = match self.board_backend() {
+            Ok(backend) => match &*backend {
+                Backend::Github(gh) => gh.fetch_project(&project.id, &project.board).await,
+                Backend::Linear(linear) => linear.resolve(&project.board).await,
+            },
+            Err(e) => Err(e),
         };
         match result {
             Ok(p) => {
@@ -96,15 +181,27 @@ impl Syncer {
 
     /// Every item, page by page, up to `max_items`. `ItemsComplete` only when all pages arrived.
     pub async fn full_load(&self, project: &ProjectId) {
+        let backend = match self.board_backend() {
+            Ok(backend) => backend,
+            Err(e) => return self.fail(SyncTask::FullLoad, e),
+        };
         let started = now_rfc3339();
         let mut items: Vec<Item> = Vec::new();
         let mut after: Option<String> = None;
         let (total, truncated) = loop {
-            let page = match &*self.backend {
+            let page = match &*backend {
                 Backend::Github(gh) => {
                     gh.fetch_items_page(project, "", self.profile.full_page, after.take())
                         .await
                 }
+                Backend::Linear(linear) => match board_of(project) {
+                    Ok(board) => {
+                        linear
+                            .issues_page(&board, self.profile.full_page, after.take())
+                            .await
+                    }
+                    Err(e) => Err(e),
+                },
             };
             match page {
                 Ok(page) => {
@@ -133,18 +230,25 @@ impl Syncer {
             truncated,
         });
         self.send(SyncEvent::Access {
-            scopes: self.backend.scopes(),
+            scopes: backend.scopes(),
         });
-        self.send(SyncEvent::Rate(self.backend.rate()));
+        self.send(SyncEvent::Rate(backend.rate()));
     }
 
     /// Sends one edit and always reports exactly one `OpDone`, even if the send panics (it runs
     /// in its own task). The log names the op, the item and the kind of error, never GitHub's
     /// text, titles or values.
     pub async fn mutate(&self, id: crate::ops::OpId, project: &ProjectId, op: &crate::ops::Op) {
-        let (backend, project_id, sent) = (self.backend.clone(), project.clone(), op.clone());
+        let backend = match self.board_backend() {
+            Ok(backend) => backend,
+            Err(e) => {
+                tracing::warn!(op = op.name(), item = %op.item(), error = e.kind(), "edit failed");
+                return self.send(SyncEvent::OpDone { id, result: Err(e) });
+            }
+        };
+        let (sender, project_id, sent) = (backend.clone(), project.clone(), op.clone());
         let joined =
-            tokio::spawn(async move { crate::ops::send::send(&backend, &project_id, &sent).await })
+            tokio::spawn(async move { crate::ops::send::send(&sender, &project_id, &sent).await })
                 .await;
         let result = joined
             .unwrap_or_else(|_| Err(BackendError::Network("the edit failed unexpectedly".into())));
@@ -152,30 +256,58 @@ impl Syncer {
             tracing::warn!(op = op.name(), item = %op.item(), error = e.kind(), "edit failed");
         }
         self.send(SyncEvent::OpDone { id, result });
-        self.send(SyncEvent::Rate(self.backend.rate()));
+        self.send(SyncEvent::Rate(backend.rate()));
     }
 
     /// Items updated since `since`. Returns false when the mode has no incremental filter, so
-    /// the caller runs a full load instead.
+    /// the caller runs a full load instead. Issues a Linear poll finds in the trash are
+    /// reported as removed.
     pub async fn incremental(&self, project: &ProjectId, since: &str) -> bool {
         let Some(query) = incremental_query(self.profile.incremental, since) else {
             return false;
         };
+        let backend = match self.board_backend() {
+            Ok(backend) => backend,
+            Err(e) => {
+                self.fail(SyncTask::Incremental, e);
+                return true;
+            }
+        };
         let started = now_rfc3339();
         let mut items = Vec::new();
+        let mut removed = Vec::new();
         let mut after = None;
         loop {
-            let page = match &*self.backend {
-                Backend::Github(gh) => {
-                    gh.fetch_items_page(project, &query, self.profile.poll_page, after.take())
-                        .await
-                }
+            let page = match &*backend {
+                Backend::Github(gh) => gh
+                    .fetch_items_page(project, &query, self.profile.poll_page, after.take())
+                    .await
+                    .map(|page| Page {
+                        nodes: page.nodes.into_iter().map(Polled::Item).collect(),
+                        total: page.total,
+                        next: page.next,
+                    }),
+                Backend::Linear(linear) => match board_of(project) {
+                    Ok(board) => {
+                        linear
+                            .poll_page(&board, since, self.profile.poll_page, after.take())
+                            .await
+                    }
+                    Err(e) => Err(e),
+                },
             };
             match page {
                 Ok(page) => {
-                    items.extend(page.nodes);
+                    for polled in page.nodes {
+                        match polled {
+                            Polled::Item(item) => items.push(item),
+                            Polled::Trashed(id) => removed.push(id),
+                        }
+                    }
                     match page.next {
-                        Some(cursor) if items.len() < self.max_items => after = Some(cursor),
+                        Some(cursor) if items.len() + removed.len() < self.max_items => {
+                            after = Some(cursor)
+                        }
                         Some(_) => {
                             tracing::info!(
                                 "incremental poll exceeded max_items; running a full load"
@@ -194,10 +326,10 @@ impl Syncer {
         }
         self.send(SyncEvent::ItemsUpdated {
             items,
-            removed: vec![],
+            removed,
             fetched_at: started,
         });
-        self.send(SyncEvent::Rate(self.backend.rate()));
+        self.send(SyncEvent::Rate(backend.rate()));
         true
     }
 
@@ -211,10 +343,14 @@ impl Syncer {
         known: &HashSet<ItemId>,
         hydrate: bool,
     ) {
+        let backend = match self.board_backend() {
+            Ok(backend) => backend,
+            Err(e) => return self.fail(SyncTask::ViewIds(view.clone()), e),
+        };
         let mut ids: Vec<ItemId> = Vec::new();
         let mut after = None;
         let (total, truncated) = loop {
-            let page = match &*self.backend {
+            let page = match &*backend {
                 Backend::Github(gh) => match &query.filter {
                     ViewFilter::Github(text) => {
                         gh.fetch_view_ids_page(project, text, after.take()).await
@@ -225,6 +361,10 @@ impl Syncer {
                             kind: None,
                         }]))
                     }
+                },
+                Backend::Linear(linear) => match board_of(project) {
+                    Ok(board) => linear.view_ids_page(&board, query, after.take()).await,
+                    Err(e) => Err(e),
                 },
             };
             match page {
@@ -259,8 +399,9 @@ impl Syncer {
             return;
         }
         for chunk in missing.chunks(100) {
-            let result = match &*self.backend {
+            let result = match &*backend {
                 Backend::Github(gh) => gh.hydrate_items(chunk).await,
+                Backend::Linear(linear) => linear.hydrate(chunk).await,
             };
             match result {
                 Ok(items) => self.send(SyncEvent::Hydrated(items)),
@@ -272,8 +413,12 @@ impl Syncer {
     /// The item's body, comments and links. `before` loads the comments older than a cursor.
     pub async fn detail(&self, item: &ItemId, before: Option<String>) {
         let older = before.is_some();
-        let result = match &*self.backend {
-            Backend::Github(gh) => gh.fetch_item_detail(item, before).await,
+        let result = match self.board_backend() {
+            Ok(backend) => match &*backend {
+                Backend::Github(gh) => gh.fetch_item_detail(item, before).await,
+                Backend::Linear(linear) => linear.detail(item, before).await,
+            },
+            Err(e) => Err(e),
         };
         match result {
             Ok(detail) => self.send(SyncEvent::Detail {
@@ -287,8 +432,10 @@ impl Syncer {
 
     /// The boards linked to `repo`, for the startup decision.
     pub async fn repo_projects(&self, repo: &RepoSlug) {
-        let result = match &*self.backend {
-            Backend::Github(gh) => gh.list_repo_projects(repo).await,
+        let result = match self.github().as_deref() {
+            Ok(Backend::Github(gh)) => gh.list_repo_projects(repo).await,
+            Ok(Backend::Linear(_)) => Err(disagree()),
+            Err(e) => Err(e.clone()),
         };
         match result {
             Ok(list) => self.send(SyncEvent::RepoProjects(list)),
@@ -296,35 +443,68 @@ impl Syncer {
         }
     }
 
-    /// Boards for the picker: the repo's linked boards first, then every board the viewer can see.
+    /// Boards for the picker: GitHub's (the repo's linked boards first, then every board the
+    /// viewer can see), then Linear's projects and teams. A provider without credentials, or one
+    /// whose list fails while another's loads, becomes a note; only when every provider with
+    /// credentials fails is the list a failure (GitHub's error, else Linear's).
     pub async fn projects(&self, linked: Option<&RepoSlug>) {
-        let linked_list = match linked {
-            Some(repo) => {
-                let result = match &*self.backend {
-                    Backend::Github(gh) => gh.list_repo_projects(repo).await,
-                };
-                match result {
-                    Ok(l) => l,
-                    Err(e) => return self.fail(SyncTask::Projects, e),
+        let (github, linear) = tokio::join!(
+            async {
+                match self.backends.github.as_deref() {
+                    Some(backend) => Some(github_boards(backend, linked).await),
+                    None => None,
+                }
+            },
+            async {
+                match self.backends.linear.as_deref() {
+                    Some(backend) => Some(linear_boards(backend).await),
+                    None => None,
+                }
+            },
+        );
+        let mut boards = Vec::new();
+        let mut notes = Vec::new();
+        let mut loaded = false;
+        let mut first_error = None;
+        for (provider, result) in [(Provider::Github, github), (Provider::Linear, linear)] {
+            match result {
+                None => notes
+                    .push(missing_credentials_note(provider, self.linear_key_command).to_string()),
+                Some(Ok(list)) => {
+                    boards.extend(list);
+                    loaded = true;
+                }
+                Some(Err(e)) => {
+                    tracing::warn!(
+                        task = SyncTask::Projects.kind(),
+                        provider = %provider,
+                        error = e.kind(),
+                        "board list failed"
+                    );
+                    notes.push(format!(
+                        "{provider} boards could not be loaded ({})",
+                        e.kind()
+                    ));
+                    first_error.get_or_insert(e);
                 }
             }
-            None => Vec::new(),
-        };
-        let result = match &*self.backend {
-            Backend::Github(gh) => gh.list_viewer_projects().await,
-        };
-        match result {
-            Ok(all) => self.send(SyncEvent::Projects(crate::board_choice::picker_candidates(
-                all,
-                &linked_list,
-            ))),
-            Err(e) => self.fail(SyncTask::Projects, e),
         }
+        if loaded {
+            return self.send(SyncEvent::Projects { boards, notes });
+        }
+        // No provider loaded: every configured one failed, or none has credentials (the setup
+        // screen's case, reported as GitHub's missing token as before).
+        let error = first_error.unwrap_or(BackendError::NoCredentials {
+            provider: Provider::Github,
+        });
+        self.fail(SyncTask::Projects, error);
     }
 
     pub async fn candidates(&self, repo: &RepoSlug) {
-        let result = match &*self.backend {
-            Backend::Github(gh) => gh.repo_candidates(repo).await,
+        let result = match self.github().as_deref() {
+            Ok(Backend::Github(gh)) => gh.repo_candidates(repo).await,
+            Ok(Backend::Linear(_)) => Err(disagree()),
+            Err(e) => Err(e.clone()),
         };
         match result {
             Ok(candidates) => self.send(SyncEvent::Candidates {
@@ -336,8 +516,10 @@ impl Syncer {
     }
 
     pub async fn repos(&self) {
-        let result = match &*self.backend {
-            Backend::Github(gh) => gh.pushable_repos().await,
+        let result = match self.github().as_deref() {
+            Ok(Backend::Github(gh)) => gh.pushable_repos().await,
+            Ok(Backend::Linear(_)) => Err(disagree()),
+            Err(e) => Err(e.clone()),
         };
         match result {
             Ok(list) => self.send(SyncEvent::Repos(list)),
@@ -346,8 +528,10 @@ impl Syncer {
     }
 
     pub async fn lookup_repo(&self, slug: &RepoSlug) {
-        let result = match &*self.backend {
-            Backend::Github(gh) => gh.lookup_repo(slug).await,
+        let result = match self.github().as_deref() {
+            Ok(Backend::Github(gh)) => gh.lookup_repo(slug).await,
+            Ok(Backend::Linear(_)) => Err(disagree()),
+            Err(e) => Err(e.clone()),
         };
         match result {
             Ok(repo) => self.send(SyncEvent::RepoFound {
@@ -360,14 +544,16 @@ impl Syncer {
 
     /// A pasted issue or pull request URL is looked up directly; anything else is searched.
     pub async fn search(&self, query: &str, scope: &[RepoSlug]) {
-        let result = match &*self.backend {
-            Backend::Github(gh) => match parse_content_url(query) {
+        let result = match self.github().as_deref() {
+            Ok(Backend::Github(gh)) => match parse_content_url(query) {
                 Some((repo, number)) => gh
                     .content_by_number(&repo, number)
                     .await
                     .map(|hit| hit.into_iter().collect()),
                 None => gh.search_content(&search_query(query, scope)).await,
             },
+            Ok(Backend::Linear(_)) => Err(disagree()),
+            Err(e) => Err(e.clone()),
         };
         match result {
             Ok(hits) => self.send(SyncEvent::SearchResults {
@@ -385,6 +571,7 @@ mod tests {
     use crate::github::Github;
     use crate::github::convert::tests::item_json;
     use crate::github::fixture::FixtureTransport;
+    use crate::linear::Linear;
     use crate::sync::IncrementalMode;
     use serde_json::json;
 
@@ -410,7 +597,8 @@ mod tests {
         let t = Arc::new(FixtureTransport::new());
         let (tx, rx) = mpsc::unbounded_channel();
         let syncer = Syncer::with_profile(
-            Arc::new(Backend::Github(Github::new(t.clone()))),
+            github_only(&t),
+            Some(Provider::Github),
             tx,
             max,
             SyncProfile {
@@ -419,6 +607,38 @@ mod tests {
             },
         );
         (t, syncer, rx)
+    }
+
+    fn github_only(t: &Arc<FixtureTransport>) -> Backends {
+        Backends {
+            github: Some(Arc::new(Backend::Github(Github::new(t.clone())))),
+            linear: None,
+        }
+    }
+
+    const TEAM: &str = "1b4e28ba-2fa1-4d3b-a3f5-ef19b5a7633b";
+
+    fn linear_team() -> BoardKey {
+        BoardKey::LinearTeam { id: TEAM.into() }
+    }
+
+    /// A GitHub and a Linear transport, and a syncer for a job of `provider`'s board.
+    fn setup_both(
+        provider: Provider,
+    ) -> (
+        Arc<FixtureTransport>,
+        Arc<FixtureTransport>,
+        Syncer,
+        mpsc::UnboundedReceiver<SyncEvent>,
+    ) {
+        let gh = Arc::new(FixtureTransport::new());
+        let lin = Arc::new(FixtureTransport::new());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let backends = Backends {
+            github: Some(Arc::new(Backend::Github(Github::new(gh.clone())))),
+            linear: Some(Arc::new(Backend::Linear(Linear::new(lin.clone())))),
+        };
+        (gh, lin, Syncer::new(backends, Some(provider), tx, 2000), rx)
     }
 
     fn drain(rx: &mut mpsc::UnboundedReceiver<SyncEvent>) -> Vec<SyncEvent> {
@@ -643,6 +863,30 @@ mod tests {
         );
     }
 
+    /// Decision 9 on the cached path: a deleted GitHub board's refresh is not found, so the
+    /// controller forgets it, whether GitHub answers a null node or a null node with a
+    /// tolerated NOT_FOUND entry.
+    #[tokio::test]
+    async fn refreshing_a_deleted_github_board_is_not_found() {
+        let (t, s, mut rx) = setup(2000);
+        t.push("ProjectSchema", json!({"node": null}));
+        t.push_body(
+            "ProjectSchema",
+            json!({"data": {"node": null}, "errors": [{"type": "NOT_FOUND",
+                   "message": "Could not resolve to a node with the global id of 'P'"}]}),
+        );
+        let project = crate::store::snapshot::tests::project();
+        for _ in 0..2 {
+            assert!(!s.refresh_project(&project).await);
+            let events = drain(&mut rx);
+            assert!(
+                matches!(&events[..], [SyncEvent::Failed { task: SyncTask::Resolve, error }]
+                    if error.is_not_found() && error.to_string().contains("tviles/3")),
+                "{events:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn incremental_uses_the_updated_filter() {
         let (t, s, mut rx) = setup(2000);
@@ -687,7 +931,8 @@ mod tests {
         let t = Arc::new(FixtureTransport::new());
         let (tx, _rx) = mpsc::unbounded_channel();
         let s = Syncer::with_profile(
-            Arc::new(Backend::Github(Github::new(t.clone()))),
+            github_only(&t),
+            Some(Provider::Github),
             tx,
             2000,
             SyncProfile {
@@ -805,7 +1050,11 @@ mod tests {
     async fn a_panicking_send_still_reports_one_op_done() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let s = Syncer::with_profile(
-            Arc::new(Backend::Github(Github::new(Arc::new(Panicking)))),
+            Backends {
+                github: Some(Arc::new(Backend::Github(Github::new(Arc::new(Panicking))))),
+                linear: None,
+            },
+            Some(Provider::Github),
             tx,
             2000,
             SyncProfile {
@@ -836,7 +1085,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_linear_board_without_linear_fails_as_missing_credentials() {
-        let (t, s, mut rx) = setup(2000);
+        let t = Arc::new(FixtureTransport::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let s = Syncer::new(github_only(&t), Some(Provider::Linear), tx, 2000);
         let team: BoardKey = "linear:team:t1".parse().unwrap();
         assert_eq!(s.resolve(&team).await, None);
         let events = drain(&mut rx);
@@ -853,5 +1104,371 @@ mod tests {
             t.requests().is_empty(),
             "nothing is sent for a Linear board"
         );
+    }
+
+    #[tokio::test]
+    async fn a_resolve_takes_its_backend_from_the_board_not_the_job() {
+        // No board open (the job has no provider), and no Linear credentials.
+        let t = Arc::new(FixtureTransport::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let s = Syncer::new(github_only(&t), None, tx, 2000);
+        assert_eq!(s.resolve(&linear_team()).await, None);
+        assert!(matches!(
+            drain(&mut rx).as_slice(),
+            [SyncEvent::Failed {
+                task: SyncTask::Resolve,
+                error: BackendError::NoCredentials {
+                    provider: Provider::Linear
+                },
+            }]
+        ));
+        assert!(t.requests().is_empty());
+
+        // A GitHub job tag does not send a Linear board to GitHub.
+        let (gh, lin, s, mut rx) = setup_both(Provider::Github);
+        lin.push(
+            "ResolveTeamBoard",
+            json!({"viewer": {"id": "u-1"}, "organization": {"urlKey": "acme"},
+                   "team": {"id": TEAM, "key": "TBA", "name": "Testbed A", "cyclesEnabled": true}}),
+        );
+        let schema = crate::linear::convert::tests::schema_json()
+            .to_string()
+            .replace("team-a", TEAM);
+        lin.push("BoardSchema", serde_json::from_str(&schema).unwrap());
+        lin.push(
+            "TeamProjects",
+            crate::linear::convert::tests::team_projects_json(),
+        );
+        assert!(s.resolve(&linear_team()).await.is_some());
+        assert!(matches!(drain(&mut rx).as_slice(), [SyncEvent::Project(_)]));
+        assert!(gh.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_linear_board_goes_to_the_linear_backend() {
+        let (gh, lin, s, mut rx) = setup_both(Provider::Linear);
+        lin.push(
+            "ResolveTeamBoard",
+            json!({"viewer": {"id": "u-1"}, "organization": {"urlKey": "acme"},
+                   "team": {"id": TEAM, "key": "TBA", "name": "Testbed A", "cyclesEnabled": true}}),
+        );
+        let schema = crate::linear::convert::tests::schema_json()
+            .to_string()
+            .replace("team-a", TEAM);
+        lin.push("BoardSchema", serde_json::from_str(&schema).unwrap());
+        lin.push(
+            "TeamProjects",
+            crate::linear::convert::tests::team_projects_json(),
+        );
+        let project = s.resolve(&linear_team()).await.expect("resolved");
+        assert_eq!(project.board, linear_team());
+        assert!(
+            matches!(drain(&mut rx).as_slice(), [SyncEvent::Project(p)] if p.board == linear_team())
+        );
+        assert_eq!(lin.requests().len(), 3);
+        assert!(gh.requests().is_empty(), "nothing goes to GitHub");
+    }
+
+    fn viewer_projects() -> serde_json::Value {
+        json!({"viewer": {"login": "acme", "projectsV2": {"nodes": [
+            {"id": "PVT_7", "number": 7, "title": "Sprint", "closed": false,
+             "owner": {"__typename": "User", "login": "acme"}}]},
+            "organizations": {"nodes": []}}})
+    }
+
+    fn list_boards() -> serde_json::Value {
+        json!({"projects": {"nodes": [{"id": "p1", "name": "Launch"}]},
+               "teams": {"nodes": [{"id": "t1", "key": "TBA", "name": "Testbed A"}]}})
+    }
+
+    fn boards_and_notes(events: &[SyncEvent]) -> (Vec<String>, Vec<String>) {
+        match events {
+            [SyncEvent::Projects { boards, notes }] => (
+                boards.iter().map(|b| b.board.to_string()).collect(),
+                notes.clone(),
+            ),
+            other => panic!("expected one Projects event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn one_failing_provider_is_a_note_and_both_failing_is_a_failure() {
+        // Both load: GitHub's boards, then Linear's projects and teams, and no note.
+        let (gh, lin, s, mut rx) = setup_both(Provider::Github);
+        gh.push("ViewerProjects", viewer_projects());
+        lin.push("ListBoards", list_boards());
+        s.projects(None).await;
+        assert_eq!(
+            boards_and_notes(&drain(&mut rx)),
+            (
+                vec![
+                    "acme/7".to_string(),
+                    "linear:project:p1".into(),
+                    "linear:team:t1".into()
+                ],
+                vec![]
+            )
+        );
+
+        // GitHub fails: Linear's boards and a note naming GitHub's error kind.
+        gh.push_error("ViewerProjects", BackendError::Network("offline".into()));
+        lin.push("ListBoards", list_boards());
+        s.projects(None).await;
+        assert_eq!(
+            boards_and_notes(&drain(&mut rx)),
+            (
+                vec!["linear:project:p1".to_string(), "linear:team:t1".into()],
+                vec!["GitHub boards could not be loaded (Network)".to_string()]
+            )
+        );
+
+        // The linked list is GitHub's too.
+        let repo: RepoSlug = "acme/app".parse().unwrap();
+        gh.push_error(
+            "RepoProjects",
+            BackendError::Unauthorized {
+                provider: Provider::Github,
+            },
+        );
+        lin.push("ListBoards", list_boards());
+        s.projects(Some(&repo)).await;
+        assert_eq!(
+            boards_and_notes(&drain(&mut rx)).1,
+            ["GitHub boards could not be loaded (Unauthorized)"]
+        );
+
+        // Linear fails: GitHub's boards and a note naming Linear's error kind.
+        gh.push("ViewerProjects", viewer_projects());
+        lin.push_error("ListBoards", BackendError::Network("offline".into()));
+        s.projects(None).await;
+        assert_eq!(
+            boards_and_notes(&drain(&mut rx)),
+            (
+                vec!["acme/7".to_string()],
+                vec!["Linear boards could not be loaded (Network)".to_string()]
+            )
+        );
+
+        // Both fail: GitHub's error, as today.
+        gh.push_error(
+            "ViewerProjects",
+            BackendError::Unauthorized {
+                provider: Provider::Github,
+            },
+        );
+        lin.push_error("ListBoards", BackendError::Network("offline".into()));
+        s.projects(None).await;
+        assert_eq!(
+            drain(&mut rx),
+            [SyncEvent::Failed {
+                task: SyncTask::Projects,
+                error: BackendError::Unauthorized {
+                    provider: Provider::Github
+                },
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provider_without_credentials_is_a_note() {
+        let syncer = |github: Option<&Arc<FixtureTransport>>,
+                      linear: Option<&Arc<FixtureTransport>>| {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let backends = Backends {
+                github: github.map(|t| Arc::new(Backend::Github(Github::new(t.clone())))),
+                linear: linear.map(|t| Arc::new(Backend::Linear(Linear::new(t.clone())))),
+            };
+            (Syncer::new(backends, None, tx, 2000), rx)
+        };
+        let gh = Arc::new(FixtureTransport::new());
+        let lin = Arc::new(FixtureTransport::new());
+
+        // A Linear-only user: Linear's boards and the GitHub fix, never a failure.
+        let (s, mut rx) = syncer(None, Some(&lin));
+        lin.push("ListBoards", list_boards());
+        s.projects(Some(&"acme/app".parse().unwrap())).await;
+        assert_eq!(
+            boards_and_notes(&drain(&mut rx)),
+            (
+                vec!["linear:project:p1".to_string(), "linear:team:t1".into()],
+                vec!["GitHub boards: run `gh auth login` or set GH_TOKEN".to_string()]
+            )
+        );
+
+        // A GitHub-only user: GitHub's boards and the Linear fix; nothing goes to Linear.
+        let (s, mut rx) = syncer(Some(&gh), None);
+        gh.push("ViewerProjects", viewer_projects());
+        s.projects(None).await;
+        assert_eq!(
+            boards_and_notes(&drain(&mut rx)),
+            (
+                vec!["acme/7".to_string()],
+                vec!["Linear boards: set LINEAR_API_KEY or linear_api_key_command".to_string()]
+            )
+        );
+
+        // A configured key command that gave no key (a dismissed Keychain prompt) is named
+        // instead of the generic fix.
+        let own = Arc::new(FixtureTransport::new());
+        let (s, mut rx) = syncer(Some(&own), None);
+        let s = s.with_linear_key_command(true);
+        own.push("ViewerProjects", viewer_projects());
+        s.projects(None).await;
+        assert_eq!(
+            boards_and_notes(&drain(&mut rx)).1,
+            ["Linear boards: linear_api_key_command gave no key"]
+        );
+
+        // The only configured provider fails: its own error, never GitHub's missing token.
+        let (s, mut rx) = syncer(None, Some(&lin));
+        lin.push_error(
+            "ListBoards",
+            BackendError::Unauthorized {
+                provider: Provider::Linear,
+            },
+        );
+        s.projects(None).await;
+        assert_eq!(
+            drain(&mut rx),
+            [SyncEvent::Failed {
+                task: SyncTask::Projects,
+                error: BackendError::Unauthorized {
+                    provider: Provider::Linear
+                },
+            }]
+        );
+
+        // No provider at all: GitHub's missing token, as today.
+        let (s, mut rx) = syncer(None, None);
+        s.projects(None).await;
+        assert_eq!(
+            drain(&mut rx),
+            [SyncEvent::Failed {
+                task: SyncTask::Projects,
+                error: BackendError::NoCredentials {
+                    provider: Provider::Github
+                },
+            }]
+        );
+        assert_eq!(lin.requests().len(), 2);
+        assert_eq!(gh.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn github_only_jobs_never_use_linear() {
+        let (gh, lin, s, mut rx) = setup_both(Provider::Linear);
+        gh.push(
+            "RepoProjects",
+            json!({"repository": {"projectsV2": {"nodes": []}}}),
+        );
+        gh.push(
+            "RepoCandidates",
+            json!({"repository": {"id": "R_1", "assignableUsers": {"nodes": []},
+            "labels": {"nodes": []}, "milestones": {"nodes": []}}}),
+        );
+        gh.push("SearchContent", json!({"search": {"nodes": []}}));
+        let repo: RepoSlug = "acme/app".parse().unwrap();
+        s.repo_projects(&repo).await;
+        s.candidates(&repo).await;
+        s.search("crash", &[]).await;
+        let events = drain(&mut rx);
+        assert!(
+            !events.iter().any(|e| matches!(e, SyncEvent::Failed { .. })),
+            "{events:?}"
+        );
+        let sent: Vec<String> = gh
+            .requests()
+            .into_iter()
+            .map(|r| r.operation_name)
+            .collect();
+        assert_eq!(sent, ["RepoProjects", "RepoCandidates", "SearchContent"]);
+        assert!(lin.requests().is_empty(), "nothing goes to Linear");
+    }
+
+    #[tokio::test]
+    async fn a_linear_poll_reports_trashed_issues_as_removed() {
+        let (gh, lin, s, mut rx) = setup_both(Provider::Linear);
+        let mut issue = crate::linear::convert::tests::issue_json();
+        issue["id"] = json!("i-1");
+        lin.push(
+            "PollIssues",
+            json!({"issues": {"pageInfo": {"hasNextPage": false, "endCursor": null},
+                   "nodes": [issue, {"id": "i-9", "trashed": true}]}}),
+        );
+        let project = ProjectId::new(linear_team().to_string());
+        assert!(s.incremental(&project, "2026-10-01T11:58:00Z").await);
+        let events = drain(&mut rx);
+        assert!(
+            matches!(&events[0], SyncEvent::ItemsUpdated { items, removed, .. }
+                if items.len() == 1 && items[0].id.as_str() == "i-1"
+                    && removed == &[ItemId::new("i-9")]),
+            "{events:?}"
+        );
+        let request = &lin.requests()[0];
+        assert_eq!(request.variables["first"], 50);
+        assert_eq!(
+            request.variables["filter"]["and"][1],
+            json!({"updatedAt": {"gt": "2026-10-01T11:58:00Z"}}),
+            "polled by date-time"
+        );
+        assert!(gh.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_linear_board_loads_lists_and_details_through_linear() {
+        let (gh, lin, s, mut rx) = setup_both(Provider::Linear);
+        let project = ProjectId::new(linear_team().to_string());
+        let mut issue = crate::linear::convert::tests::issue_json();
+        issue["id"] = json!("i-1");
+        let page = |nodes: Vec<serde_json::Value>| json!({"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": nodes});
+        lin.push("BoardIssues", json!({"issues": page(vec![issue.clone()])}));
+        lin.push(
+            "IssueIds",
+            json!({"issues": page(vec![json!({"id": "i-2"})])}),
+        );
+        lin.push("IssuesById", json!({"issues": {"nodes": [issue]}}));
+        lin.push(
+            "IssueDetail",
+            json!({"issue": {"id": "i-1", "comments": {"nodes": []}}}),
+        );
+        s.full_load(&project).await;
+        let query = ListQuery {
+            filter: ViewFilter::Linear(json!({"priority": {"eq": 1}})),
+            include_archived: false,
+        };
+        s.view_ids(&project, &ViewId::new("V"), &query, &HashSet::new(), true)
+            .await;
+        s.detail(&ItemId::new("i-1"), None).await;
+        let events = drain(&mut rx);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, SyncEvent::ItemsComplete { items, .. } if items.len() == 1))
+        );
+        assert!(events.iter().any(
+            |e| matches!(e, SyncEvent::ViewIds { list, .. } if list.ids == [ItemId::new("i-2")])
+        ));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, SyncEvent::Hydrated(items) if items.len() == 1))
+        );
+        assert!(events.iter().any(|e| matches!(e, SyncEvent::Detail { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, SyncEvent::Access { scopes: None }))
+        );
+        let sent: Vec<String> = lin
+            .requests()
+            .into_iter()
+            .map(|r| r.operation_name)
+            .collect();
+        assert_eq!(
+            sent,
+            ["BoardIssues", "IssueIds", "IssuesById", "IssueDetail"]
+        );
+        assert_eq!(lin.requests()[0].variables["first"], 100);
+        assert!(gh.requests().is_empty());
     }
 }
