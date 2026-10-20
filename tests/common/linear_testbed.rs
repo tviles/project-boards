@@ -9,10 +9,19 @@ pub const ENDPOINT: &str = "https://api.linear.app/graphql";
 const KEYCHAIN_SERVICE: &str = "project-boards-linear-testbed";
 
 /// Where the testbed key comes from. Never `LINEAR_API_KEY`: that is the user's own workspace.
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
 pub enum KeySource {
     Env(String),
     Keychain(Vec<String>),
+}
+
+impl std::fmt::Debug for KeySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KeySource::Env(_) => f.write_str("Env(<redacted>)"),
+            KeySource::Keychain(argv) => write!(f, "Keychain({argv:?})"),
+        }
+    }
 }
 
 pub fn key_source(env: impl Fn(&str) -> Option<String>) -> KeySource {
@@ -166,20 +175,43 @@ impl Raw {
     }
 }
 
+/// The error-probe client's restriction: only `TestbedViewer`, checked before any request.
+pub fn viewer_only_check(body: &impl serde::Serialize) -> Result<(), String> {
+    let operation = serde_json::to_value(body)
+        .ok()
+        .and_then(|v| v["operationName"].as_str().map(String::from));
+    if operation.as_deref() == Some("TestbedViewer") {
+        Ok(())
+    } else {
+        Err("only TestbedViewer may be sent without the workspace guard".into())
+    }
+}
+
 pub struct Linear {
     http: reqwest::Client,
     key: String,
+    /// Set for the error probes' deliberately bad keys: only `TestbedViewer` may be sent.
+    viewer_only: bool,
 }
 
 impl Linear {
-    /// No workspace check: only for probe L6's deliberately bad key.
-    pub fn unguarded(key: String) -> Self {
+    /// No workspace check, so it can send nothing but `TestbedViewer`: for probe L6's
+    /// deliberately bad or revoked keys.
+    pub fn for_error_probe(key: String) -> Self {
+        Self::build(key, true)
+    }
+
+    fn build(key: String, viewer_only: bool) -> Self {
         let http = reqwest::Client::builder()
             .user_agent("project-boards-testbed")
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("reqwest client builds");
-        Self { http, key }
+        Self {
+            http,
+            key,
+            viewer_only,
+        }
     }
 
     /// The testbed client: resolves the testbed key and checks the workspace before
@@ -187,7 +219,7 @@ impl Linear {
     pub async fn connect(testbed: &Testbed) -> Result<Self, String> {
         use graphql_client::GraphQLQuery;
         use project_boards_queries::linear::{TestbedViewer, testbed_viewer};
-        let me = Self::unguarded(resolve_key()?);
+        let me = Self::build(resolve_key()?, false);
         let raw = me
             .post(&TestbedViewer::build_query(testbed_viewer::Variables {}))
             .await?;
@@ -199,10 +231,16 @@ impl Linear {
     }
 
     pub async fn post(&self, body: &impl serde::Serialize) -> Result<Raw, String> {
+        if self.viewer_only {
+            viewer_only_check(body)?;
+        }
+        let mut key = reqwest::header::HeaderValue::from_str(&self.key)
+            .map_err(|_| "the testbed key is not a valid header value".to_string())?;
+        key.set_sensitive(true);
         let response = self
             .http
             .post(ENDPOINT)
-            .header("Authorization", &self.key)
+            .header(reqwest::header::AUTHORIZATION, key)
             .json(body)
             .send()
             .await

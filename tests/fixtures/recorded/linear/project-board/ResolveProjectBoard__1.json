@@ -1,0 +1,60 @@
+{
+  "data": {
+    "organization": {
+      "urlKey": "testbed-workspace"
+    },
+    "project": {
+      "facets": [
+        {
+          "targetCustomView": {
+            "id": "a1677472-4cf7-4979-ba3a-51aa92c5d81d",
+            "modelName": "Issue",
+            "name": "Probe project view",
+            "team": null,
+            "viewPreferencesValues": {
+              "fieldAssignee": true,
+              "fieldCycle": true,
+              "fieldDateCreated": true,
+              "fieldDateUpdated": false,
+              "fieldDueDate": true,
+              "fieldEstimate": true,
+              "fieldLabels": true,
+              "fieldPriority": true,
+              "fieldProject": true,
+              "fieldStatus": true,
+              "issueGrouping": "workflowState",
+              "issueGroupingLabelGroupId": null,
+              "issueSubGrouping": "none",
+              "issueSubGroupingLabelGroupId": null,
+              "layout": "board",
+              "showCompletedIssues": "all",
+              "viewOrdering": "priority",
+              "viewOrderingDirection": null
+            }
+          }
+        }
+      ],
+      "id": "a0821225-6d31-4a7c-b6e0-7d88ee536155",
+      "name": "Testbed project",
+      "slugId": "66057972a170",
+      "teams": {
+        "nodes": [
+          {
+            "cyclesEnabled": false,
+            "id": "c59cfcab-1892-4bed-bc9f-f29ee34acfdd",
+            "key": "TBB"
+          },
+          {
+            "cyclesEnabled": true,
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0",
+            "key": "TBA"
+          }
+        ]
+      },
+      "url": "https://linear.app/testbed-workspace/project/testbed-project-66057972a170"
+    },
+    "viewer": {
+      "id": "f4af6b5a-208f-4947-b8a3-b6da54a82cce"
+    }
+  }
+}

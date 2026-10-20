@@ -1,0 +1,26 @@
+{
+  "data": {
+    "projects": {
+      "nodes": [
+        {
+          "id": "a0821225-6d31-4a7c-b6e0-7d88ee536155",
+          "name": "Testbed project"
+        }
+      ]
+    },
+    "teams": {
+      "nodes": [
+        {
+          "id": "c59cfcab-1892-4bed-bc9f-f29ee34acfdd",
+          "key": "TBB",
+          "name": "Testbed B"
+        },
+        {
+          "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0",
+          "key": "TBA",
+          "name": "Testbed A"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "data": {
+    "team": {
+      "projects": {
+        "nodes": [
+          {
+            "id": "a0821225-6d31-4a7c-b6e0-7d88ee536155",
+            "name": "Testbed project"
+          }
+        ]
+      }
+    }
+  }
+}

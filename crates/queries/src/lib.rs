@@ -82,16 +82,33 @@ operation!(
 )]
 pub struct DeleteIssue;
 
-/// Linear operations, validated against graphql/linear/schema.graphql. Phase 0 only for now.
-#[cfg(feature = "live")]
+/// Linear operations, validated against graphql/linear/schema.graphql. The app's operations
+/// (linear.graphql) are always built; the phase 0 testbed tooling is behind `live`.
 pub mod linear {
     use graphql_client::GraphQLQuery;
 
     type DateTime = String;
     type TimelessDate = String;
     type DateTimeOrDuration = String;
+    type Duration = String;
+    type TimelessDateOrDuration = String;
+    type JSONObject = String;
+    type JSON = String;
 
     macro_rules! linear_operation {
+        ($($name:ident),* $(,)?) => {$(
+            #[derive(GraphQLQuery)]
+            #[graphql(
+                schema_path = "graphql/linear/schema.graphql",
+                query_path = "graphql/linear/linear.graphql",
+                variables_derives = "Debug, Clone"
+            )]
+            pub struct $name;
+        )*};
+    }
+
+    #[cfg(feature = "live")]
+    macro_rules! testbed_operation {
         ($($name:ident),* $(,)?) => {$(
             #[derive(GraphQLQuery)]
             #[graphql(
@@ -104,6 +121,23 @@ pub mod linear {
     }
 
     linear_operation!(
+        ResolveProjectBoard,
+        ResolveTeamBoard,
+        TeamByKey,
+        BoardSchema,
+        TeamProjects,
+        BoardIssues,
+        PollIssues,
+        IssueIds,
+        CustomViewIssueIds,
+        IssuesById,
+        IssueDetail,
+        ListBoards,
+        LinearViewer,
+    );
+
+    #[cfg(feature = "live")]
+    testbed_operation!(
         TestbedViewer,
         SeedTeams,
         SeedRenameTeam,

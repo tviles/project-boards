@@ -1,7 +1,7 @@
 //! A Transport that replays queued responses. Used by every offline test.
 
 use crate::error::{BackendError, GraphqlErrorEntry};
-use crate::github::transport::{
+use crate::transport::{
     BoxFuture, GraphqlRequest, GraphqlResponse, RateInfo, Transport, interpret_body_keeping_errors,
 };
 use std::collections::{HashMap, VecDeque};

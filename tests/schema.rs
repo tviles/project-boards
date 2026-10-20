@@ -72,6 +72,13 @@ const LINEAR_REQUIRED: &[&str] = &[
     "issueUpdate(",
     "customViews(",
     "rateLimitStatus: RateLimitPayload!",
+    "facets: [Facet!]!",
+    "targetCustomView: CustomView",
+    "groupType: LabelGroupType",
+    "issueGroupingLabelGroupId: String",
+    "issueSubGroupingLabelGroupId: String",
+    "includeArchived: Boolean",
+    "trashed: Boolean",
 ];
 
 #[test]
@@ -83,5 +90,29 @@ fn linear_schema_has_everything_we_use() {
             schema.contains(needle),
             "Linear schema is missing `{needle}`"
         );
+    }
+}
+
+#[test]
+fn linear_operations_expose_names_and_fragments() {
+    use project_boards_queries::linear::*;
+    assert_eq!(resolve_project_board::OPERATION_NAME, "ResolveProjectBoard");
+    assert_eq!(resolve_team_board::OPERATION_NAME, "ResolveTeamBoard");
+    assert_eq!(team_by_key::OPERATION_NAME, "TeamByKey");
+    assert_eq!(board_schema::OPERATION_NAME, "BoardSchema");
+    assert_eq!(team_projects::OPERATION_NAME, "TeamProjects");
+    assert_eq!(board_issues::OPERATION_NAME, "BoardIssues");
+    assert_eq!(poll_issues::OPERATION_NAME, "PollIssues");
+    assert_eq!(issue_ids::OPERATION_NAME, "IssueIds");
+    assert_eq!(custom_view_issue_ids::OPERATION_NAME, "CustomViewIssueIds");
+    assert_eq!(issues_by_id::OPERATION_NAME, "IssuesById");
+    assert_eq!(issue_detail::OPERATION_NAME, "IssueDetail");
+    assert_eq!(list_boards::OPERATION_NAME, "ListBoards");
+    assert_eq!(linear_viewer::OPERATION_NAME, "LinearViewer");
+    for q in [board_issues::QUERY, poll_issues::QUERY, issues_by_id::QUERY] {
+        assert!(q.contains("fragment IssueFields"));
+    }
+    for q in [resolve_project_board::QUERY, board_schema::QUERY] {
+        assert!(q.contains("fragment ViewFields"));
     }
 }

@@ -87,3 +87,32 @@ fn the_checked_in_testbed_file_parses_and_has_invented_team_keys() {
     assert_eq!((tb.team_a.as_str(), tb.team_b.as_str()), ("TBA", "TBB"));
     assert_eq!(tb.url_key, "project-boards-linear-testbed");
 }
+
+#[test]
+fn a_key_source_never_prints_the_key() {
+    let source = key_source(|k| (k == "PB_LINEAR_TESTBED_KEY").then(|| "lin_api_invented".into()));
+    let shown = format!("{source:?}");
+    assert!(!shown.contains("lin_api_invented"), "{shown}");
+    assert_eq!(shown, "Env(<redacted>)");
+}
+
+#[tokio::test]
+async fn an_unguarded_client_sends_only_the_viewer_check() {
+    use graphql_client::GraphQLQuery;
+    use project_boards_queries::linear::{SeedTeams, seed_teams};
+    let client = Linear::for_error_probe("lin_api_invented".into());
+    let body = SeedTeams::build_query(seed_teams::Variables {});
+    let err = client.post(&body).await.unwrap_err();
+    assert_eq!(
+        err,
+        "only TestbedViewer may be sent without the workspace guard"
+    );
+}
+
+#[test]
+fn the_viewer_check_passes_the_viewer_operation() {
+    use graphql_client::GraphQLQuery;
+    use project_boards_queries::linear::{TestbedViewer, testbed_viewer};
+    let body = TestbedViewer::build_query(testbed_viewer::Variables {});
+    assert_eq!(viewer_only_check(&body), Ok(()));
+}
