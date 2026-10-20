@@ -1,8 +1,8 @@
 # project-boards
 
-A [herdr](https://herdr.dev) plugin for GitHub Projects: see your project board as a table or a kanban board, switch between its saved views, filter and search it, and read any item, without leaving the terminal.
+A [herdr](https://herdr.dev) plugin for GitHub Projects and Linear: see your project board as a table or a kanban board, switch between its saved views, filter and search it, and read any item, without leaving the terminal.
 
-Edit the board without leaving herdr: move cards, reorder them, set any field, assign people, label, set milestones, retitle, edit bodies, comment, close and reopen, add new issues, drafts or existing items, convert drafts, archive and remove. Edits show at once and are sent in the background; a failed one is undone and listed in the error log. Saving views and bulk edits arrive in 0.4.
+Edit a GitHub board without leaving herdr: move cards, reorder them, set any field, assign people, label, set milestones, retitle, edit bodies, comment, close and reopen, add new issues, drafts or existing items, convert drafts, archive and remove. Edits show at once and are sent in the background; a failed one is undone and listed in the error log. Linear boards are read-only for now (see [Linear](#linear)); editing them arrives in 0.5, and saving views and bulk edits in 0.6.
 
 ## Install
 
@@ -11,6 +11,8 @@ Edit the board without leaving herdr: move cards, reorder them, set any field, a
 Requires herdr 0.9.0 or newer, macOS or Linux, and a GitHub token with the `project` scope (and `repo`, or `public_repo`, to edit issues):
 
     gh auth refresh -s project -s repo
+
+For Linear boards, add a Linear API key instead or as well (see [Linear](#linear)).
 
 Releases install a prebuilt binary. Installing from `main` between releases builds from source and needs a Rust toolchain, 1.88 or newer.
 
@@ -25,7 +27,9 @@ Other actions: `open-picker`, `open-overlay`, `open-split`, `open-zoomed`, `doct
 
 ## Use
 
-The board opens for the repository of the focused pane (the board you last used there, else its linked board, else a picker). Opening it again focuses the existing pane.
+The board opens for the repository of the focused pane (the board you last used there, else its linked board, else a picker). Opening it again focuses the existing pane. The picker lists your GitHub boards, then Linear projects and teams when a Linear key is configured; a board that no longer exists is forgotten, and the picker opens with "board not found".
+
+From a shell, the plugin's binary (`bin/project-boards` in the plugin's directory) opens a given board: `project-boards open --project OWNER/NUMBER` for a GitHub board, or `--project linear:team:KEY` (a team key such as `ENG`), `--project linear:project:SLUG` (the project's slug, as in its URL) or `--project https://linear.app/<workspace>/project/<slug>` for a Linear board.
 
 | Key | Action |
 |---|---|
@@ -47,7 +51,7 @@ The board opens for the repository of the focused pane (the board you last used 
 | `Enter` | item detail (collapse a group in the table) |
 | `z` | collapse or expand a group |
 | `/` | quick search |
-| `f` | add a filter on top of the view's GitHub filter (GitHub filter syntax; this session only) |
+| `f` | add a filter on top of the view's own filter (GitHub filter syntax; this session only) |
 | `x` | clear the filter added with `f` |
 | `o` | open in the browser |
 | `B` | switch board |
@@ -90,6 +94,7 @@ Apart from the fixed `Ctrl+C` quit, no default key uses Ctrl, so herdr's prefix 
     max_items = 2000
     placement = "tab"                  # tab | overlay | split | zoomed
     gh_user = "my-login"               # gh account for `gh auth token --user`, used when GH_TOKEN and GITHUB_TOKEN are not set; default: active account
+    linear_api_key_command = ["security", "find-generic-password", "-s", "project-boards-linear", "-w"]  # prints the Linear API key; used when LINEAR_API_KEY is not set
 
     [keys]
     next_view = "]"                    # action = key
@@ -102,6 +107,27 @@ Editing needs a classic token with the `project` scope for every board edit (and
 
 The token comes from `GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token`, in that order. If you have several `gh` accounts, `gh_user` in `config.toml` picks which one's token the plugin uses, without changing your active account. Boards owned by a user account need a classic token or the `gh` login (`gh auth login`, then `gh auth refresh -s project`): GitHub does not let fine-grained tokens read them. Fine-grained tokens work for organisation boards when they have the organisation's Projects permission.
 
+## Linear
+
+Linear boards need a personal API key: in Linear, open Settings → Security & access, and create a personal API key. Give it to the plugin in one of two ways:
+
+- Store it in the macOS Keychain (the command prompts for the key):
+
+      security add-generic-password -s project-boards-linear -a "$USER" -w
+
+  and point `config.toml` at it:
+
+      linear_api_key_command = ["security", "find-generic-password", "-s", "project-boards-linear", "-w"]
+
+  The command runs directly, without a shell, and its trimmed output is the key. Any program that prints the key works: `op read`, `pass show` or `secret-tool lookup`, for example. It is given 20 seconds, so a dismissed password prompt cannot hang the pane.
+- Or set `LINEAR_API_KEY`, which is used first when it is set.
+
+The key is never logged, cached or written to a file. One key reaches one workspace; `doctor` prints which one, and the picker shows a dim line naming the fix when no key is found.
+
+A Linear board is a project (its issues, across its teams) or a team (all its issues), opened from the picker or with `open --project` (see [Use](#use)). Its tabs are Board, All issues and My issues, then the project's views (on a project board), then the shared views of its teams and of the workspace. The detail shows the description, threaded comments, parent and sub-issues, project, cycle, priority, estimate, due date and links; a reference such as `ENG-123` jumps to that issue. Other people's changes show within one poll interval.
+
+Linear boards are read-only until 0.5: the edit keys say "Editing Linear boards arrives in 0.5". `f` takes the same syntax as on GitHub (`priority:high`, `cycle:@current`, `assignee:@me`, `-label:x`, `no:assignee`, free text), but the plugin evaluates it over the view's loaded issues instead of sending it to the server. A field it does not know, such as a typo like `stauts:Todo`, flashes "unknown filter field" and matches nothing, rather than being ignored. `/` and "Show archived items" work as on GitHub.
+
 ## Troubleshooting
 
 - `herdr plugin log list --plugin tviles.project-boards` shows action output.
@@ -112,4 +138,4 @@ The token comes from `GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token`, in that ord
 
 ## Privacy
 
-The plugin talks only to `api.github.com`. It caches board data (never the token) in its state directory. No telemetry.
+The plugin talks only to `api.github.com`, and to `api.linear.app` when a Linear key is configured. It caches board data (never the token or the API key) in its state directory. No telemetry.

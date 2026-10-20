@@ -54,3 +54,20 @@ Setup: `cargo build --release && herdr plugin link .`, keybinding for `tviles.pr
 - [ ] `n` → New issue offers this pane's repository first, then opens the "New issue in owner/name" form; the issue appears on github.com in the project; `Esc` in the repository picker returns to the New item menu.
 - [ ] `n` → Add existing finds an issue by text and by pasted URL; one already on the board is selected instead.
 - [ ] `C` on a draft converts it to an issue in the chosen repository.
+
+## Linear (0.4)
+
+Setup: the testbed workspace's key in `LINEAR_API_KEY` (or `linear_api_key_command`), the GitHub token as above, and the same pane in the testbed clone. Never point this at a real workspace.
+
+- [ ] `open-picker` lists the GitHub boards, then "Testbed project" under Linear projects, then TBA and TBB under Linear teams; picking TBA opens it with the team's name and `· Linear` in the header, `loading` at first, then neither.
+- [ ] Quit and press the key again in the same pane: TBA reopens directly, without the picker. `project-boards open --project linear:team:TBA` from a shell focuses the same tab.
+- [ ] The Board tab shows Status columns from the workflow states in Linear's order (backlog, then unstarted, started, completed); on the project board, states that TBA and TBB share by name are one column, and no canceled or duplicate issues show.
+- [ ] `Tab` reaches Board, All issues, My issues, then the team view "Testbed A bugs" and the workspace view "Testbed open"; on the project board (`linear:project:…` from the picker) the project's own view comes right after the built-in tabs.
+- [ ] `f` + `priority:high` shows only High issues; `f` + `cycle:@current` shows only the current cycle's issues; `x` clears it.
+- [ ] `f` + `stauts:Todo` flashes "unknown filter field: stauts" and the view is empty.
+- [ ] `Enter` on an issue with sub-issues shows its description, threaded comments (a reply indented under its comment), the parent (on a sub-issue), the sub-issues with their states, and its links; a `TBA-…` reference in the text jumps to that issue.
+- [ ] Change an issue's status in Linear's web app: the board shows it within one poll interval (30 seconds while focused).
+- [ ] `e`, `<`, `>`, `a`, `t`, `c`, `X`, `n` and `A` each say "Editing Linear boards arrives in 0.5"; `Space` offers only "Open in the browser" and "Show archived items"; `o` opens the issue on linear.app.
+- [ ] `doctor` prints `linear key: from LINEAR_API_KEY` and `linear: workspace project-boards-linear-testbed; … requests left`.
+- [ ] Without `LINEAR_API_KEY` (and no `linear_api_key_command`): the picker shows one dim line "Linear boards: set LINEAR_API_KEY or linear_api_key_command" and no Linear sections, `doctor` prints `linear: not configured (optional)`, and the testbed GitHub board works as in 0.3 (open, move a card, `f` help reads "add a filter on top of the view's own filter").
+- [ ] With no credentials at all (`GH_TOKEN`, `GITHUB_TOKEN` and `LINEAR_API_KEY` unset, no `linear_api_key_command`, and `gh_user = "no-such-account"` in `config.toml` so `gh auth token` gives nothing): the setup screen lists the GitHub fix, "— or —", then the Linear fix.
