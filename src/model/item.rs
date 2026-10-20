@@ -41,6 +41,15 @@ pub enum FieldValue {
 }
 
 impl FieldValue {
+    /// The people of a `Users` or `Reviewers` value, names only, joined by ", "; `None` for
+    /// any other value. Linear shows display names, which take no `@`.
+    pub fn display_names(&self) -> Option<String> {
+        match self {
+            Self::Users(users) | Self::Reviewers(users) => Some(users.join(", ")),
+            _ => None,
+        }
+    }
+
     pub fn display(&self) -> String {
         match self {
             Self::Text(t) | Self::Date(t) | Self::Milestone(t) | Self::Repository(t) => t.clone(),

@@ -1,4 +1,4 @@
-use crate::model::field::{Field, find_field};
+use crate::model::field::{Field, OptionKind, find_field};
 use crate::model::ids::{FieldId, ViewId};
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +26,20 @@ impl ViewFilter {
             Self::Github(q) => q,
             Self::LinearView { .. } | Self::Linear(_) => "",
         }
+    }
+
+    /// The workflow-state kinds a Linear filter leaves out at its top level
+    /// (`state.type.nin`); empty for anything else.
+    pub fn excluded_state_kinds(&self) -> Vec<OptionKind> {
+        let Self::Linear(v) = self else {
+            return Vec::new();
+        };
+        v["state"]["type"]["nin"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|k| k.as_str().and_then(OptionKind::from_linear))
+            .collect()
     }
 
     /// Whether the filter selects every item, so no list is needed.
@@ -253,6 +267,26 @@ mod tests {
                 serde_json::from_str(&serde_json::to_string(&f).unwrap()).unwrap();
             assert_eq!(back, f);
         }
+    }
+
+    #[test]
+    fn the_board_tab_excludes_canceled_and_duplicate() {
+        use crate::model::field::OptionKind;
+        let board = ViewFilter::Linear(crate::linear::views::board_tab_filter());
+        assert_eq!(
+            board.excluded_state_kinds(),
+            [OptionKind::Canceled, OptionKind::Duplicate]
+        );
+        assert!(
+            ViewFilter::Linear(serde_json::json!({}))
+                .excluded_state_kinds()
+                .is_empty()
+        );
+        assert!(
+            ViewFilter::Github("x".into())
+                .excluded_state_kinds()
+                .is_empty()
+        );
     }
 
     #[test]

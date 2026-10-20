@@ -137,8 +137,14 @@ pub fn cell_text(item: &Item, field: &Field) -> String {
             None => item.title().to_string(),
         };
     }
+    let keyed = item.reference().is_some_and(|r| r.key.is_some());
     item.field_value(field)
-        .map(|v| v.display())
+        .map(|v| {
+            keyed
+                .then(|| v.display_names())
+                .flatten()
+                .unwrap_or_else(|| v.display())
+        })
         .unwrap_or_default()
 }
 
@@ -333,6 +339,22 @@ mod tests {
         assert_eq!(cell_text(&item, title), format!("new {}", item.title()));
         let draft = &items()[3];
         assert_eq!(cell_text(draft, title), draft.title());
+    }
+
+    #[test]
+    fn linear_assignees_show_without_at() {
+        let p = project();
+        let assignees = p.fields.iter().find(|f| f.name == "Assignees").unwrap();
+        let mut item = items()[0].clone();
+        assert_eq!(cell_text(&item, assignees), "@tviles");
+        item.values.insert(
+            assignees.id.clone(),
+            FieldValue::Users(vec!["Ada Lovelace".into(), "Bo Peep".into()]),
+        );
+        if let ItemContent::Issue { reference, .. } = &mut item.content {
+            reference.key = Some("TBA-1".into());
+        }
+        assert_eq!(cell_text(&item, assignees), "Ada Lovelace, Bo Peep");
     }
 
     #[test]

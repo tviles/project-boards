@@ -158,6 +158,9 @@ pub struct Filter {
     terms: Vec<Term>,
     /// Keys that name nothing: lowercase, in typed order, once each.
     unknown: Vec<String>,
+    /// `is:` values this build does not read, as `is:<value>`: lowercase, in typed order,
+    /// once each.
+    unknown_values: Vec<String>,
     /// `OR`, `AND` or parentheses appear, so `constraint` reads nothing.
     grouped: bool,
 }
@@ -437,6 +440,7 @@ impl Filter {
         let tokens = tokens(text);
         let grouped = tokens.iter().any(|t| is_grouping(t));
         let mut terms = Vec::new();
+        let mut unknown_values: Vec<String> = Vec::new();
         for token in tokens {
             let parsed = if is_grouping(&token) {
                 None
@@ -467,10 +471,21 @@ impl Filter {
                         }
                     }))
                 }
-                "is" => terms.push(Term::Is {
-                    negated,
-                    what: values.iter().map(|v| IsWhat::parse(v)).collect(),
-                }),
+                "is" => {
+                    for v in values.iter().map(|v| v.trim().to_lowercase()) {
+                        let typed = format!("is:{v}");
+                        if !v.is_empty()
+                            && IsWhat::parse(&v) == IsWhat::Other
+                            && !unknown_values.contains(&typed)
+                        {
+                            unknown_values.push(typed);
+                        }
+                    }
+                    terms.push(Term::Is {
+                        negated,
+                        what: values.iter().map(|v| IsWhat::parse(v)).collect(),
+                    })
+                }
                 _ => terms.push(Term::Qualifier {
                     negated,
                     key: Key::resolve(&key, fields),
@@ -487,6 +502,7 @@ impl Filter {
         Filter {
             terms,
             unknown,
+            unknown_values,
             grouped,
         }
     }
@@ -500,6 +516,12 @@ impl Filter {
     /// each.
     pub fn unknown_keys(&self) -> &[String] {
         &self.unknown
+    }
+
+    /// `is:` values this build does not read (`is:closd`): lowercase, as `is:<value>`, in
+    /// typed order, once each. Like an unknown key, such a term matches nothing.
+    pub fn unknown_values(&self) -> &[String] {
+        &self.unknown_values
     }
 
     /// Whether the filter asks for archived items (`is:archived`); they match nothing else.
@@ -921,6 +943,18 @@ mod tests {
                 .unknown_keys()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn unknown_is_values_are_reported() {
+        let f = linear_board();
+        let parsed = Filter::parse("is:closd is:open IS:Closd", &f);
+        assert_eq!(parsed.unknown_values(), ["is:closd"]);
+        assert!(parsed.unknown_keys().is_empty());
+        assert!(!parsed.matches(&item("TBA-1", "x", &[]), &ctx(&f)));
+        for q in ["is:open,closed -is:archived is:", "is:issue,archived"] {
+            assert!(Filter::parse(q, &f).unknown_values().is_empty(), "{q}");
+        }
     }
 
     #[test]

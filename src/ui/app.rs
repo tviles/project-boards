@@ -196,6 +196,23 @@ pub(crate) fn task_words(task: &SyncTask) -> &'static str {
 }
 
 /// The setup screen text for errors the user has to fix outside the app.
+/// Whether every option behind `bucket` (its key and aliases) has a kind in `excluded`. A
+/// bucket with no option (No Status, an iteration) never does.
+fn all_excluded(bucket: &Bucket, field: &Field, excluded: &[OptionKind]) -> bool {
+    let FieldKind::SingleSelect { options } = &field.kind else {
+        return false;
+    };
+    let mut ids = bucket.key.iter().chain(&bucket.aliases).peekable();
+    ids.peek().is_some()
+        && ids.all(|id| {
+            options
+                .iter()
+                .find(|o| o.id.0 == *id)
+                .and_then(|o| o.kind)
+                .is_some_and(|k| excluded.contains(&k))
+        })
+}
+
 pub fn setup_message(error: &BackendError) -> Option<String> {
     use crate::model::Provider::{Github, Linear};
     match error {
@@ -439,6 +456,11 @@ impl App {
             .collect();
         if !keys.is_empty() {
             self.status.flash = Some(format!("unknown filter field: {}", keys.join(", ")));
+        } else if !filter.unknown_values().is_empty() {
+            self.status.flash = Some(format!(
+                "unknown filter value: {}",
+                filter.unknown_values().join(", ")
+            ));
         }
     }
 
@@ -530,7 +552,16 @@ impl App {
             return Vec::new();
         };
         let items = self.view_items().unwrap_or_default();
-        let columns = build_columns(&items, field, view.group_field(&project.fields));
+        let mut columns = build_columns(&items, field, view.group_field(&project.fields));
+        // A Linear view that leaves out states (the Board tab: canceled, duplicate) shows no
+        // empty column for them; one holding a card (a card just moved there) stays.
+        let excluded = view.filter.excluded_state_kinds();
+        if self.is_linear() && !excluded.is_empty() {
+            columns.retain(|c| {
+                !c.lanes.iter().all(|l| l.items.is_empty())
+                    || !all_excluded(&c.bucket, field, &excluded)
+            });
+        }
         let constraint = match self.client_filter(view) {
             Some(filter) => filter.constraint(field, &self.filter_context()),
             None => column_constraint(&self.effective_filter(), field),
@@ -1878,6 +1909,90 @@ mod tests {
         assert_eq!(ids(a.view_items()), Vec::<String>::new());
         a.handle_key(key('j'));
         assert_eq!(a.status.flash, None, "the next key clears it");
+    }
+
+    #[test]
+    fn linear_is_typo_flashes_unknown_value() {
+        let mut a = linear_board();
+        a.select_view(&ViewId::new("V_all"));
+        a.handle_key(key('f'));
+        type_text(&mut a, "is:closd is:open");
+        a.handle_key(code(KeyCode::Enter));
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("unknown filter value: is:closd")
+        );
+    }
+
+    #[test]
+    fn the_linear_board_tab_hides_empty_canceled_and_duplicate_columns() {
+        use crate::model::field::{OptionKind, SelectOption};
+        let mut a = linear_board();
+        let mut snap = a.snapshot().unwrap().clone();
+        let p = &mut snap.project;
+        let status = p.fields.iter_mut().find(|f| f.name == "Status").unwrap();
+        let FieldKind::SingleSelect { options } = &mut status.kind else {
+            panic!("status is a single select")
+        };
+        for (o, kind) in options.iter_mut().zip([
+            OptionKind::Unstarted,
+            OptionKind::Started,
+            OptionKind::Completed,
+        ]) {
+            o.kind = Some(kind);
+        }
+        for (id, name, kind) in [
+            ("o_canceled", "Canceled", OptionKind::Canceled),
+            ("o_dup", "Duplicate", OptionKind::Duplicate),
+        ] {
+            options.push(SelectOption {
+                id: OptionId::new(id),
+                name: name.into(),
+                color: OptionColor::Gray,
+                kind: Some(kind),
+            });
+        }
+        let view = p.views.iter_mut().find(|v| v.id.0 == "V_cycles").unwrap();
+        view.vertical_group_by = vec![FieldId::new("F_status")];
+        view.filter = ViewFilter::Linear(crate::linear::views::board_tab_filter());
+        a.store.apply(StoreUpdate::Replace(snap));
+        a.select_view(&ViewId::new("V_cycles"));
+        let query = a.list_query(a.current_view().unwrap()).unwrap();
+        a.on_sync(SyncEvent::ViewIds {
+            view: ViewId::new("V_cycles"),
+            query,
+            list: ViewList {
+                ids: ["a", "b", "c", "e"].map(ItemId::new).to_vec(),
+                total: 4,
+                truncated: false,
+            },
+        });
+        let titles = |a: &App| -> Vec<String> {
+            a.board_columns()
+                .iter()
+                .map(|c| c.bucket.title.clone())
+                .collect()
+        };
+        let shown = titles(&a);
+        assert!(shown.contains(&"Todo".to_string()), "{shown:?}");
+        assert!(!shown.contains(&"Canceled".to_string()), "{shown:?}");
+        assert!(!shown.contains(&"Duplicate".to_string()), "{shown:?}");
+
+        // A card moved into Canceled keeps the column for this visit.
+        let id = ItemId::new("b");
+        a.stick(&id);
+        let mut snap = a.snapshot().unwrap().clone();
+        snap.items.get_mut(&id).unwrap().values.insert(
+            FieldId::new("F_status"),
+            FieldValue::SingleSelect {
+                option_id: OptionId::new("o_canceled"),
+                name: "Canceled".into(),
+            },
+        );
+        a.store.apply(StoreUpdate::Replace(snap));
+        let shown = titles(&a);
+        assert!(shown.contains(&"Canceled".to_string()), "{shown:?}");
+        assert!(!shown.contains(&"Duplicate".to_string()), "{shown:?}");
     }
 
     #[test]
