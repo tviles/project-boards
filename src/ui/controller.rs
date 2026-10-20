@@ -120,6 +120,9 @@ impl SyncJob {
     }
 }
 
+// One short-lived value per controller step; `SyncJob` carries a whole `Project` on
+// refresh, which a Linear board's team ownership (`LinearMeta`) made larger.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// `generation` is the controller's generation when the effect was produced; the shell

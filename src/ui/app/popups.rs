@@ -1951,6 +1951,7 @@ mod tests {
             url_key: "acme".into(),
             viewer_id: "U_tviles".into(),
             team_keys: vec!["TBA".into()],
+            ..Default::default()
         });
         a.store.apply(crate::store::StoreUpdate::Replace(snap));
         assert!(a.handle_key(key(' ')).is_empty());

@@ -244,6 +244,33 @@ async fn team_board_fixture_decodes() {
         field(&project, ids::CYCLE).kind,
         FieldKind::Iteration { .. }
     ));
+
+    // Every state and cycle is TBA's, and so is the Type group (its `team` added by hand
+    // until Task 16 re-records).
+    let meta = project.linear.as_ref().unwrap();
+    assert_eq!(
+        meta.teams,
+        [TeamMeta {
+            id: TBA_ID.into(),
+            key: "TBA".into()
+        }]
+    );
+    let owner = |id: &str| meta.owners.get(id).map(String::as_str);
+    assert!(status.iter().all(|o| owner(o.id.as_str()) == Some(TBA_ID)));
+    let FieldKind::Iteration {
+        iterations,
+        completed,
+    } = &field(&project, ids::CYCLE).kind
+    else {
+        unreachable!()
+    };
+    assert!(
+        iterations
+            .iter()
+            .chain(completed)
+            .all(|c| owner(c.id.as_str()) == Some(TBA_ID))
+    );
+    assert_eq!(owner(TYPE_GROUP), Some(TBA_ID));
     let projects = options(field(&project, ids::PROJECT));
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0].name, "Testbed project");
@@ -360,6 +387,21 @@ async fn project_board_fixture_has_both_teams_and_project_views() {
         "{names:?}"
     );
     assert_eq!(status.len(), 12);
+
+    // Each state is one of the two teams'; the Type group is TBA's.
+    let meta = project.linear.as_ref().unwrap();
+    let mut keys: Vec<_> = meta.teams.iter().map(|t| t.key.as_str()).collect();
+    keys.sort();
+    assert_eq!(keys, ["TBA", "TBB"]);
+    let tbb = &meta.teams.iter().find(|t| t.key == "TBB").unwrap().id;
+    let owner = |id: &str| meta.owners.get(id);
+    assert!(status.iter().all(|o| {
+        meta.teams
+            .iter()
+            .any(|t| owner(o.id.as_str()) == Some(&t.id))
+    }));
+    assert!(status.iter().any(|o| owner(o.id.as_str()) == Some(tbb)));
+    assert_eq!(owner(TYPE_GROUP).map(String::as_str), Some(TBA_ID));
     assert!(
         project.fields.iter().all(|f| f.id.as_str() != ids::PROJECT),
         "a project board has no Project field"

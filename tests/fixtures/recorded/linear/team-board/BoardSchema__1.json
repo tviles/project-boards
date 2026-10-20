@@ -313,7 +313,10 @@
           "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b",
           "isGroup": true,
           "name": "Type",
-          "parent": null
+          "parent": null,
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          }
         },
         {
           "color": "#4EA7FC",

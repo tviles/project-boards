@@ -11,6 +11,7 @@ pub mod project;
 pub mod provider;
 pub mod refs;
 pub mod sort;
+pub mod teams;
 pub mod view;
 
 pub use caps::*;

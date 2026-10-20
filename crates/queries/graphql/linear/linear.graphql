@@ -43,7 +43,7 @@ query BoardSchema($teamIds: [ID!]!) {
     nodes { id name type color position team { id } }
   }
   issueLabels(filter: { or: [{ team: { id: { in: $teamIds } } }, { team: { null: true } }] }, first: 250) {
-    nodes { id name color isGroup groupType parent { id } }
+    nodes { id name color isGroup groupType parent { id } team { id } }
   }
   cycles(filter: { team: { id: { in: $teamIds } }, endsAt: { gt: "-P26W" } }, first: 100) {
     nodes { id number name startsAt endsAt isPast team { id } }

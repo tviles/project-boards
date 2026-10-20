@@ -3,15 +3,17 @@
 //! No id contains `_`: `find_field` falls back to the part after the first `_`, which would
 //! let two of these ids match each other.
 
+use crate::model::teams::{CYCLE_FIELD, GROUP_FIELD_PREFIX, STATUS_FIELD};
 use crate::model::{BoardKey, FieldId, OptionId};
 use serde_json::{Value, json};
 
 pub const TITLE: &str = "linear:title";
-pub const STATUS: &str = "linear:status";
+/// From `model::teams`, which resolves team-owned values and cannot see this module.
+pub const STATUS: &str = STATUS_FIELD;
 pub const PRIORITY: &str = "linear:priority";
 pub const ASSIGNEES: &str = "linear:assignees";
 pub const LABELS: &str = "linear:labels";
-pub const CYCLE: &str = "linear:cycle";
+pub const CYCLE: &str = CYCLE_FIELD;
 pub const ESTIMATE: &str = "linear:estimate";
 pub const DUE: &str = "linear:due";
 pub const PROJECT: &str = "linear:project";
@@ -23,7 +25,7 @@ pub const SUB_ISSUES: &str = "linear:sub-issues";
 
 /// The field of the single-select label group `label_id`.
 pub fn group(label_id: &str) -> FieldId {
-    FieldId::new(format!("linear:group:{label_id}"))
+    FieldId::new(format!("{GROUP_FIELD_PREFIX}{label_id}"))
 }
 
 /// The Priority option for Linear's priority `n` (1 Urgent through 4 Low).
@@ -58,6 +60,8 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), all.len());
+        assert_eq!(STATUS, "linear:status");
+        assert_eq!(CYCLE, "linear:cycle");
         assert_eq!(group("g-1"), FieldId::new("linear:group:g-1"));
         assert_eq!(priority_option(2), OptionId::new("linear:priority:2"));
     }
