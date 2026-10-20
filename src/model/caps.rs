@@ -188,7 +188,7 @@ pub enum Denial {
     NoRepoScope,
     Archived,
     NotArchived,
-    Creating,
+    Creating(Provider),
     Private,
     /// A content type newer than this build.
     Unsupported,
@@ -233,7 +233,12 @@ impl Denial {
                 hint(OpKind::Unarchive, " unarchives")
             ),
             Denial::NotArchived => "Only archived items can be unarchived".into(),
-            Denial::Creating => "Still being created on GitHub; try again in a moment".into(),
+            Denial::Creating(Provider::Github) => {
+                "Still being created on GitHub; try again in a moment".into()
+            }
+            Denial::Creating(Provider::Linear) => {
+                "Still being created in Linear; try again in a moment".into()
+            }
             Denial::Private => {
                 "You can't see this item's content; only move, archive and remove work".into()
             }
@@ -333,7 +338,7 @@ fn check_with(
         return board_check(caps, ctx);
     }
     if is_placeholder(&item.id) {
-        return Err(Denial::Creating);
+        return Err(Denial::Creating(ctx.provider));
     }
     board_check(caps, ctx)?;
     if kind == Remove && ctx.team_board && !caps.remove_on_team_boards {
@@ -780,7 +785,23 @@ mod tests {
         i.id = ItemId::new("local:1");
         assert!(is_placeholder(&i.id));
         assert!(capabilities(&i, &ctx()).is_empty());
-        assert_eq!(check(Move, &i, &ctx()), Err(Denial::Creating));
+        assert_eq!(
+            check(Move, &i, &ctx()),
+            Err(Denial::Creating(Provider::Github))
+        );
+    }
+
+    #[test]
+    fn creating_names_the_provider() {
+        let key = |_: OpKind| None;
+        assert_eq!(
+            Denial::Creating(Provider::Github).message(&key),
+            "Still being created on GitHub; try again in a moment"
+        );
+        assert_eq!(
+            Denial::Creating(Provider::Linear).message(&key),
+            "Still being created in Linear; try again in a moment"
+        );
     }
 
     #[test]
@@ -873,7 +894,7 @@ mod tests {
             ),
             (Denial::NotArchived, "Only archived items can be unarchived"),
             (
-                Denial::Creating,
+                Denial::Creating(Provider::Github),
                 "Still being created on GitHub; try again in a moment",
             ),
             (

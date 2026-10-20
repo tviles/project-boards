@@ -253,7 +253,7 @@ pub fn project_from_wire(
 /// the trash and so gone from the board.
 #[allow(clippy::large_enum_variant)] // short-lived: one poll page at a time, mostly `Item`s
 #[derive(Debug, Clone, PartialEq)]
-pub enum Polled {
+pub enum PolledIssue {
     Item(Item),
     Trashed(ItemId),
 }
@@ -435,11 +435,11 @@ fn issue_from_wire(v: &Value) -> Option<Item> {
 
 /// Decodes an issue a poll returned: `Trashed` when it is in the trash, else as
 /// `item_from_wire` decodes it.
-pub fn polled_from_wire(v: &Value) -> Option<Polled> {
+pub fn polled_from_wire(v: &Value) -> Option<PolledIssue> {
     if v["trashed"].as_bool() == Some(true) {
-        return Some(Polled::Trashed(ItemId::new(v["id"].as_str()?)));
+        return Some(PolledIssue::Trashed(ItemId::new(v["id"].as_str()?)));
     }
-    item_from_wire(v).map(Polled::Item)
+    item_from_wire(v).map(PolledIssue::Item)
 }
 
 /// A parent or sub-issue in the detail; its state is the state's name, else its kind.
@@ -1122,7 +1122,7 @@ pub(crate) mod tests {
         let archived = issue_with(json!({"archivedAt": "2026-10-18T12:00:00.000Z"}));
         assert!(item_from_wire(&archived).unwrap().archived);
         match polled_from_wire(&archived) {
-            Some(Polled::Item(item)) => {
+            Some(PolledIssue::Item(item)) => {
                 assert!(item.archived);
                 assert_eq!(item.id, ItemId::new("i-7"));
             }
@@ -1131,16 +1131,16 @@ pub(crate) mod tests {
         let trashed = issue_with(json!({"trashed": true}));
         assert_eq!(
             polled_from_wire(&trashed),
-            Some(Polled::Trashed(ItemId::new("i-7")))
+            Some(PolledIssue::Trashed(ItemId::new("i-7")))
         );
         let restored = issue_with(json!({"trashed": false}));
         assert!(matches!(
             polled_from_wire(&restored),
-            Some(Polled::Item(item)) if !item.archived
+            Some(PolledIssue::Item(item)) if !item.archived
         ));
         assert_eq!(
             polled_from_wire(&issue_json()),
-            Some(Polled::Item(item_from_wire(&issue_json()).unwrap()))
+            Some(PolledIssue::Item(item_from_wire(&issue_json()).unwrap()))
         );
     }
 

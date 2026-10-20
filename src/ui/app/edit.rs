@@ -200,12 +200,12 @@ pub fn ago(elapsed: std::time::Duration) -> String {
     }
 }
 
-/// GitHub's own words for a failure; other errors as their message.
-pub fn error_message(error: &BackendError) -> String {
-    crate::ui::text::sanitize(&raw_error_message(error))
+/// The provider's own words for a failure; other errors as their message.
+pub fn error_message(error: &BackendError, provider: Provider) -> String {
+    crate::ui::text::sanitize(&raw_error_message(error, provider))
 }
 
-fn raw_error_message(error: &BackendError) -> String {
+fn raw_error_message(error: &BackendError, provider: Provider) -> String {
     match error {
         BackendError::Api(entries) => {
             let messages: Vec<&str> = entries
@@ -214,7 +214,7 @@ fn raw_error_message(error: &BackendError) -> String {
                 .filter(|m| !m.is_empty())
                 .collect();
             if messages.is_empty() {
-                "GitHub returned an error".into()
+                format!("{provider} returned an error")
             } else {
                 messages.join("; ")
             }
@@ -377,7 +377,11 @@ impl App {
 
     /// Records a failed lookup where its popover shows it. False for other failures.
     pub(super) fn lookup_failed(&mut self, task: &SyncTask, error: &BackendError) -> bool {
-        let message = format!("{}: {}", task_words(task), error_message(error));
+        let message = format!(
+            "{}: {}",
+            task_words(task),
+            error_message(error, self.board_provider())
+        );
         match task {
             SyncTask::Candidates(repo) => {
                 self.candidates
@@ -577,15 +581,19 @@ impl App {
         Some(format!("{k} new"))
     }
 
+    /// The provider of the open board; GitHub before one is open.
+    pub(super) fn board_provider(&self) -> Provider {
+        self.project()
+            .map(|p| p.board.provider())
+            .unwrap_or_default()
+    }
+
     pub fn edit_context(&self) -> EditContext {
         EditContext {
             viewer_can_update: self.project().is_some_and(|p| p.viewer_can_update),
             scopes: self.scopes.clone(),
             refused: self.refused_scopes.clone(),
-            provider: self
-                .project()
-                .map(|p| p.board.provider())
-                .unwrap_or_default(),
+            provider: self.board_provider(),
             team_board: self
                 .project()
                 .is_some_and(|p| matches!(p.board, BoardKey::LinearTeam { .. })),
@@ -1285,7 +1293,7 @@ impl App {
                 );
                 let message = format!(
                     "the issue was created but not added to the project: {}",
-                    error_message(&error)
+                    error_message(&error, self.board_provider())
                 );
                 if self.fail_pending(id, kind, message, add, false) {
                     self.record_refused_scopes(&error);
@@ -1330,8 +1338,12 @@ impl App {
                 });
                 let may_exist = lost.is_some();
                 let message = match lost {
-                    Some(op) => format!("{} ({})", maybe_done(op), error_message(&error)),
-                    None => error_message(&error),
+                    Some(op) => format!(
+                        "{} ({})",
+                        maybe_done(op),
+                        error_message(&error, self.board_provider())
+                    ),
+                    None => error_message(&error, self.board_provider()),
                 };
                 if self.fail_pending(id, kind, message, None, may_exist) {
                     self.record_refused_scopes(&error);
@@ -1350,7 +1362,7 @@ impl App {
                     .project()
                     .and_then(|p| p.field(field))
                     .map_or_else(|| field.to_string(), |f| f.name.clone());
-                format!("{name} ({})", error_message(e))
+                format!("{name} ({})", error_message(e, self.board_provider()))
             })
             .collect();
         let what = match refused.len() {
@@ -2290,12 +2302,27 @@ mod tests {
     #[test]
     fn a_graphql_error_without_messages_has_no_dangling_colon() {
         let none = BackendError::Api(vec![]);
-        assert_eq!(error_message(&none), "GitHub returned an error");
+        assert_eq!(
+            error_message(&none, Provider::Github),
+            "GitHub returned an error"
+        );
         let blank = BackendError::Api(vec![GraphqlErrorEntry {
             message: " ".into(),
             kind: None,
         }]);
-        assert_eq!(error_message(&blank), "GitHub returned an error");
+        assert_eq!(
+            error_message(&blank, Provider::Github),
+            "GitHub returned an error"
+        );
+    }
+
+    #[test]
+    fn an_empty_linear_error_names_linear() {
+        let none = BackendError::Api(vec![]);
+        assert_eq!(
+            error_message(&none, Provider::Linear),
+            "Linear returned an error"
+        );
     }
 
     fn on_board(a: &mut App) {
@@ -3359,7 +3386,7 @@ mod tests {
             message: "bad\nthing\u{7}here".into(),
             kind: None,
         }]);
-        assert_eq!(error_message(&error), "bad thing here");
+        assert_eq!(error_message(&error, Provider::Github), "bad thing here");
     }
 
     #[test]
@@ -3656,7 +3683,7 @@ mod tests {
             ] {
                 let mut a = test_app();
                 a.submit_new(op.clone(), needs_repo);
-                let shown = error_message(&error);
+                let shown = error_message(&error, Provider::Github);
                 a.on_sync(SyncEvent::OpDone {
                     id: 1,
                     result: Err(error),
@@ -3689,7 +3716,7 @@ mod tests {
                 ),
                 vec![Command::Send(1)]
             );
-            let shown = error_message(&error);
+            let shown = error_message(&error, Provider::Github);
             a.on_sync(SyncEvent::OpDone {
                 id: 1,
                 result: Err(error),

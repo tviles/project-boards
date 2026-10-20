@@ -7,7 +7,7 @@ mod linear_testbed;
 
 use project_boards::linear::Linear;
 use project_boards::linear::client::MAX_PAGE;
-use project_boards::linear::convert::Polled;
+use project_boards::linear::convert::PolledIssue;
 use project_boards::linear::ids;
 use project_boards::linear::record::INVENTED_PEOPLE;
 use project_boards::model::*;
@@ -430,8 +430,8 @@ async fn poll_fixture_decodes() {
         .nodes
         .iter()
         .map(|p| match p {
-            Polled::Item(item) => key(item),
-            Polled::Trashed(id) => panic!("trashed {id:?}"),
+            PolledIssue::Item(item) => key(item),
+            PolledIssue::Trashed(id) => panic!("trashed {id:?}"),
         })
         .collect();
     assert_eq!(keys, ["TBA-16", "TBA-20"]);
