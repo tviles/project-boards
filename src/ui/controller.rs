@@ -191,6 +191,9 @@ pub struct Controller {
     cache_dirty: bool,
     /// The opened board is remembered for the repository once it resolves (Decision 9).
     remember_on_resolve: bool,
+    /// The repository's remembered board was skipped at start because its provider has no
+    /// credentials: a linked board opened in its place is not remembered over it.
+    remembered_skipped: bool,
 }
 
 impl Controller {
@@ -228,6 +231,7 @@ impl Controller {
             queue: OpQueue::new(),
             cache_dirty: false,
             remember_on_resolve: false,
+            remembered_skipped: false,
         }
     }
 
@@ -290,6 +294,9 @@ impl Controller {
             .repo
             .as_ref()
             .and_then(|r| state.remembered_board(r));
+        let skipped = remembered
+            .as_ref()
+            .is_some_and(|b| !providers.contains(&b.provider()));
         match first_step(
             self.options.board.clone(),
             self.options.picker,
@@ -300,6 +307,7 @@ impl Controller {
             FirstStep::Use(board) => self.open_board(board, now),
             FirstStep::FetchRepoProjects(repo) => {
                 self.awaiting_repo_projects = true;
+                self.remembered_skipped = skipped;
                 vec![self.spawn(SyncJob::RepoProjects(repo))]
             }
             FirstStep::PickAll => self.show_picker(true),
@@ -582,7 +590,15 @@ impl Controller {
                 SyncEvent::RepoProjects(list) => {
                     self.awaiting_repo_projects = false;
                     return match after_repo_projects(list.clone()) {
-                        AfterRepo::Use(board) => self.open_board(board, now),
+                        AfterRepo::Use(board) => {
+                            let effects = self.open_board(board, now);
+                            // Opened automatically, not chosen: the skipped board stays
+                            // remembered (a dismissed Linear key prompt must not replace it).
+                            if std::mem::take(&mut self.remembered_skipped) {
+                                self.remember_on_resolve = false;
+                            }
+                            effects
+                        }
                         AfterRepo::Pick(list) => {
                             self.app.picker = Some(PickerState::with(list, Vec::new(), true));
                             self.app.mode = Mode::Picker;
@@ -1084,6 +1100,39 @@ mod tests {
         );
         assert_eq!(c.app.mode, Mode::Picker);
         assert_eq!(c.board(), None);
+    }
+
+    /// A remembered Linear board skipped because Linear's key did not resolve (a dismissed
+    /// Keychain prompt) stays remembered when the repo's one linked GitHub board opens in its
+    /// place; a board the user then picks is remembered as usual.
+    #[test]
+    fn a_board_opened_in_place_of_a_skipped_remembered_board_is_not_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let linear: BoardKey = LINEAR_TEAM.parse().unwrap();
+        State::update(dir.path(), |s| s.remember_board(&repo(), &linear)).unwrap();
+        let (mut c, _, t0) = controller(dir.path(), None);
+        assert_eq!(
+            c.start(Ok(vec![Provider::Github]), t0),
+            vec![sp(&c, SyncJob::RepoProjects(repo()))]
+        );
+        assert_eq!(
+            c.handle(
+                at(&c, SyncEvent::RepoProjects(vec![summary("tviles/3")])),
+                t0
+            ),
+            vec![sp(&c, SyncJob::Resolve(board()))]
+        );
+        c.handle(at(&c, SyncEvent::Project(snapshot().project)), t0);
+        assert_eq!(c.board(), Some(&board()));
+        assert_eq!(remembered(dir.path()), Some(linear));
+
+        // The user picks a board: that choice is remembered.
+        let other: BoardKey = "tviles/4".parse().unwrap();
+        c.commands(vec![Command::PickBoard(other.clone())], t0);
+        let mut project = snapshot().project;
+        project.board = other.clone();
+        c.handle(at(&c, SyncEvent::Project(project)), t0);
+        assert_eq!(remembered(dir.path()), Some(other));
     }
 
     #[test]

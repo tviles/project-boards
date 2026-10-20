@@ -216,6 +216,8 @@ struct Runner {
     backends: Backends,
     tx: mpsc::UnboundedSender<Tagged>,
     max_items: usize,
+    /// `linear_api_key_command` is configured (the picker's note names it when it gave no key).
+    linear_key_command: bool,
 }
 
 /// What `start` needs from the config to build the clients and sync jobs, and where the
@@ -303,6 +305,7 @@ fn start(
                 backends,
                 tx: tx.clone(),
                 max_items: settings.max_items,
+                linear_key_command: settings.linear_key_command.is_some(),
             });
             controller.start(Ok(providers), Instant::now())
         }
@@ -356,7 +359,8 @@ impl Runner {
                 }
             }
         });
-        let s = Syncer::new(self.backends.clone(), provider, jtx, self.max_items);
+        let s = Syncer::new(self.backends.clone(), provider, jtx, self.max_items)
+            .with_linear_key_command(self.linear_key_command);
         tokio::spawn(async move {
             match job {
                 SyncJob::Resolve(board) => {

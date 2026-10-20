@@ -17,10 +17,12 @@ fn disagree() -> BackendError {
     BackendError::Decode("board and backend disagree".into())
 }
 
-/// The picker's line for a provider whose credentials did not resolve.
-fn missing_credentials_note(provider: Provider) -> &'static str {
+/// The picker's line for a provider whose credentials did not resolve. `key_command`: a
+/// `linear_api_key_command` is configured, so it ran and gave no key (a dismissed prompt).
+fn missing_credentials_note(provider: Provider, key_command: bool) -> &'static str {
     match provider {
         Provider::Github => "GitHub boards: run `gh auth login` or set GH_TOKEN",
+        Provider::Linear if key_command => "Linear boards: linear_api_key_command gave no key",
         Provider::Linear => "Linear boards: set LINEAR_API_KEY or linear_api_key_command",
     }
 }
@@ -64,6 +66,8 @@ pub struct Syncer {
     tx: mpsc::UnboundedSender<SyncEvent>,
     max_items: usize,
     profile: SyncProfile,
+    /// `linear_api_key_command` is configured, so a missing Linear key means it gave none.
+    linear_key_command: bool,
 }
 
 impl Syncer {
@@ -92,7 +96,15 @@ impl Syncer {
             tx,
             max_items,
             profile,
+            linear_key_command: false,
         }
+    }
+
+    /// Whether `linear_api_key_command` is configured: the picker's note for missing Linear
+    /// credentials then says the command gave no key.
+    pub fn with_linear_key_command(mut self, configured: bool) -> Self {
+        self.linear_key_command = configured;
+        self
     }
 
     /// The backend of the job's board. A job spawned with no board open is GitHub's: only
@@ -456,7 +468,8 @@ impl Syncer {
         let mut first_error = None;
         for (provider, result) in [(Provider::Github, github), (Provider::Linear, linear)] {
             match result {
-                None => notes.push(missing_credentials_note(provider).to_string()),
+                None => notes
+                    .push(missing_credentials_note(provider, self.linear_key_command).to_string()),
                 Some(Ok(list)) => {
                     boards.extend(list);
                     loaded = true;
@@ -1292,6 +1305,18 @@ mod tests {
                 vec!["acme/7".to_string()],
                 vec!["Linear boards: set LINEAR_API_KEY or linear_api_key_command".to_string()]
             )
+        );
+
+        // A configured key command that gave no key (a dismissed Keychain prompt) is named
+        // instead of the generic fix.
+        let own = Arc::new(FixtureTransport::new());
+        let (s, mut rx) = syncer(Some(&own), None);
+        let s = s.with_linear_key_command(true);
+        own.push("ViewerProjects", viewer_projects());
+        s.projects(None).await;
+        assert_eq!(
+            boards_and_notes(&drain(&mut rx)).1,
+            ["Linear boards: linear_api_key_command gave no key"]
         );
 
         // The only configured provider fails: its own error, never GitHub's missing token.
