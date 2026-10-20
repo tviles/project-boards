@@ -5,7 +5,7 @@
 use crate::error::BackendError;
 use crate::github::convert::{nodes, str_of};
 use crate::linear::client::{Linear, is_entity_not_found};
-use crate::linear::convert::item_from_wire;
+use crate::linear::convert::{is_single_select_group, item_from_wire};
 use crate::model::{Item, LabelRef, TeamCandidates, UserRef};
 use crate::transport::GraphqlRequest;
 use project_boards_queries::linear as ops;
@@ -38,10 +38,12 @@ fn required_issue(data: &Value, mutation: &str) -> Result<Item, BackendError> {
 }
 
 /// A label the label editor offers: not a group, and not a child of a single-select group
-/// (those are set through the group's own field).
+/// (those are set through the group's own field). A group with no type is single-select,
+/// as the board decodes it.
 fn offered_label(label: &Value) -> Option<LabelRef> {
+    let parent = &label["parent"];
     if label["isGroup"].as_bool() == Some(true)
-        || label["parent"]["groupType"].as_str() == Some("singleSelect")
+        || (parent.is_object() && is_single_select_group(parent["groupType"].as_str()))
     {
         return None;
     }
@@ -180,7 +182,8 @@ impl Linear {
     }
 
     /// The issue `key` names (`TBA-12`, or an issue UUID), archived or not; `None` when
-    /// Linear answers "Entity not found".
+    /// Linear answers "Entity not found" or a null issue. An issue that does not decode is
+    /// a decode error, not `None`.
     pub async fn issue_by_key(&self, key: &str) -> Result<Option<Item>, BackendError> {
         let request = GraphqlRequest::raw(
             ops::issue_by_key::OPERATION_NAME,
@@ -188,7 +191,17 @@ impl Linear {
             json!({"id": key}),
         );
         match self.data(request).await {
-            Ok(data) => Ok(item_from_wire(&data["issue"])),
+            Ok(data) => {
+                let issue = &data["issue"];
+                if issue.is_null() {
+                    return Ok(None);
+                }
+                item_from_wire(issue).map(Some).ok_or_else(|| {
+                    BackendError::Decode(
+                        "IssueByKey response has an issue that does not decode".into(),
+                    )
+                })
+            }
             Err(e) if is_entity_not_found(&e) => Ok(None),
             Err(e) => Err(e),
         }
@@ -511,6 +524,19 @@ mod tests {
         assert_eq!(requests[1].variables, json!({"id": "TBA-999"}));
     }
 
+    #[tokio::test]
+    async fn a_key_whose_issue_does_not_decode_is_an_error_not_none() {
+        let t = Arc::new(FixtureTransport::new());
+        t.push("IssueByKey", json!({"issue": {"id": "i-7"}}));
+        t.push("IssueByKey", json!({"issue": null}));
+        let l = linear(&t);
+        assert!(matches!(
+            l.issue_by_key("TBA-7").await,
+            Err(BackendError::Decode(_))
+        ));
+        assert_eq!(l.issue_by_key("TBA-7").await.unwrap(), None);
+    }
+
     fn label(id: &str, name: &str, is_group: bool, parent: Value) -> Value {
         json!({"id": id, "name": name, "color": "#eb5757", "isGroup": is_group,
                "parent": parent})
@@ -522,7 +548,9 @@ mod tests {
 
     fn candidates_json(more: [bool; 3]) -> Value {
         let single = json!({"id": "g-type", "groupType": "singleSelect"});
-        let multi = json!({"id": "g-area", "groupType": null});
+        let multi = json!({"id": "g-area", "groupType": "multiSelect"});
+        // A group with no type is single-select too.
+        let untyped = json!({"id": "g-sev", "groupType": null});
         json!({
             "team": {
                 "members": connection(vec![
@@ -533,6 +561,7 @@ mod tests {
                     label("l-bug", "Bug", false, single),
                     label("l-docs", "docs", false, Value::Null),
                     label("l-ui", "UI", false, multi),
+                    label("l-sev", "Sev 1", false, untyped),
                     label("g-type", "Type", true, Value::Null),
                 ], more[1]),
             },
