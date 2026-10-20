@@ -1,0 +1,43 @@
+{
+  "data": {
+    "issue": {
+      "attachments": {
+        "nodes": []
+      },
+      "children": {
+        "nodes": []
+      },
+      "comments": {
+        "nodes": [
+          {
+            "body": "Fixture comment: seen when the poll hits the limit; see TBA-16 for the toggle.",
+            "createdAt": "2026-10-20T03:12:30.075Z",
+            "id": "499f44c0-2448-47b7-b199-cee7f147dbcc",
+            "parent": null,
+            "user": {
+              "displayName": "Avery Quill"
+            }
+          },
+          {
+            "body": "Fixture reply: confirmed on the second retry.",
+            "createdAt": "2026-10-20T03:12:32.718Z",
+            "id": "10025192-6b00-412a-8d3b-877d62d80a02",
+            "parent": {
+              "id": "499f44c0-2448-47b7-b199-cee7f147dbcc"
+            },
+            "user": {
+              "displayName": "Avery Quill"
+            }
+          }
+        ],
+        "pageInfo": {
+          "hasPreviousPage": false,
+          "startCursor": "499f44c0-2448-47b7-b199-cee7f147dbcc"
+        }
+      },
+      "description": "Seeded test issue: Rate limit errors are swallowed.",
+      "id": "ea7a48d9-a787-45f0-83cf-ee292ba99925",
+      "parent": null
+    }
+  }
+}

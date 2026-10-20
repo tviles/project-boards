@@ -9,18 +9,18 @@ pub const BOARD_VIEW: &str = "linear:view:board";
 pub const ALL_VIEW: &str = "linear:view:all";
 pub const MINE_VIEW: &str = "linear:view:mine";
 
-// `viewPreferencesValues` strings this build recognises (finding L3, Decision 20). Task 13
-// confirms the ones phase 0 did not measure.
+// `viewPreferencesValues` strings this build recognises (finding L3, Decision 20), as
+// phase 0 and Task 13's recording measured them; `dateUpdated` is by analogy, unmeasured.
 const LAYOUT_BOARD: &str = "board";
 const GROUP_STATUS: &str = "workflowState";
 const GROUP_PRIORITY: &str = "priority";
 const GROUP_PROJECT: &str = "project";
 const GROUP_CYCLE: &str = "cycle";
-const GROUP_LABEL: &str = "label";
+const GROUP_LABEL_GROUP: &str = "labelGroup";
 const ORDER_MANUAL: &str = "manual";
 const ORDER_PRIORITY: &str = "priority";
-const ORDER_CREATED: &str = "createdAt";
-const ORDER_UPDATED: &str = "updatedAt";
+const ORDER_CREATED: &str = "dateCreated";
+const ORDER_UPDATED: &str = "dateUpdated";
 const ORDER_DUE: &str = "dueDate";
 const DIRECTION_ASC: &str = "asc";
 const DIRECTION_DESC: &str = "desc";
@@ -115,10 +115,27 @@ fn grouping(prefs: &Value, key: &str, label_key: &str, fields: &[Field]) -> Opti
         GROUP_PRIORITY => FieldId::new(ids::PRIORITY),
         GROUP_PROJECT => FieldId::new(ids::PROJECT),
         GROUP_CYCLE => FieldId::new(ids::CYCLE),
-        GROUP_LABEL => ids::group(prefs[label_key].as_str()?),
+        // Linear has been seen to omit the group's id (Task 13's recording).
+        GROUP_LABEL_GROUP => match prefs[label_key].as_str() {
+            Some(label_id) => ids::group(label_id),
+            None => only_label_group(fields)?,
+        },
         _ => return None,
     };
     fields.iter().any(|f| f.id == id).then_some(id)
+}
+
+/// The board's single-select label-group field, when it has exactly one.
+fn only_label_group(fields: &[Field]) -> Option<FieldId> {
+    let prefix = ids::group("");
+    let mut groups = fields.iter().filter(|f| {
+        f.id.as_str().starts_with(prefix.as_str())
+            && matches!(f.kind, FieldKind::SingleSelect { .. })
+    });
+    match (groups.next(), groups.next()) {
+        (Some(only), None) => Some(only.id.clone()),
+        _ => None,
+    }
 }
 
 fn ordering(prefs: &Value) -> Option<SortSpec> {
@@ -322,7 +339,7 @@ mod tests {
                 ),
             ),
             (
-                json!({"layout": "list", "issueGrouping": "label",
+                json!({"layout": "list", "issueGrouping": "labelGroup",
                        "issueGroupingLabelGroupId": TYPE_GROUP}),
                 &project,
                 (
@@ -334,7 +351,7 @@ mod tests {
                 ),
             ),
             (
-                json!({"layout": "board", "issueGrouping": "cycle", "issueSubGrouping": "label",
+                json!({"layout": "board", "issueGrouping": "cycle", "issueSubGrouping": "labelGroup",
                        "issueSubGroupingLabelGroupId": TYPE_GROUP}),
                 &project,
                 (
@@ -346,7 +363,7 @@ mod tests {
                 ),
             ),
             (
-                json!({"layout": "board", "issueGrouping": "label",
+                json!({"layout": "board", "issueGrouping": "labelGroup",
                        "issueGroupingLabelGroupId": TYPE_GROUP, "issueSubGrouping": "project"}),
                 &team,
                 (
@@ -371,7 +388,7 @@ mod tests {
                 ),
             ),
             (
-                json!({"layout": "list", "issueGrouping": "project", "viewOrdering": "createdAt"}),
+                json!({"layout": "list", "issueGrouping": "project", "viewOrdering": "dateCreated"}),
                 &team,
                 (
                     Table,
@@ -382,7 +399,7 @@ mod tests {
                 ),
             ),
             (
-                json!({"layout": "list", "viewOrdering": "updatedAt",
+                json!({"layout": "list", "viewOrdering": "dateUpdated",
                        "viewOrderingDirection": "asc"}),
                 &project,
                 (
@@ -465,6 +482,91 @@ mod tests {
         assert_eq!(v.name, "Mine");
     }
 
+    /// The board's fields with `Type` as its only single-select label group.
+    fn one_group_fields() -> Vec<Field> {
+        project_board_fields()
+            .into_iter()
+            .filter(|f| !f.id.as_str().starts_with("linear:group:") || f.name == "Type")
+            .collect()
+    }
+
+    #[test]
+    fn a_label_group_without_an_id_is_the_boards_only_group() {
+        use Layout::{Board, Table};
+        use SortDirection::Desc;
+        let fields = one_group_fields();
+        let group = ids::group(TYPE_GROUP);
+        let cases: Vec<(Value, Shape)> = vec![
+            (
+                // "Fixture by type" as Task 13 recorded it.
+                json!({"layout": "board", "issueGrouping": "labelGroup",
+                       "issueSubGrouping": "workflowState", "viewOrdering": "dateCreated",
+                       "viewOrderingDirection": "desc", "showCompletedIssues": "all"}),
+                (
+                    Board,
+                    vec![group.clone()],
+                    fids(&[ids::STATUS]),
+                    sort(ids::CREATED, Desc),
+                    all_issues_fields(),
+                ),
+            ),
+            (
+                json!({"layout": "board", "issueGrouping": "cycle",
+                       "issueSubGrouping": "labelGroup"}),
+                (
+                    Board,
+                    fids(&[ids::CYCLE]),
+                    vec![group.clone()],
+                    vec![],
+                    all_issues_fields(),
+                ),
+            ),
+            (
+                json!({"layout": "list", "issueGrouping": "labelGroup"}),
+                (
+                    Table,
+                    vec![],
+                    vec![group.clone()],
+                    vec![],
+                    all_issues_fields(),
+                ),
+            ),
+            (
+                // An id the board does not have is not replaced by the lone group.
+                json!({"layout": "list", "issueGrouping": "labelGroup",
+                       "issueGroupingLabelGroupId": "lg-gone"}),
+                (Table, vec![], vec![], vec![], all_issues_fields()),
+            ),
+            (
+                // "Fixture by due" as Task 13 recorded it.
+                json!({"layout": "list", "issueGrouping": "none", "issueSubGrouping": "none",
+                       "viewOrdering": "dueDate", "viewOrderingDirection": "desc"}),
+                (
+                    Table,
+                    vec![],
+                    vec![],
+                    sort(ids::DUE, Desc),
+                    all_issues_fields(),
+                ),
+            ),
+        ];
+        for (prefs, want) in cases {
+            assert_eq!(shape(prefs.clone(), &fields), want, "{prefs}");
+        }
+        let no_groups: Vec<Field> = fields
+            .into_iter()
+            .filter(|f| !f.id.as_str().starts_with("linear:group:"))
+            .collect();
+        assert_eq!(
+            shape(
+                json!({"layout": "list", "issueGrouping": "labelGroup"}),
+                &no_groups
+            )
+            .2,
+            vec![]
+        );
+    }
+
     #[test]
     fn unrecognised_settings_fall_back() {
         use Layout::{Board, Table};
@@ -519,7 +621,7 @@ mod tests {
             ),
             (
                 // A project board has no Project field; Area is a multi-select group.
-                json!({"layout": "board", "issueGrouping": "project", "issueSubGrouping": "label",
+                json!({"layout": "board", "issueGrouping": "project", "issueSubGrouping": "labelGroup",
                        "issueSubGroupingLabelGroupId": "lg-area"}),
                 (
                     Board,
@@ -530,7 +632,33 @@ mod tests {
                 ),
             ),
             (
-                json!({"layout": "list", "issueGrouping": "label"}),
+                // Without an id, two single-select groups (Type, Size) leave it ambiguous.
+                json!({"layout": "list", "issueGrouping": "labelGroup"}),
+                (Table, vec![], vec![], vec![], all_issues_fields()),
+            ),
+            (
+                json!({"layout": "board", "issueGrouping": "labelGroup",
+                       "issueSubGrouping": "labelGroup"}),
+                (
+                    Board,
+                    fids(&[ids::STATUS]),
+                    vec![],
+                    vec![],
+                    all_issues_fields(),
+                ),
+            ),
+            (
+                // Decision 20's guesses, which Linear does not use (Task 13's recording).
+                json!({"layout": "list", "issueGrouping": "label",
+                       "issueGroupingLabelGroupId": TYPE_GROUP}),
+                (Table, vec![], vec![], vec![], all_issues_fields()),
+            ),
+            (
+                json!({"layout": "list", "viewOrdering": "createdAt"}),
+                (Table, vec![], vec![], vec![], all_issues_fields()),
+            ),
+            (
+                json!({"layout": "list", "viewOrdering": "updatedAt"}),
                 (Table, vec![], vec![], vec![], all_issues_fields()),
             ),
         ];

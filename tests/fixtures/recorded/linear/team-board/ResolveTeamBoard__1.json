@@ -1,0 +1,16 @@
+{
+  "data": {
+    "organization": {
+      "urlKey": "testbed-workspace"
+    },
+    "team": {
+      "cyclesEnabled": true,
+      "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0",
+      "key": "TBA",
+      "name": "Testbed A"
+    },
+    "viewer": {
+      "id": "f4af6b5a-208f-4947-b8a3-b6da54a82cce"
+    }
+  }
+}

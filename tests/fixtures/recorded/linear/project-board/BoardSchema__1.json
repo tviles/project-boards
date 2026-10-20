@@ -1,0 +1,529 @@
+{
+  "data": {
+    "customViews": {
+      "nodes": [
+        {
+          "id": "055506b2-c913-4866-80bc-648e22ae4fe0",
+          "modelName": "Issue",
+          "name": "Fixture by due",
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          },
+          "viewPreferencesValues": {
+            "fieldAssignee": true,
+            "fieldCycle": true,
+            "fieldDateCreated": true,
+            "fieldDateUpdated": false,
+            "fieldDueDate": true,
+            "fieldEstimate": true,
+            "fieldLabels": true,
+            "fieldPriority": true,
+            "fieldProject": true,
+            "fieldStatus": true,
+            "issueGrouping": "none",
+            "issueGroupingLabelGroupId": null,
+            "issueSubGrouping": "none",
+            "issueSubGroupingLabelGroupId": null,
+            "layout": "list",
+            "showCompletedIssues": "all",
+            "viewOrdering": "dueDate",
+            "viewOrderingDirection": "desc"
+          }
+        },
+        {
+          "id": "b7229f4d-c8c2-408e-a3a0-94df1c4bd8cc",
+          "modelName": "Issue",
+          "name": "Fixture by type",
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          },
+          "viewPreferencesValues": {
+            "fieldAssignee": true,
+            "fieldCycle": true,
+            "fieldDateCreated": true,
+            "fieldDateUpdated": false,
+            "fieldDueDate": true,
+            "fieldEstimate": true,
+            "fieldLabels": true,
+            "fieldPriority": true,
+            "fieldProject": true,
+            "fieldStatus": true,
+            "issueGrouping": "labelGroup",
+            "issueGroupingLabelGroupId": null,
+            "issueSubGrouping": "workflowState",
+            "issueSubGroupingLabelGroupId": null,
+            "layout": "board",
+            "showCompletedIssues": "all",
+            "viewOrdering": "dateCreated",
+            "viewOrderingDirection": "desc"
+          }
+        },
+        {
+          "id": "a972b07b-1075-496b-bfb0-78d009e1897e",
+          "modelName": "Issue",
+          "name": "Fixture by cycle",
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          },
+          "viewPreferencesValues": {
+            "fieldAssignee": true,
+            "fieldCycle": true,
+            "fieldDateCreated": true,
+            "fieldDateUpdated": false,
+            "fieldDueDate": true,
+            "fieldEstimate": true,
+            "fieldLabels": true,
+            "fieldPriority": true,
+            "fieldProject": true,
+            "fieldStatus": true,
+            "issueGrouping": "cycle",
+            "issueGroupingLabelGroupId": null,
+            "issueSubGrouping": "none",
+            "issueSubGroupingLabelGroupId": null,
+            "layout": "board",
+            "showCompletedIssues": "all",
+            "viewOrdering": "priority",
+            "viewOrderingDirection": null
+          }
+        },
+        {
+          "id": "5d22b75d-0775-48a7-9689-1c10e155cd01",
+          "modelName": "Issue",
+          "name": "Fixture by project",
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          },
+          "viewPreferencesValues": {
+            "fieldAssignee": true,
+            "fieldCycle": true,
+            "fieldDateCreated": true,
+            "fieldDateUpdated": false,
+            "fieldDueDate": true,
+            "fieldEstimate": true,
+            "fieldLabels": true,
+            "fieldPriority": true,
+            "fieldProject": true,
+            "fieldStatus": true,
+            "issueGrouping": "project",
+            "issueGroupingLabelGroupId": null,
+            "issueSubGrouping": "none",
+            "issueSubGroupingLabelGroupId": null,
+            "layout": "list",
+            "showCompletedIssues": "all",
+            "viewOrdering": "priority",
+            "viewOrderingDirection": null
+          }
+        },
+        {
+          "id": "9eceda33-07c3-4777-acf7-cf685f11b624",
+          "modelName": "Issue",
+          "name": "Probe team board by status",
+          "team": {
+            "id": "c59cfcab-1892-4bed-bc9f-f29ee34acfdd"
+          },
+          "viewPreferencesValues": {
+            "fieldAssignee": true,
+            "fieldCycle": true,
+            "fieldDateCreated": true,
+            "fieldDateUpdated": false,
+            "fieldDueDate": true,
+            "fieldEstimate": true,
+            "fieldLabels": true,
+            "fieldPriority": true,
+            "fieldProject": true,
+            "fieldStatus": true,
+            "issueGrouping": "workflowState",
+            "issueGroupingLabelGroupId": null,
+            "issueSubGrouping": "none",
+            "issueSubGroupingLabelGroupId": null,
+            "layout": "board",
+            "showCompletedIssues": "none",
+            "viewOrdering": "priority",
+            "viewOrderingDirection": null
+          }
+        },
+        {
+          "id": "9eca2d89-3f61-4352-a7c8-da48699ca825",
+          "modelName": "Issue",
+          "name": "Probe hide completed",
+          "team": {
+            "id": "c59cfcab-1892-4bed-bc9f-f29ee34acfdd"
+          },
+          "viewPreferencesValues": {
+            "fieldAssignee": true,
+            "fieldCycle": true,
+            "fieldDateCreated": true,
+            "fieldDateUpdated": false,
+            "fieldDueDate": true,
+            "fieldEstimate": true,
+            "fieldLabels": true,
+            "fieldPriority": true,
+            "fieldProject": true,
+            "fieldStatus": true,
+            "issueGrouping": "none",
+            "issueGroupingLabelGroupId": null,
+            "issueSubGrouping": "none",
+            "issueSubGroupingLabelGroupId": null,
+            "layout": "list",
+            "showCompletedIssues": "none",
+            "viewOrdering": "priority",
+            "viewOrderingDirection": null
+          }
+        },
+        {
+          "id": "3a69e2b5-140b-4a70-bdb2-0f96e085c7d5",
+          "modelName": "Issue",
+          "name": "Probe board by priority",
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          },
+          "viewPreferencesValues": {
+            "fieldAssignee": true,
+            "fieldCycle": true,
+            "fieldDateCreated": true,
+            "fieldDateUpdated": false,
+            "fieldDueDate": true,
+            "fieldEstimate": true,
+            "fieldLabels": true,
+            "fieldPriority": true,
+            "fieldProject": true,
+            "fieldStatus": true,
+            "issueGrouping": "priority",
+            "issueGroupingLabelGroupId": null,
+            "issueSubGrouping": "none",
+            "issueSubGroupingLabelGroupId": null,
+            "layout": "board",
+            "showCompletedIssues": "all",
+            "viewOrdering": "manual",
+            "viewOrderingDirection": "asc"
+          }
+        },
+        {
+          "id": "d2070d71-fb12-49c2-8bb6-1ad970d64f01",
+          "modelName": "Issue",
+          "name": "Probe list by assignee",
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          },
+          "viewPreferencesValues": {
+            "fieldAssignee": true,
+            "fieldCycle": true,
+            "fieldDateCreated": true,
+            "fieldDateUpdated": false,
+            "fieldDueDate": true,
+            "fieldEstimate": true,
+            "fieldLabels": true,
+            "fieldPriority": true,
+            "fieldProject": true,
+            "fieldStatus": true,
+            "issueGrouping": "assignee",
+            "issueGroupingLabelGroupId": null,
+            "issueSubGrouping": "workflowState",
+            "issueSubGroupingLabelGroupId": null,
+            "layout": "list",
+            "showCompletedIssues": "all",
+            "viewOrdering": "priority",
+            "viewOrderingDirection": null
+          }
+        },
+        {
+          "id": "4bb4e71b-f4f3-4507-ae49-434e2718d07f",
+          "modelName": "Issue",
+          "name": "Testbed open",
+          "team": null,
+          "viewPreferencesValues": {
+            "fieldAssignee": true,
+            "fieldCycle": true,
+            "fieldDateCreated": true,
+            "fieldDateUpdated": false,
+            "fieldDueDate": true,
+            "fieldEstimate": true,
+            "fieldLabels": true,
+            "fieldPriority": true,
+            "fieldProject": true,
+            "fieldStatus": true,
+            "issueGrouping": "workflowState",
+            "issueGroupingLabelGroupId": null,
+            "issueSubGrouping": "none",
+            "issueSubGroupingLabelGroupId": null,
+            "layout": "list",
+            "showCompletedIssues": "all",
+            "viewOrdering": "priority",
+            "viewOrderingDirection": null
+          }
+        },
+        {
+          "id": "6df57310-6c7c-42ce-8f9c-af07763fc27d",
+          "modelName": "Issue",
+          "name": "Testbed A bugs",
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          },
+          "viewPreferencesValues": {
+            "fieldAssignee": true,
+            "fieldCycle": true,
+            "fieldDateCreated": true,
+            "fieldDateUpdated": false,
+            "fieldDueDate": true,
+            "fieldEstimate": true,
+            "fieldLabels": true,
+            "fieldPriority": true,
+            "fieldProject": true,
+            "fieldStatus": true,
+            "issueGrouping": "workflowState",
+            "issueGroupingLabelGroupId": null,
+            "issueSubGrouping": "none",
+            "issueSubGroupingLabelGroupId": null,
+            "layout": "list",
+            "showCompletedIssues": "all",
+            "viewOrdering": "priority",
+            "viewOrderingDirection": null
+          }
+        }
+      ]
+    },
+    "cycles": {
+      "nodes": [
+        {
+          "endsAt": "2026-11-06T06:00:00.000Z",
+          "id": "ffb5daef-7a4c-4ad0-b43e-11ed1f53d11b",
+          "isPast": false,
+          "name": null,
+          "number": 3,
+          "startsAt": "2026-10-30T05:00:00.000Z",
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          }
+        },
+        {
+          "endsAt": "2026-10-30T05:00:00.000Z",
+          "id": "b525acc4-a622-4783-9041-e6454882d661",
+          "isPast": false,
+          "name": null,
+          "number": 2,
+          "startsAt": "2026-10-23T05:00:00.000Z",
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          }
+        },
+        {
+          "endsAt": "2026-10-23T05:00:00.000Z",
+          "id": "09084337-f645-4010-b191-f411ab732ec1",
+          "isPast": false,
+          "name": null,
+          "number": 1,
+          "startsAt": "2026-10-16T00:00:00.000Z",
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          }
+        }
+      ]
+    },
+    "issueLabels": {
+      "nodes": [
+        {
+          "color": "#4ea7fc",
+          "groupType": null,
+          "id": "2c0450f3-36f1-4fdf-a1e6-e8e5f6a34eef",
+          "isGroup": false,
+          "name": "good first issue",
+          "parent": null
+        },
+        {
+          "color": "#f2994a",
+          "groupType": null,
+          "id": "819006f6-5494-496b-8468-eade436ed3d4",
+          "isGroup": false,
+          "name": "Docs",
+          "parent": null
+        },
+        {
+          "color": "#f2c94c",
+          "groupType": null,
+          "id": "ec3a49e4-b728-4a0d-b06c-9da15315268f",
+          "isGroup": false,
+          "name": "API",
+          "parent": null
+        },
+        {
+          "color": "#4cb782",
+          "groupType": null,
+          "id": "252b3a01-2176-46dc-90b8-c787d03131dc",
+          "isGroup": false,
+          "name": "UI",
+          "parent": null
+        },
+        {
+          "color": "#95a2b3",
+          "groupType": null,
+          "id": "58381970-23be-4bb8-815e-52684f3b1115",
+          "isGroup": false,
+          "name": "Chore",
+          "parent": {
+            "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b"
+          }
+        },
+        {
+          "color": "#5e6ad2",
+          "groupType": "singleSelect",
+          "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b",
+          "isGroup": true,
+          "name": "Type",
+          "parent": null
+        },
+        {
+          "color": "#4EA7FC",
+          "groupType": null,
+          "id": "c5f81cd9-4ca2-430b-9b70-05f1404677d8",
+          "isGroup": false,
+          "name": "Improvement",
+          "parent": null
+        },
+        {
+          "color": "#BB87FC",
+          "groupType": null,
+          "id": "40a07be5-06ea-4ad4-8964-4a6a515b7da6",
+          "isGroup": false,
+          "name": "Feature",
+          "parent": {
+            "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b"
+          }
+        },
+        {
+          "color": "#EB5757",
+          "groupType": null,
+          "id": "321a3c2d-ce45-40c8-8c66-49ce0a1317b0",
+          "isGroup": false,
+          "name": "Bug",
+          "parent": {
+            "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b"
+          }
+        }
+      ]
+    },
+    "workflowStates": {
+      "nodes": [
+        {
+          "color": "#95a2b3",
+          "id": "da286e5f-6ef2-4d1c-bfd4-126f857c874a",
+          "name": "Canceled",
+          "position": 4,
+          "team": {
+            "id": "c59cfcab-1892-4bed-bc9f-f29ee34acfdd"
+          },
+          "type": "canceled"
+        },
+        {
+          "color": "#5e6ad2",
+          "id": "a29ebdb8-8c13-4f78-bd21-ff10e0895140",
+          "name": "Done",
+          "position": 3,
+          "team": {
+            "id": "c59cfcab-1892-4bed-bc9f-f29ee34acfdd"
+          },
+          "type": "completed"
+        },
+        {
+          "color": "#95a2b3",
+          "id": "9ed3213b-3581-4fa6-84d3-a2bdec19b7e2",
+          "name": "Duplicate",
+          "position": 5,
+          "team": {
+            "id": "c59cfcab-1892-4bed-bc9f-f29ee34acfdd"
+          },
+          "type": "duplicate"
+        },
+        {
+          "color": "#e2e2e2",
+          "id": "9a62c82c-769e-4e0d-9e88-6a8c6b9c5529",
+          "name": "Todo",
+          "position": 1,
+          "team": {
+            "id": "c59cfcab-1892-4bed-bc9f-f29ee34acfdd"
+          },
+          "type": "unstarted"
+        },
+        {
+          "color": "#f2c94c",
+          "id": "8be76504-5877-4787-81ff-39eaa099f550",
+          "name": "Doing",
+          "position": 2,
+          "team": {
+            "id": "c59cfcab-1892-4bed-bc9f-f29ee34acfdd"
+          },
+          "type": "started"
+        },
+        {
+          "color": "#bec2c8",
+          "id": "1b709c33-bc69-43f8-bbf8-da835cde9c55",
+          "name": "Backlog",
+          "position": 0,
+          "team": {
+            "id": "c59cfcab-1892-4bed-bc9f-f29ee34acfdd"
+          },
+          "type": "backlog"
+        },
+        {
+          "color": "#5e6ad2",
+          "id": "ce61c0c6-9314-4348-90f2-fe68670ffba2",
+          "name": "Done",
+          "position": 3,
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          },
+          "type": "completed"
+        },
+        {
+          "color": "#95a2b3",
+          "id": "747ff24e-312a-4682-9907-d4cbe3aeb04c",
+          "name": "Duplicate",
+          "position": 5,
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          },
+          "type": "duplicate"
+        },
+        {
+          "color": "#95a2b3",
+          "id": "695adfe3-ae94-427c-bc61-c2e05055c5cf",
+          "name": "Canceled",
+          "position": 4,
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          },
+          "type": "canceled"
+        },
+        {
+          "color": "#f2c94c",
+          "id": "5b9808ef-f21a-4c9c-9dc5-48dee8411a8c",
+          "name": "In Progress",
+          "position": 2,
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          },
+          "type": "started"
+        },
+        {
+          "color": "#e2e2e2",
+          "id": "328f9fdf-a493-424a-8dc5-48aa1943b214",
+          "name": "Todo",
+          "position": 1,
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          },
+          "type": "unstarted"
+        },
+        {
+          "color": "#bec2c8",
+          "id": "068d9903-4c8b-4bbb-b445-0e00280d86f8",
+          "name": "Backlog",
+          "position": 0,
+          "team": {
+            "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0"
+          },
+          "type": "backlog"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "id": "ea7a48d9-a787-45f0-83cf-ee292ba99925"
+        },
+        {
+          "id": "da6b8a3f-f54f-4d14-8d4b-105238a58d29"
+        },
+        {
+          "id": "d5249971-cf97-4ced-9dc8-80d78d896682"
+        }
+      ],
+      "pageInfo": {
+        "endCursor": "d5249971-cf97-4ced-9dc8-80d78d896682",
+        "hasNextPage": false
+      }
+    }
+  }
+}

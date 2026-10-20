@@ -1,0 +1,32 @@
+{
+  "data": {
+    "customView": {
+      "issues": {
+        "nodes": [
+          {
+            "id": "ea7a48d9-a787-45f0-83cf-ee292ba99925"
+          },
+          {
+            "id": "d383f168-e77e-4db3-a393-be62c28d6c2c"
+          },
+          {
+            "id": "b1e7e8f1-8a66-4762-a6bc-c2d06290c67f"
+          },
+          {
+            "id": "7662ff5a-2b5f-451c-ab2c-75d66ad1c748"
+          },
+          {
+            "id": "c3e10385-09ac-4b8e-84db-21e16627500c"
+          },
+          {
+            "id": "d5249971-cf97-4ced-9dc8-80d78d896682"
+          }
+        ],
+        "pageInfo": {
+          "endCursor": "d5249971-cf97-4ced-9dc8-80d78d896682",
+          "hasNextPage": false
+        }
+      }
+    }
+  }
+}

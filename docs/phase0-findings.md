@@ -190,3 +190,27 @@ issueDelete: HTTP 200, success: true, codes: none
 - ProbeIssue("TBA-1"): works (HTTP 200, codes: none)
 - ProbeSearch(<seeded title>): HTTP 200, 1 results, codes: none
 - no header with `endpoint` in its name
+
+### Plan 2 recording (2026-10-20)
+
+`record_board_fixtures` (tests/live_linear.rs) ran against the testbed. Its fixtures are in `tests/fixtures/recorded/linear/`. It used four shared views on TBA set up for the check, and it confirmed or corrected Decision 20's assumptions:
+
+| view | layout | issueGrouping | issueGroupingLabelGroupId | issueSubGrouping | viewOrdering | viewOrderingDirection |
+|---|---|---|---|---|---|---|
+| Fixture by project | list | project | absent | none | priority | null |
+| Fixture by cycle | board | cycle | absent | none | priority | null |
+| Fixture by type (grouped by the Type label group) | board | labelGroup | absent | workflowState | dateCreated | desc |
+| Fixture by due | list | none | absent | none | dueDate | desc |
+
+- All four views have `modelName` `Issue`.
+- **Label groups:** grouping by a label group is `labelGroup`, not `label`, and `issueGroupingLabelGroupId` came back absent. Consequence: `labelGroup` maps to the group named by the id when there is one. Otherwise it maps to the board's only single-select label group, when it has exactly one. Otherwise it is unrecognised and falls back. Sub-grouping works the same way.
+- **Ordering:** created-date ordering is `dateCreated`, not `createdAt`. Updated-date ordering is assumed to be `dateUpdated` by analogy; it was not measured. Due-date ordering is `dueDate`, as assumed.
+- **Rate limits:**
+  - `x-ratelimit-requests-reset` has 13 digits, so it is in milliseconds.
+  - The rate headers present are `x-complexity`, plus `x-ratelimit-{requests,complexity}-{limit,remaining,reset}`.
+  - `rateLimitStatus.limits[].type` is `requests` and `complexity`.
+- **Project lookup by slug:** `project(id: <slugId>)` resolves, and the board's canonical key is the project's UUID.
+- **Empty filter:** an `IssueIds` request with `{"and": [<board filter>, {}]}` (the All issues tab) is accepted. It returned 19 ids on TBA.
+- **Tab counts:**
+  - The team board has 11 tabs (3 built-in, 8 views).
+  - The project board has 14 tabs (3 built-in, the project's view, then 10 team and workspace views).
