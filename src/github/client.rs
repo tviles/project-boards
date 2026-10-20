@@ -59,15 +59,13 @@ impl Github {
             number: i64::from(board.number),
         });
         let data = self.run(GraphqlRequest::from_body(body)).await?.data;
-        let node = [&data["user"]["projectV2"], &data["organization"]["projectV2"]]
-            .into_iter()
-            .find(|v| v.is_object())
-            .ok_or_else(|| {
-                BackendError::Api(vec![GraphqlErrorEntry {
-                    message: format!("project {board} was not found, or this token cannot see it (fine-grained tokens cannot read boards owned by a user account; use `gh auth login`)"),
-                    kind: Some("NOT_FOUND".into()),
-                }])
-            })?;
+        let node = [
+            &data["user"]["projectV2"],
+            &data["organization"]["projectV2"],
+        ]
+        .into_iter()
+        .find(|v| v.is_object())
+        .ok_or_else(|| not_found(board))?;
         convert::project_from_wire(node, &BoardKey::Github(board.clone()))
     }
 
@@ -80,7 +78,12 @@ impl Github {
             id: id.0.clone(),
         });
         let data = self.run(GraphqlRequest::from_body(body)).await?.data;
-        convert::project_from_wire(&data["node"], board)
+        let node = &data["node"];
+        if !node.is_object() {
+            // A deleted board's node is null: not found, as `resolve_project` reports it.
+            return Err(not_found(board));
+        }
+        convert::project_from_wire(node, board)
     }
 
     pub async fn viewer(&self) -> Result<ViewerCheck, BackendError> {
@@ -92,6 +95,17 @@ impl Github {
             rate: response.rate,
         })
     }
+}
+
+/// The not-found error a board that is gone or invisible to the token resolves to; the
+/// controller reads it with `BackendError::is_not_found` and forgets the board.
+fn not_found(board: &dyn std::fmt::Display) -> BackendError {
+    BackendError::Api(vec![GraphqlErrorEntry {
+        message: format!(
+            "project {board} was not found, or this token cannot see it (fine-grained tokens cannot read boards owned by a user account; use `gh auth login`)"
+        ),
+        kind: Some("NOT_FOUND".into()),
+    }])
 }
 
 pub use crate::transport::Page;

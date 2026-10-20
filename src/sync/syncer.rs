@@ -850,6 +850,30 @@ mod tests {
         );
     }
 
+    /// Decision 9 on the cached path: a deleted GitHub board's refresh is not found, so the
+    /// controller forgets it, whether GitHub answers a null node or a null node with a
+    /// tolerated NOT_FOUND entry.
+    #[tokio::test]
+    async fn refreshing_a_deleted_github_board_is_not_found() {
+        let (t, s, mut rx) = setup(2000);
+        t.push("ProjectSchema", json!({"node": null}));
+        t.push_body(
+            "ProjectSchema",
+            json!({"data": {"node": null}, "errors": [{"type": "NOT_FOUND",
+                   "message": "Could not resolve to a node with the global id of 'P'"}]}),
+        );
+        let project = crate::store::snapshot::tests::project();
+        for _ in 0..2 {
+            assert!(!s.refresh_project(&project).await);
+            let events = drain(&mut rx);
+            assert!(
+                matches!(&events[..], [SyncEvent::Failed { task: SyncTask::Resolve, error }]
+                    if error.is_not_found() && error.to_string().contains("tviles/3")),
+                "{events:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn incremental_uses_the_updated_filter() {
         let (t, s, mut rx) = setup(2000);
