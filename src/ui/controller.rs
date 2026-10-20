@@ -194,6 +194,9 @@ pub struct Controller {
     /// The repository's remembered board was skipped at start because its provider has no
     /// credentials: a linked board opened in its place is not remembered over it.
     remembered_skipped: bool,
+    /// The key the shown board was opened by, when it resolved to another (canonical) key:
+    /// this pane stays registered under both, so opening either finds it.
+    alias: Option<BoardKey>,
 }
 
 impl Controller {
@@ -232,6 +235,7 @@ impl Controller {
             cache_dirty: false,
             remember_on_resolve: false,
             remembered_skipped: false,
+            alias: None,
         }
     }
 
@@ -382,20 +386,40 @@ impl Controller {
 
     /// The shown board resolved as `resolved`. A Linear board opened by its team key or
     /// project slug resolves to its canonical UUID key (`linear:team:TBA` →
-    /// `linear:team:<uuid>`); from then on it is shown, registered and cached under that key.
-    /// GitHub keys are canonical already. Once per opening, the board is remembered for the
-    /// repository (Decision 9).
-    fn on_resolved(&mut self, resolved: &BoardKey) {
+    /// `linear:team:<uuid>`); from then on it is shown and cached under that key, and the pane
+    /// is registered under both keys. GitHub keys are canonical already. If another live pane
+    /// already shows the canonical board, it is focused and this pane exits, as `open_board`
+    /// does for duplicates; its record is never taken. Once per opening, the board is
+    /// remembered for the repository (Decision 9).
+    fn on_resolved(&mut self, resolved: &BoardKey) -> Vec<Effect> {
         let Some(requested) = self.board.clone() else {
-            return;
+            return Vec::new();
         };
         if requested.provider() == Provider::Linear && &requested != resolved {
             self.board = Some(resolved.clone());
-            if let Some(own) = &self.options.own_pane
-                && let Err(e) =
-                    PaneRegistry::new(&self.options.state_dir).rekey(&requested, resolved, own)
-            {
-                tracing::warn!(error = %e, "could not record this pane in the registry");
+            self.alias = Some(requested);
+            if let Some(own) = self.options.own_pane.clone() {
+                let registry = PaneRegistry::new(&self.options.state_dir);
+                match registry
+                    .live_pane(self.herdr.as_ref(), resolved)
+                    .filter(|p| *p != own)
+                {
+                    Some(other) => match focus_plugin_pane(self.herdr.as_ref(), &other) {
+                        Ok(()) => {
+                            self.remember_on_resolve = false;
+                            return vec![Effect::Exit];
+                        }
+                        // Shown here as well; the record stays the other pane's.
+                        Err(e) => {
+                            tracing::warn!(error = %e, "could not focus the pane showing this board; showing it here")
+                        }
+                    },
+                    None => {
+                        if let Err(e) = registry.register(resolved, &own) {
+                            tracing::warn!(error = %e, "could not record this pane in the registry");
+                        }
+                    }
+                }
             }
         }
         if std::mem::take(&mut self.remember_on_resolve)
@@ -405,6 +429,7 @@ impl Controller {
         {
             tracing::warn!(error = %e, "could not save the remembered board");
         }
+        Vec::new()
     }
 
     /// The shown board does not exist or cannot be seen (Decision 9): forget it for the
@@ -430,15 +455,20 @@ impl Controller {
         effects
     }
 
-    /// Unregisters this pane from the board it shows. Called on board switch and on exit.
+    /// Unregisters this pane from the board it shows, under its canonical key and the key it
+    /// was opened by. Called on board switch and on exit.
     pub fn release(&mut self) {
         if self.cache_dirty {
             self.persist_cache();
         }
-        if let (Some(board), Some(own)) = (self.board.take(), &self.options.own_pane)
-            && let Err(e) = PaneRegistry::new(&self.options.state_dir).unregister(&board, own)
-        {
-            tracing::warn!(error = %e, "could not remove this pane from the registry");
+        let keys = [self.board.take(), self.alias.take()];
+        if let Some(own) = &self.options.own_pane {
+            let registry = PaneRegistry::new(&self.options.state_dir);
+            for board in keys.iter().flatten() {
+                if let Err(e) = registry.unregister(board, own) {
+                    tracing::warn!(error = %e, "could not remove this pane from the registry");
+                }
+            }
         }
     }
 
@@ -581,7 +611,12 @@ impl Controller {
                     return self.board_not_found(board);
                 }
             }
-            SyncEvent::Project(project) => self.on_resolved(&project.board),
+            SyncEvent::Project(project) => {
+                let effects = self.on_resolved(&project.board);
+                if !effects.is_empty() {
+                    return effects;
+                }
+            }
             _ => {}
         }
 
@@ -1075,18 +1110,118 @@ mod tests {
         assert_eq!(remembered(dir.path()), Some(uuid.clone()));
         let registry = PaneRegistry::new(dir.path());
         assert_eq!(registry.lookup(&uuid).as_deref(), Some("me"));
-        assert_eq!(registry.lookup(&key), None);
-        for file in ["state.json", "panes.json"] {
-            let text = std::fs::read_to_string(dir.path().join(file)).unwrap();
-            assert!(
-                text.contains(LINEAR_TEAM) && !text.contains("TBA"),
-                "{file}: {text}"
-            );
-        }
+        // The typed key stays registered as an alias, so opening it again finds this pane.
+        assert_eq!(registry.lookup(&key).as_deref(), Some("me"));
+        let text = std::fs::read_to_string(dir.path().join("state.json")).unwrap();
+        assert!(
+            text.contains(LINEAR_TEAM) && !text.contains("TBA"),
+            "state.json: {text}"
+        );
         // The loaded board is cached under its canonical key.
         c.handle(at(&c, complete("2026-10-01T12:00:00Z")), t0);
         assert!(cache_path(dir.path(), &uuid).exists());
         assert!(!cache_path(dir.path(), &key).exists());
+    }
+
+    fn open_env(dir: &Path) -> crate::herdr::env::PluginEnv {
+        crate::herdr::env::PluginEnv {
+            in_herdr: true,
+            plugin_id: "tviles.project-boards".into(),
+            config_dir: dir.into(),
+            state_dir: dir.into(),
+            pane_id: None,
+            workspace_id: Some("w1".into()),
+            context: Default::default(),
+        }
+    }
+
+    /// `open --project linear:team:TBA` after a pane opened by that key resolved it: the
+    /// second open focuses that pane instead of opening a duplicate. Leaving the board drops
+    /// both of the pane's records.
+    #[test]
+    fn opening_a_team_key_again_focuses_the_pane_showing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let key: BoardKey = "linear:team:TBA".parse().unwrap();
+        let uuid: BoardKey = LINEAR_TEAM.parse().unwrap();
+        let (mut c, fake, t0) = controller(dir.path(), Some("linear:team:TBA"));
+        c.start(Ok(vec![Provider::Linear]), t0);
+        let mut project = snapshot().project;
+        project.board = uuid.clone();
+        project.id = ProjectId::new(LINEAR_TEAM);
+        c.handle(at(&c, SyncEvent::Project(project)), t0);
+
+        fake.respond(&["pane", "get", "me"], Ok(json!({})));
+        fake.respond(&["plugin", "pane", "focus", "me"], Ok(json!({})));
+        let args = crate::commands::open::OpenArgs {
+            project: Some(key.clone()),
+            ..Default::default()
+        };
+        let out = crate::commands::open::open(
+            &open_env(dir.path()),
+            fake.as_ref(),
+            &Config::default(),
+            &State::default(),
+            &args,
+            |_| None,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            crate::commands::open::OpenOutcome::Focused("me".into())
+        );
+
+        c.release();
+        let registry = PaneRegistry::new(dir.path());
+        assert_eq!(registry.lookup(&key), None);
+        assert_eq!(registry.lookup(&uuid), None);
+    }
+
+    /// A team key resolving to a board another live pane shows: that pane is focused and this
+    /// one exits, never taking the other pane's record. If the focus fails, this pane shows
+    /// the board too, and the other pane's record is still left alone.
+    #[test]
+    fn a_team_key_never_takes_the_record_of_another_pane_showing_its_board() {
+        for focusable in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let key: BoardKey = "linear:team:TBA".parse().unwrap();
+            let uuid: BoardKey = LINEAR_TEAM.parse().unwrap();
+            let registry = PaneRegistry::new(dir.path());
+            registry.register(&uuid, "other").unwrap();
+            let (mut c, fake, t0) = controller(dir.path(), Some("linear:team:TBA"));
+            fake.respond(&["pane", "get", "other"], Ok(json!({})));
+            if focusable {
+                fake.respond(&["plugin", "pane", "focus", "other"], Ok(json!({})));
+            }
+            c.start(Ok(vec![Provider::Linear]), t0);
+            let mut project = snapshot().project;
+            project.board = uuid.clone();
+            project.id = ProjectId::new(LINEAR_TEAM);
+            let effects = c.handle(at(&c, SyncEvent::Project(project)), t0);
+            assert_eq!(
+                registry.lookup(&uuid).as_deref(),
+                Some("other"),
+                "{focusable}"
+            );
+            if focusable {
+                assert_eq!(effects, vec![Effect::Exit]);
+                assert_eq!(
+                    remembered(dir.path()),
+                    None,
+                    "the duplicate is not remembered"
+                );
+            } else {
+                assert!(!effects.contains(&Effect::Exit), "{effects:?}");
+                assert_eq!(c.board(), Some(&uuid));
+                assert_eq!(registry.lookup(&key).as_deref(), Some("me"));
+            }
+            c.release();
+            assert_eq!(
+                registry.lookup(&uuid).as_deref(),
+                Some("other"),
+                "{focusable}"
+            );
+            assert_eq!(registry.lookup(&key), None, "{focusable}");
+        }
     }
 
     #[test]
