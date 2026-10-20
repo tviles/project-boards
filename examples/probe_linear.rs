@@ -739,17 +739,26 @@ fn uuid_v4() -> String {
 
 /// Trashes a throwaway issue and prints only the HTTP status and codes.
 async fn trash_throwaway(linear: &Linear, id: &str) {
-    let raw = post_soft(
-        linear,
-        &ProbeTrash::build_query(probe_trash::Variables { id: id.into() }),
-    )
-    .await;
-    println!(
-        "- trashed throwaway {id}: HTTP {}, success: {}, codes: {}",
-        raw.status,
-        raw.data()["issueDelete"]["success"],
-        codes(&raw)
-    );
+    let mut last = String::new();
+    for attempt in 0..3u64 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(2 * attempt)).await;
+        }
+        let raw = post_soft(
+            linear,
+            &ProbeTrash::build_query(probe_trash::Variables { id: id.into() }),
+        )
+        .await;
+        if raw.status == 200
+            && raw.error_codes().is_empty()
+            && raw.data()["issueDelete"]["success"] == true
+        {
+            println!("- trashed throwaway {id}: HTTP {}", raw.status);
+            return;
+        }
+        last = describe(&raw);
+    }
+    println!("- NOT TRASHED: {id} (3 tries; last: {last})");
 }
 
 fn created_id(raw: &Raw) -> Option<String> {
@@ -850,11 +859,19 @@ async fn l11_duplicate_ids(linear: &Linear, testbed: &Testbed) {
     } else {
         println!("- comment duplicate: not run (the issue was not created)");
     }
-    // Trash whatever the first create made, by the id it chose or the one it returned.
-    let trash_id = created_id(&first).or_else(|| created_id(&second));
-    match trash_id {
-        Some(t) => trash_throwaway(linear, &t).await,
-        None => println!("- nothing to trash: no create returned an id"),
+    // Trash every distinct id: what each create returned and the id we chose (a duplicate may
+    // have made a second issue; trashing a nonexistent id is harmless).
+    let mut to_trash: Vec<String> = Vec::new();
+    for t in [created_id(&first), created_id(&second), Some(id.clone())]
+        .into_iter()
+        .flatten()
+    {
+        if !to_trash.contains(&t) {
+            to_trash.push(t);
+        }
+    }
+    for t in &to_trash {
+        trash_throwaway(linear, t).await;
     }
     println!();
 }
