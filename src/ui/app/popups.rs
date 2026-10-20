@@ -1002,11 +1002,20 @@ impl App {
         self.close_popup();
         // Keep the cursor on this item when the edit re-sorts or regroups the view.
         self.selected_id = Some(item.clone());
-        let Some(item) = self.item(&item).cloned() else {
-            return self.say(crate::ui::app::edit::NO_LONGER_ON_BOARD);
-        };
-        let Some(field) = self.project().and_then(|p| p.field(&field)).cloned() else {
-            return self.say("That field is no longer on the board");
+        let found = self
+            .item(&item)
+            .cloned()
+            .zip(self.project().and_then(|p| p.field(&field)).cloned());
+        let Some((item, field)) = found else {
+            if !self.is_linear() {
+                return self.submit_raw_value(item, field, value);
+            }
+            // A Linear value needs its item and field to find the issue's team's.
+            return self.say(if self.item(&item).is_none() {
+                crate::ui::app::edit::NO_LONGER_ON_BOARD
+            } else {
+                "That field is no longer on the board"
+            });
         };
         let current = item.value(&field.id);
         let value = match value {
@@ -1022,6 +1031,23 @@ impl App {
         match self.field_op(&item, &field, value) {
             Ok(op) => self.submit(OpKind::SetField, op),
             Err(reason) => self.say(&reason),
+        }
+    }
+
+    /// `submit_value` on a GitHub board whose item or field has gone while the popover was
+    /// open (a reload), exactly as before Linear editing: a set is sent as it is (`submit`
+    /// says when the item has gone), and a clear only when the item still holds a value.
+    fn submit_raw_value(
+        &mut self,
+        item: ItemId,
+        field: FieldId,
+        value: Option<FieldValue>,
+    ) -> Vec<Command> {
+        let held = self.item(&item).is_some_and(|i| i.value(&field).is_some());
+        match value {
+            Some(value) => self.submit(OpKind::SetField, Op::SetField { item, field, value }),
+            None if held => self.submit(OpKind::SetField, Op::ClearField { item, field }),
+            None => Vec::new(),
         }
     }
 
@@ -3514,5 +3540,64 @@ mod tests {
         a.handle_key(code(KeyCode::Esc));
         assert!(a.popup.is_none(), "no earlier step: Esc closes");
         assert!(a.store.pending().is_empty());
+    }
+
+    /// GitHub keeps its behaviour when a reload removed the field or item while the
+    /// popover was open: a set is still sent, a clear only when the item holds a value.
+    #[test]
+    fn a_github_edit_whose_field_or_item_has_gone_behaves_as_before() {
+        let mut a = test_app();
+        let gone = FieldId::new("F_gone");
+        let value = FieldValue::Text("x".into());
+        let cmds = a.submit_value(ItemId::new("a"), gone.clone(), Some(value.clone()));
+        assert_eq!(cmds, vec![Command::Send(1)]);
+        assert_eq!(
+            a.store.pending()[0].op,
+            Op::SetField {
+                item: ItemId::new("a"),
+                field: gone.clone(),
+                value,
+            }
+        );
+        // The item holds no value for the gone field: a clear sends nothing, silently.
+        a.status.flash = None;
+        assert!(
+            a.submit_value(ItemId::new("a"), gone.clone(), None)
+                .is_empty()
+        );
+        assert_eq!(a.status.flash, None);
+        // A value stored for a field the project no longer has is still cleared.
+        let mut snap = a.store.confirmed().unwrap().clone();
+        snap.project.fields.retain(|f| f.id.as_str() != "F_notes");
+        snap.items
+            .get_mut(&ItemId::new("a"))
+            .unwrap()
+            .values
+            .insert(FieldId::new("F_notes"), FieldValue::Text("old".into()));
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        let cmds = a.submit_value(ItemId::new("a"), FieldId::new("F_notes"), None);
+        assert_eq!(cmds, vec![Command::Send(2)]);
+        assert_eq!(
+            a.store.pending()[1].op,
+            Op::ClearField {
+                item: ItemId::new("a"),
+                field: FieldId::new("F_notes"),
+            }
+        );
+        // A clear for an item that has gone is a silent no-op; a set says why.
+        assert!(
+            a.submit_value(ItemId::new("zz"), gone.clone(), None)
+                .is_empty()
+        );
+        assert_eq!(a.status.flash, None);
+        assert!(
+            a.submit_value(ItemId::new("zz"), gone, Some(FieldValue::Text("x".into())))
+                .is_empty()
+        );
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some(crate::ui::app::edit::NO_LONGER_ON_BOARD)
+        );
+        assert_eq!(a.pending_count(), 2);
     }
 }

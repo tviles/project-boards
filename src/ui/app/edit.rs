@@ -1213,16 +1213,13 @@ impl App {
             .as_str()
             .starts_with(crate::model::teams::GROUP_FIELD_PREFIX);
         if self.is_linear() && group {
-            // The label the group holds now; its id is the option's when `label_ids`
-            // does not name it (an edit still sending changed the value).
+            // The label the group holds now: a group value's option id is its label's id
+            // (`linear::convert`, and `Op::apply` for an edit still sending). Not looked up
+            // by name, which a plain label of the same name would confuse.
             let replaces = match item.value(&field.id) {
-                Some(FieldValue::SingleSelect { option_id, name }) => Some(
-                    item.content_fields
-                        .label_ids
-                        .get(name)
-                        .cloned()
-                        .unwrap_or_else(|| option_id.as_str().to_string()),
-                ),
+                Some(FieldValue::SingleSelect { option_id, .. }) => {
+                    Some(option_id.as_str().to_string())
+                }
                 _ => None,
             };
             return Ok(Op::GroupLabel {
@@ -5513,7 +5510,16 @@ pub(crate) mod tests {
 
     #[test]
     fn a_group_field_swaps_its_label() {
-        let mut a = linear_app();
+        // A plain label named like the group's (a name map holds one of them): the label
+        // replaced is still the group's own.
+        let mut snap = linear_snapshot();
+        snap.items
+            .get_mut(&ItemId::new("i-tba-1"))
+            .unwrap()
+            .content_fields
+            .label_ids
+            .insert("Bug".into(), "l-plain-bug".into());
+        let mut a = app_with(snap);
         pick(&mut a, "TBA-1");
         open_field(&mut a, "type");
         type_in(&mut a, "feature");
@@ -5584,21 +5590,44 @@ pub(crate) mod tests {
     #[test]
     fn a_forbidden_edit_is_undone_and_later_edits_still_go() {
         let mut a = linear_app();
+        // Both moves are queued before Linear answers the first (spec section 10).
         pick(&mut a, "TBB-2");
         assert_eq!(a.handle_key(key('>')), vec![Command::Send(1)]);
+        pick(&mut a, "TBA-2");
+        assert_eq!(a.handle_key(key('<')), vec![Command::Send(2)]);
+        let denial = BackendError::MissingPermission {
+            provider: Provider::Linear,
+            needed: vec![],
+        };
         a.on_sync(SyncEvent::OpDone {
             id: 1,
-            result: Err(BackendError::MissingPermission {
-                provider: Provider::Linear,
-                needed: vec![],
-            }),
+            result: Err(denial.clone()),
         });
         assert_eq!(linear_status(&a, "TBB-2"), "In Review", "the card returns");
         assert_eq!(a.errors.len(), 1);
-        assert!(a.refused_scopes.is_empty());
-        assert!(a.store.pending().is_empty());
-        pick(&mut a, "TBA-2");
-        assert_eq!(a.handle_key(key('<')), vec![Command::Send(2)]);
+        assert_eq!(
+            a.errors[0].message,
+            error_message(&denial, Provider::Linear)
+        );
+        assert!(!a.errors[0].message.is_empty());
+        assert!(a.refused_scopes.is_empty(), "Linear refuses no scope");
+        // The TBA move is still on its way, and still shows.
+        assert_eq!(
+            pending_ops(&a),
+            [set_linear(
+                "i-tba-2",
+                crate::linear::ids::STATUS,
+                select_value("s-a-todo", "Todo")
+            )]
+        );
+        assert_eq!(a.store.pending()[0].id, 2);
         assert_eq!(linear_status(&a, "TBA-2"), "Todo");
+        // A later move is still allowed.
+        a.extra_filter.insert(
+            crate::model::ViewId::new("V_board"),
+            "-status:\"In Progress\"".into(),
+        );
+        pick(&mut a, "TBB-1");
+        assert_eq!(a.handle_key(key('>')), vec![Command::Send(3)]);
     }
 }
