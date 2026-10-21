@@ -288,11 +288,13 @@ impl Controller {
             Ok(providers) => providers,
             Err(errors) => {
                 self.app.setup = Some(setup_message_for_all(&errors));
+                self.app.setup_offers_boards = false;
                 self.app.mode = Mode::Setup;
                 return Vec::new();
             }
         };
         self.app.setup = None;
+        self.app.setup_offers_boards = false;
         if self.app.mode == Mode::Setup {
             self.app.mode = Mode::Normal;
         }
@@ -2673,6 +2675,118 @@ mod tests {
     }
 
     const LINEAR_TEAM: &str = "linear:team:1b4e28ba-2fa1-4d3b-a3f5-ef19b5a7633b";
+
+    /// The Linear key was removed after the board was opened: its resolve fails, and the
+    /// setup screen offers the GitHub boards the user can still open.
+    #[test]
+    fn a_board_whose_key_is_gone_can_switch_from_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some(LINEAR_TEAM));
+        let linear: BoardKey = LINEAR_TEAM.parse().unwrap();
+        assert_eq!(
+            c.start(Ok(vec![Provider::Github]), t0),
+            vec![sp(&c, SyncJob::Resolve(linear))]
+        );
+        let error = BackendError::NoCredentials {
+            provider: Provider::Linear,
+        };
+        let no_key = at(
+            &c,
+            SyncEvent::Failed {
+                task: SyncTask::Resolve,
+                error: error.clone(),
+            },
+        );
+        c.handle(no_key, t0);
+        assert_eq!(c.app.mode, Mode::Setup);
+        assert_eq!(
+            c.app.setup,
+            Some(format!(
+                "{}\nOr press B to open another board.",
+                setup_message(&error).unwrap()
+            ))
+        );
+        let effects = c.handle(Input::Key(key('B')), t0);
+        assert_eq!(c.app.mode, Mode::Picker);
+        assert_eq!(
+            effects,
+            vec![sp(
+                &c,
+                SyncJob::Projects(Some("tviles/app".parse().unwrap()))
+            )]
+        );
+        let list = at(
+            &c,
+            SyncEvent::Projects {
+                boards: vec![summary("tviles/4")],
+                notes: vec![],
+            },
+        );
+        c.handle(list, t0);
+        let effects = c.handle(Input::Key(code(crossterm::event::KeyCode::Enter)), t0);
+        let other: BoardKey = "tviles/4".parse().unwrap();
+        assert_eq!(effects, vec![sp(&c, SyncJob::Resolve(other.clone()))]);
+        assert_eq!(c.board(), Some(&other));
+        assert_eq!(c.app.mode, Mode::Normal, "the chosen board opens as usual");
+        assert_eq!(c.app.setup, None);
+    }
+
+    #[test]
+    fn a_rejected_github_token_can_switch_from_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(vec![Provider::Github, Provider::Linear]), t0);
+        let rejected = at(
+            &c,
+            SyncEvent::Failed {
+                task: SyncTask::Resolve,
+                error: BackendError::Unauthorized {
+                    provider: Provider::Github,
+                },
+            },
+        );
+        c.handle(rejected, t0);
+        assert_eq!(c.app.mode, Mode::Setup);
+        let text = c.app.setup.clone().unwrap();
+        assert!(
+            text.ends_with("then press r.\nOr press B to open another board."),
+            "{text}"
+        );
+        let effects = c.handle(Input::Key(key('B')), t0);
+        assert_eq!(c.app.mode, Mode::Picker);
+        assert!(!c.app.picker.as_ref().unwrap().required, "Esc can go back");
+        assert_eq!(
+            effects,
+            vec![sp(
+                &c,
+                SyncJob::Projects(Some("tviles/app".parse().unwrap()))
+            )]
+        );
+        c.handle(Input::Key(code(crossterm::event::KeyCode::Esc)), t0);
+        assert_eq!(c.app.mode, Mode::Setup);
+        assert_eq!(c.app.setup, Some(text));
+    }
+
+    /// With no provider's credentials there is no other board to open: no line, and `B` does
+    /// nothing.
+    #[test]
+    fn the_start_setup_screen_offers_no_other_board() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        let none = vec![
+            BackendError::NoCredentials {
+                provider: Provider::Github,
+            },
+            BackendError::NoCredentials {
+                provider: Provider::Linear,
+            },
+        ];
+        c.start(Err(none.clone()), t0);
+        assert_eq!(c.app.mode, Mode::Setup);
+        assert_eq!(c.app.setup, Some(setup_message_for_all(&none)));
+        assert!(c.handle(Input::Key(key('B')), t0).is_empty());
+        assert_eq!(c.app.mode, Mode::Setup);
+    }
 
     /// A controller with no fixed incremental mode, as the runtime builds it, on `board`
     /// with a cached snapshot whose load finished at noon.

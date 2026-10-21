@@ -139,6 +139,9 @@ pub struct App {
     pub detail: Option<DetailState>,
     pub picker: Option<PickerState>,
     pub setup: Option<String>,
+    /// The setup screen is for a board whose credentials failed, so `B` may open another
+    /// board; not when no provider has credentials, or the board list itself failed.
+    pub setup_offers_boards: bool,
     pub table_selected: usize,
     pub board_sel: BoardSelection,
     pub collapsed: HashSet<String>,
@@ -287,6 +290,7 @@ impl App {
             detail: None,
             picker: None,
             setup: None,
+            setup_offers_boards: false,
             table_selected: 0,
             board_sel: BoardSelection::default(),
             collapsed: HashSet::new(),
@@ -489,6 +493,11 @@ impl App {
     /// "loaded N of M" note. Config warnings stay. Edits still pending are never sent now;
     /// they are the new error log's entries, so none vanishes unrecorded.
     pub fn reset_for_new_board(&mut self) {
+        self.setup = None;
+        self.setup_offers_boards = false;
+        if self.mode == Mode::Setup {
+            self.mode = Mode::Normal;
+        }
         self.sticky.clear();
         self.search.clear();
         self.input.clear();
@@ -952,6 +961,9 @@ impl App {
                 KeyCode::Char('r') => vec![Command::Retry],
                 // Esc never quits; the keymap's Quit does, asking first while edits are sending.
                 _ if action == Some(Action::Quit) => self.request_quit(),
+                _ if action == Some(Action::PickBoard) && self.setup_offers_boards => {
+                    self.pick_board()
+                }
                 _ => Vec::new(),
             },
             Mode::Picker => self.handle_picker_key(key),
@@ -1089,21 +1101,26 @@ impl App {
                         self.restore_selection();
                         Vec::new()
                     }
-                    Some(Action::PickBoard) if self.pending_count() > 0 => {
-                        let n = self.pending_count();
-                        self.status.flash = Some(format!(
-                            "{n} edit{} still sending; switch boards when {} done",
-                            if n == 1 { " is" } else { "s are" },
-                            if n == 1 { "it is" } else { "they are" }
-                        ));
-                        Vec::new()
-                    }
-                    Some(Action::PickBoard) => vec![Command::ShowPicker],
+                    Some(Action::PickBoard) => self.pick_board(),
                     Some(Action::Quit) => self.request_quit(),
                     _ => Vec::new(),
                 }
             }
         }
+    }
+
+    /// `B`: the board picker, unless edits are still sending.
+    fn pick_board(&mut self) -> Vec<Command> {
+        let n = self.pending_count();
+        if n > 0 {
+            self.status.flash = Some(format!(
+                "{n} edit{} still sending; switch boards when {} done",
+                if n == 1 { " is" } else { "s are" },
+                if n == 1 { "it is" } else { "they are" }
+            ));
+            return Vec::new();
+        }
+        vec![Command::ShowPicker]
     }
 
     fn handle_picker_key(&mut self, key: KeyEvent) -> Vec<Command> {
@@ -1113,16 +1130,26 @@ impl App {
         };
         match picker.handle(&key) {
             PickerOutcome::None => Vec::new(),
+            // Opened from the setup screen, the picker goes back to it: a chosen board leaves
+            // it once it opens (`reset_for_new_board`).
             PickerOutcome::Chosen(board) => {
                 self.picker = None;
-                self.mode = Mode::Normal;
+                self.mode = self.after_picker();
                 vec![Command::PickBoard(board)]
             }
             PickerOutcome::Cancel => {
                 self.picker = None;
-                self.mode = Mode::Normal;
+                self.mode = self.after_picker();
                 Vec::new()
             }
+        }
+    }
+
+    fn after_picker(&self) -> Mode {
+        if self.setup.is_some() {
+            Mode::Setup
+        } else {
+            Mode::Normal
         }
     }
 
@@ -1214,7 +1241,16 @@ impl App {
                 if matches!(task, SyncTask::FullLoad | SyncTask::Resolve) {
                     self.status.loading = None;
                 }
-                if let Some(message) = setup_message(&error) {
+                if let Some(mut message) = setup_message(&error) {
+                    // A failed board list has no board to offer; any other failure is the
+                    // board's, and another provider's boards may still open.
+                    self.setup_offers_boards = !matches!(task, SyncTask::Projects);
+                    if self.setup_offers_boards
+                        && let Some(k) = self.keymap.keys_for(Action::PickBoard).first()
+                    {
+                        message
+                            .push_str(&format!("\nOr press {} to open another board.", k.label()));
+                    }
                     self.setup = Some(message);
                     self.mode = Mode::Setup;
                 } else if let (SyncTask::Detail(id), Some(state)) = (&task, self.detail.as_mut()) {
@@ -2524,6 +2560,84 @@ mod tests {
                 .unwrap()
                 .contains("No Linear API key found")
         );
+    }
+
+    /// A board whose credentials fail: its setup text, then the line offering another board.
+    fn failing_board_setup(error: &BackendError) -> String {
+        format!(
+            "{}\nOr press B to open another board.",
+            setup_message(error).unwrap()
+        )
+    }
+
+    #[test]
+    fn cancelling_the_picker_returns_to_setup() {
+        let mut a = app();
+        let error = BackendError::NoCredentials {
+            provider: Provider::Linear,
+        };
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::Resolve,
+            error: error.clone(),
+        });
+        assert_eq!(a.mode, Mode::Setup);
+        assert_eq!(a.setup, Some(failing_board_setup(&error)));
+        assert_eq!(a.handle_key(key('B')), vec![Command::ShowPicker]);
+        a.picker = Some(PickerState::loading(false)); // as the controller opens it
+        a.mode = Mode::Picker;
+        assert!(a.handle_key(code(KeyCode::Esc)).is_empty());
+        assert_eq!(a.mode, Mode::Setup);
+        assert_eq!(a.setup, Some(failing_board_setup(&error)));
+        assert!(a.picker.is_none());
+        assert_eq!(
+            a.handle_key(key('r')),
+            vec![Command::Retry],
+            "r still retries"
+        );
+    }
+
+    #[test]
+    fn setup_with_pending_edits_refuses_to_switch() {
+        let mut a = app();
+        a.submit(OpKind::Move, edit::tests::set_status("a", "o_done", "Done"));
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::FullLoad,
+            error: BackendError::Unauthorized {
+                provider: Provider::Github,
+            },
+        });
+        assert_eq!(a.mode, Mode::Setup);
+        assert!(a.handle_key(key('B')).is_empty());
+        assert_eq!(a.mode, Mode::Setup);
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("1 edit is still sending; switch boards when it is done")
+        );
+    }
+
+    #[test]
+    fn the_start_time_setup_text_has_no_board_line() {
+        let all = setup_message_for_all(&[
+            BackendError::NoCredentials {
+                provider: Provider::Github,
+            },
+            BackendError::NoCredentials {
+                provider: Provider::Linear,
+            },
+        ]);
+        assert!(!all.contains("another board"), "{all}");
+        // A failed board list has no other board to offer either.
+        let mut a = app();
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::Projects,
+            error: BackendError::Unauthorized {
+                provider: Provider::Github,
+            },
+        });
+        assert_eq!(a.mode, Mode::Setup);
+        assert!(!a.setup.as_deref().unwrap().contains("another board"));
+        assert!(a.handle_key(key('B')).is_empty());
+        assert_eq!(a.mode, Mode::Setup);
     }
 
     #[test]
