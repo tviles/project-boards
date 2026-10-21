@@ -6,7 +6,8 @@
 //! and record the fixtures (the board scenarios and `edits/`) with:
 //!   PB_RECORD=1 cargo test --features live --test live_linear record_ -- --ignored --nocapture
 //! Tests that write, and the recordings, run one at a time (`serial()`), so no recording
-//! catches another test's throwaway issue.
+//! catches another test's throwaway issue. After a failed `record_edit_fixtures` run, delete
+//! tests/fixtures/recorded/linear/edits/ and record it again: a partial scenario is not one.
 #![cfg(feature = "live")]
 
 #[path = "common/linear_testbed.rs"]
@@ -26,14 +27,12 @@ use project_boards::model::teams::{self, StateGoal, TeamRefusal};
 use project_boards::model::*;
 use project_boards::ops::send::send;
 use project_boards::ops::{Confirmed, NewItem, Op};
-use project_boards::transport::{
-    BoxFuture, GraphqlRequest, GraphqlResponse, HttpTransport, Transport,
-};
+use project_boards::transport::{HttpTransport, Transport};
 use project_boards_queries::linear as ops;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// The views Tyler set up on team TBA for the vocabulary check (Decision 20).
@@ -959,35 +958,6 @@ const EDIT_BODY: &str = "Edited by the **live suite**.\n\n- one\n- two";
 /// The testbed's workspace-level single-select label group (no team owns it).
 const TYPE_GROUP_NAME: &str = "Type";
 
-/// Counts the requests it passes on, to show a refusal sends nothing.
-struct Counting {
-    inner: Arc<dyn Transport>,
-    sent: AtomicUsize,
-}
-
-impl Counting {
-    fn new(inner: Arc<dyn Transport>) -> Self {
-        Self {
-            inner,
-            sent: AtomicUsize::new(0),
-        }
-    }
-
-    fn sent(&self) -> usize {
-        self.sent.load(Ordering::SeqCst)
-    }
-}
-
-impl Transport for Counting {
-    fn execute(
-        &self,
-        request: GraphqlRequest,
-    ) -> BoxFuture<'_, Result<GraphqlResponse, BackendError>> {
-        self.sent.fetch_add(1, Ordering::SeqCst);
-        self.inner.execute(request)
-    }
-}
-
 /// A fresh client UUID, as the UI makes one for a new issue or a comment.
 fn new_uuid() -> String {
     project_boards::uuid::new_v4().unwrap_or_else(|e| panic!("a UUID from /dev/urandom: {e}"))
@@ -1615,13 +1585,13 @@ async fn a_resent_comment_posts_once() {
     .await;
 }
 
+/// The live project board's data refuses a TBA issue a TBB-only state. That a refused move
+/// sends nothing is pinned offline by `a_move_into_a_column_the_team_lacks_is_refused`.
 #[tokio::test]
 #[ignore = "live: the Linear testbed; run with --ignored"]
-async fn a_move_into_another_teams_state_is_refused_before_sending() {
-    guarded().await;
+async fn a_cross_team_move_is_refused_by_the_live_boards_data() {
+    let app = guarded().await;
     let bed = testbed();
-    let counting = Arc::new(Counting::new(http()));
-    let app = Linear::new(counting.clone());
     let project = testbed_project(&app).await;
     let (tba, tbb) = (
         team_meta(&project, &bed.team_a),
@@ -1655,9 +1625,7 @@ async fn a_move_into_another_teams_state_is_refused_before_sending() {
     let states = states_of(&raw, vec![tba.id.clone()]).await;
     assert!(!states.iter().any(|s| s.name == theirs.name));
 
-    // The UI resolves the move before building the op; the refusal is its message, and
-    // nothing reaches Linear.
-    let before = counting.sent();
+    // The UI resolves the move before building the op; the refusal is its message.
     let refused = teams::for_issue(&project, issue, status, select(theirs));
     assert_eq!(
         refused,
@@ -1670,5 +1638,4 @@ async fn a_move_into_another_teams_state_is_refused_before_sending() {
         refused.unwrap_err().message(),
         format!("{} has no \"{}\" state", tba.key, theirs.name)
     );
-    assert_eq!(counting.sent(), before, "the refused move sent no request");
 }
