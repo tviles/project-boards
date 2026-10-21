@@ -1,0 +1,175 @@
+{
+  "data": {
+    "issueLabels": {
+      "nodes": [
+        {
+          "color": "#4ea7fc",
+          "id": "2c0450f3-36f1-4fdf-a1e6-e8e5f6a34eef",
+          "isGroup": false,
+          "name": "good first issue",
+          "parent": null
+        },
+        {
+          "color": "#f2994a",
+          "id": "819006f6-5494-496b-8468-eade436ed3d4",
+          "isGroup": false,
+          "name": "Docs",
+          "parent": null
+        },
+        {
+          "color": "#f2c94c",
+          "id": "ec3a49e4-b728-4a0d-b06c-9da15315268f",
+          "isGroup": false,
+          "name": "API",
+          "parent": null
+        },
+        {
+          "color": "#4cb782",
+          "id": "252b3a01-2176-46dc-90b8-c787d03131dc",
+          "isGroup": false,
+          "name": "UI",
+          "parent": null
+        },
+        {
+          "color": "#95a2b3",
+          "id": "58381970-23be-4bb8-815e-52684f3b1115",
+          "isGroup": false,
+          "name": "Chore",
+          "parent": {
+            "groupType": "singleSelect",
+            "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b"
+          }
+        },
+        {
+          "color": "#5e6ad2",
+          "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b",
+          "isGroup": true,
+          "name": "Type",
+          "parent": null
+        },
+        {
+          "color": "#4EA7FC",
+          "id": "c5f81cd9-4ca2-430b-9b70-05f1404677d8",
+          "isGroup": false,
+          "name": "Improvement",
+          "parent": null
+        },
+        {
+          "color": "#BB87FC",
+          "id": "40a07be5-06ea-4ad4-8964-4a6a515b7da6",
+          "isGroup": false,
+          "name": "Feature",
+          "parent": {
+            "groupType": "singleSelect",
+            "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b"
+          }
+        },
+        {
+          "color": "#EB5757",
+          "id": "321a3c2d-ce45-40c8-8c66-49ce0a1317b0",
+          "isGroup": false,
+          "name": "Bug",
+          "parent": {
+            "groupType": "singleSelect",
+            "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b"
+          }
+        }
+      ],
+      "pageInfo": {
+        "hasNextPage": false
+      }
+    },
+    "team": {
+      "labels": {
+        "nodes": [
+          {
+            "color": "#4ea7fc",
+            "id": "2c0450f3-36f1-4fdf-a1e6-e8e5f6a34eef",
+            "isGroup": false,
+            "name": "good first issue",
+            "parent": null
+          },
+          {
+            "color": "#f2994a",
+            "id": "819006f6-5494-496b-8468-eade436ed3d4",
+            "isGroup": false,
+            "name": "Docs",
+            "parent": null
+          },
+          {
+            "color": "#f2c94c",
+            "id": "ec3a49e4-b728-4a0d-b06c-9da15315268f",
+            "isGroup": false,
+            "name": "API",
+            "parent": null
+          },
+          {
+            "color": "#4cb782",
+            "id": "252b3a01-2176-46dc-90b8-c787d03131dc",
+            "isGroup": false,
+            "name": "UI",
+            "parent": null
+          },
+          {
+            "color": "#95a2b3",
+            "id": "58381970-23be-4bb8-815e-52684f3b1115",
+            "isGroup": false,
+            "name": "Chore",
+            "parent": {
+              "groupType": "singleSelect",
+              "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b"
+            }
+          },
+          {
+            "color": "#5e6ad2",
+            "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b",
+            "isGroup": true,
+            "name": "Type",
+            "parent": null
+          },
+          {
+            "color": "#4EA7FC",
+            "id": "c5f81cd9-4ca2-430b-9b70-05f1404677d8",
+            "isGroup": false,
+            "name": "Improvement",
+            "parent": null
+          },
+          {
+            "color": "#BB87FC",
+            "id": "40a07be5-06ea-4ad4-8964-4a6a515b7da6",
+            "isGroup": false,
+            "name": "Feature",
+            "parent": {
+              "groupType": "singleSelect",
+              "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b"
+            }
+          },
+          {
+            "color": "#EB5757",
+            "id": "321a3c2d-ce45-40c8-8c66-49ce0a1317b0",
+            "isGroup": false,
+            "name": "Bug",
+            "parent": {
+              "groupType": "singleSelect",
+              "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b"
+            }
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false
+        }
+      },
+      "members": {
+        "nodes": [
+          {
+            "displayName": "Avery Quill",
+            "id": "f4af6b5a-208f-4947-b8a3-b6da54a82cce"
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false
+        }
+      }
+    }
+  }
+}

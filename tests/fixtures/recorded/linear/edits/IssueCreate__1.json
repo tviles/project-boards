@@ -1,0 +1,52 @@
+{
+  "data": {
+    "issueCreate": {
+      "issue": {
+        "archivedAt": null,
+        "assignee": null,
+        "canceledAt": null,
+        "completedAt": null,
+        "createdAt": "2026-10-21T14:55:34.287Z",
+        "cycle": null,
+        "dueDate": null,
+        "estimate": null,
+        "id": "0de1f2e4-e741-4c05-98f6-a1055b1e8e79",
+        "identifier": "TBA-39",
+        "labels": {
+          "nodes": [
+            {
+              "color": "#95a2b3",
+              "id": "58381970-23be-4bb8-815e-52684f3b1115",
+              "name": "Chore",
+              "parent": {
+                "groupType": "singleSelect",
+                "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b"
+              }
+            }
+          ]
+        },
+        "number": 39,
+        "parent": null,
+        "priority": 2,
+        "project": null,
+        "sortOrder": -8382,
+        "state": {
+          "color": "#f2c94c",
+          "id": "5b9808ef-f21a-4c9c-9dc5-48dee8411a8c",
+          "name": "In Progress",
+          "position": 2,
+          "type": "started"
+        },
+        "team": {
+          "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0",
+          "key": "TBA"
+        },
+        "title": "pb-live throwaway 5ebf-18e0933b349ab0e0",
+        "trashed": null,
+        "updatedAt": "2026-10-21T14:55:34.287Z",
+        "url": "https://linear.app/testbed-workspace/issue/TBA-39/pb-live-throwaway-5ebf-18e0933b349ab0e0"
+      },
+      "success": true
+    }
+  }
+}

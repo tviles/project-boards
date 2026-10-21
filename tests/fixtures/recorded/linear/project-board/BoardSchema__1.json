@@ -327,7 +327,8 @@
           "id": "2c0450f3-36f1-4fdf-a1e6-e8e5f6a34eef",
           "isGroup": false,
           "name": "good first issue",
-          "parent": null
+          "parent": null,
+          "team": null
         },
         {
           "color": "#f2994a",
@@ -335,7 +336,8 @@
           "id": "819006f6-5494-496b-8468-eade436ed3d4",
           "isGroup": false,
           "name": "Docs",
-          "parent": null
+          "parent": null,
+          "team": null
         },
         {
           "color": "#f2c94c",
@@ -343,7 +345,8 @@
           "id": "ec3a49e4-b728-4a0d-b06c-9da15315268f",
           "isGroup": false,
           "name": "API",
-          "parent": null
+          "parent": null,
+          "team": null
         },
         {
           "color": "#4cb782",
@@ -351,7 +354,8 @@
           "id": "252b3a01-2176-46dc-90b8-c787d03131dc",
           "isGroup": false,
           "name": "UI",
-          "parent": null
+          "parent": null,
+          "team": null
         },
         {
           "color": "#95a2b3",
@@ -361,7 +365,8 @@
           "name": "Chore",
           "parent": {
             "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b"
-          }
+          },
+          "team": null
         },
         {
           "color": "#5e6ad2",
@@ -369,7 +374,8 @@
           "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b",
           "isGroup": true,
           "name": "Type",
-          "parent": null
+          "parent": null,
+          "team": null
         },
         {
           "color": "#4EA7FC",
@@ -377,7 +383,8 @@
           "id": "c5f81cd9-4ca2-430b-9b70-05f1404677d8",
           "isGroup": false,
           "name": "Improvement",
-          "parent": null
+          "parent": null,
+          "team": null
         },
         {
           "color": "#BB87FC",
@@ -387,7 +394,8 @@
           "name": "Feature",
           "parent": {
             "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b"
-          }
+          },
+          "team": null
         },
         {
           "color": "#EB5757",
@@ -397,7 +405,8 @@
           "name": "Bug",
           "parent": {
             "id": "5649c6a3-6c17-4e06-a924-e776eb41d42b"
-          }
+          },
+          "team": null
         }
       ]
     },
