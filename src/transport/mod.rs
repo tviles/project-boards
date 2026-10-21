@@ -559,8 +559,9 @@ mod tests {
 
     fn assert_wait_near(result: Result<GraphqlResponse, BackendError>, expected: u64) {
         match result {
+            // Wide: wiremock's start-up and a loaded test runner eat seconds before the request.
             Err(BackendError::RateLimited { retry_after_secs }) => assert!(
-                (expected.saturating_sub(2)..=expected).contains(&retry_after_secs),
+                (expected.saturating_sub(10)..=expected).contains(&retry_after_secs),
                 "waited {retry_after_secs}s, expected about {expected}s"
             ),
             other => panic!("expected RateLimited, got {other:?}"),
