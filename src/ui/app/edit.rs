@@ -278,12 +278,29 @@ pub fn ago(elapsed: std::time::Duration) -> String {
     }
 }
 
-/// The provider's own words for a failure; other errors as their message.
+/// The provider's own words for a failed edit; other errors as their message.
 pub fn error_message(error: &BackendError, provider: Provider) -> String {
     crate::ui::text::sanitize(&raw_error_message(error, provider))
 }
 
+/// As `error_message`, for a failed lookup (a read): a Linear refusal keeps its read text.
+fn lookup_error_message(error: &BackendError, provider: Provider) -> String {
+    crate::ui::text::sanitize(&provider_message(error, provider))
+}
+
 fn raw_error_message(error: &BackendError, provider: Provider) -> String {
+    match error {
+        // `FORBIDDEN` on an edit: the key can see the board the user is looking at, but Linear
+        // permissions are per team (spec section 10).
+        BackendError::MissingPermission {
+            provider: Provider::Linear,
+            ..
+        } => "Linear refused this edit: the API key may not change this team's issues".into(),
+        other => provider_message(other, provider),
+    }
+}
+
+fn provider_message(error: &BackendError, provider: Provider) -> String {
     match error {
         BackendError::Api(entries) => {
             let messages: Vec<&str> = entries
@@ -473,7 +490,7 @@ impl App {
         let message = format!(
             "{}: {}",
             task_words(task),
-            error_message(error, self.board_provider())
+            lookup_error_message(error, self.board_provider())
         );
         match task {
             SyncTask::Candidates(repo) => {
@@ -2874,6 +2891,19 @@ pub(crate) mod tests {
         assert_eq!(
             error_message(&none, Provider::Linear),
             "Linear returned an error"
+        );
+    }
+
+    #[test]
+    fn a_refused_linear_lookup_keeps_the_read_text() {
+        // Only an edit's refusal says the key may not change the team's issues.
+        let denial = BackendError::MissingPermission {
+            provider: Provider::Linear,
+            needed: vec![],
+        };
+        assert_eq!(
+            lookup_error_message(&denial, Provider::Linear),
+            "Linear refused the request: the API key cannot see this board"
         );
     }
 
@@ -6100,11 +6130,18 @@ pub(crate) mod tests {
         });
         assert_eq!(linear_status(&a, "TBB-2"), "In Review", "the card returns");
         assert_eq!(a.errors.len(), 1);
-        assert_eq!(
-            a.errors[0].message,
-            error_message(&denial, Provider::Linear)
+        // The user is looking at the board: the key can see it, but may not edit this team.
+        let refused = "Linear refused this edit: the API key may not change this team's issues";
+        assert_eq!(a.errors[0].message, refused);
+        assert_eq!(error_message(&denial, Provider::Linear), refused);
+        assert!(
+            a.status
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains(refused)),
+            "{:?}",
+            a.status.error
         );
-        assert!(!a.errors[0].message.is_empty());
         assert!(a.refused_scopes.is_empty(), "Linear refuses no scope");
         // The TBA move is still on its way, and still shows.
         assert_eq!(
