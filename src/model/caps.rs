@@ -152,6 +152,8 @@ const LINEAR_CAPS: ProviderCaps = ProviderCaps {
         OpKind::Archive,
         OpKind::Unarchive,
         OpKind::Remove,
+        OpKind::Assignees,
+        OpKind::Labels,
     ],
     drafts: false,
     milestones: false,
@@ -610,12 +612,6 @@ mod tests {
                     .all(|k| LINEAR_CAPS.ops.contains(k))
             );
         }
-        assert_eq!(
-            check(Assignees, &issue("i", 1, "x"), &linear)
-                .unwrap_err()
-                .message(&none),
-            LINEAR_READ_ONLY
-        );
         for needs_repo in [false, true] {
             let denial = check_new(needs_repo, &linear).unwrap_err();
             assert_eq!(denial.message(&none), LINEAR_READ_ONLY);
@@ -639,14 +635,15 @@ mod tests {
             provider_caps(Provider::Linear).ops,
             [
                 Move, Reorder, SetField, Close, Reopen, Title, Body, Comment, Archive, Unarchive,
-                Remove
+                Remove, Assignees, Labels
             ]
         );
         let i = issue("i", 1, "x");
         assert_eq!(
             capabilities(&i, &linear),
             [
-                Move, Reorder, SetField, Archive, Remove, Title, Body, Comment, Close
+                Move, Reorder, SetField, Archive, Remove, Title, Body, Assignees, Labels, Comment,
+                Close
             ]
         );
         assert_eq!(

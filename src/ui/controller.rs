@@ -86,6 +86,8 @@ pub enum SyncJob {
     Projects(Option<RepoSlug>),
     /// Lookups for the editors; they never touch the poll scheduler.
     Candidates(RepoSlug),
+    /// A Linear team's members and labels, by team id.
+    TeamCandidates(String),
     Repos,
     LookupRepo(RepoSlug),
     Search {
@@ -112,6 +114,7 @@ impl SyncJob {
             Self::RepoProjects(_) => "RepoProjects",
             Self::Projects(_) => "Projects",
             Self::Candidates(_) => "Candidates",
+            Self::TeamCandidates(_) => "TeamCandidates",
             Self::Repos => "Repos",
             Self::LookupRepo(_) => "LookupRepo",
             Self::Search { .. } => "Search",
@@ -825,6 +828,9 @@ impl Controller {
                 }
                 Command::LoadCandidates(repo) => {
                     effects.push(self.spawn(SyncJob::Candidates(repo)))
+                }
+                Command::LoadTeamCandidates(team) => {
+                    effects.push(self.spawn(SyncJob::TeamCandidates(team)))
                 }
                 Command::LoadRepos => effects.push(self.spawn(SyncJob::Repos)),
                 Command::LookupRepo(slug) => effects.push(self.spawn(SyncJob::LookupRepo(slug))),
@@ -2203,6 +2209,24 @@ mod tests {
             .collect();
         assert_eq!(jobs, ["Candidates", "Repos", "LookupRepo", "Search"]);
         assert_eq!(c.app.pane_repo, Some("tviles/app".parse().unwrap()));
+        assert_eq!(c.scheduler.in_flight(), polling, "lookups are not polls");
+    }
+
+    #[test]
+    fn team_candidates_are_a_lookup_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        let polling = c.scheduler.in_flight();
+        let effects = c.commands(vec![Command::LoadTeamCandidates("team-a".into())], t0);
+        let jobs: Vec<&SyncJob> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Spawn { job, .. } => Some(job),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(jobs, [&SyncJob::TeamCandidates("team-a".into())]);
+        assert_eq!(jobs[0].kind(), "TeamCandidates");
         assert_eq!(c.scheduler.in_flight(), polling, "lookups are not polls");
     }
 

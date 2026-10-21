@@ -32,6 +32,10 @@ pub struct MultiSelect<T> {
     pub error: Option<String>,
     /// The candidates are only the first page of what the repository has.
     pub truncated: bool,
+    /// How many candidates a page holds, said when `truncated`.
+    pub page: usize,
+    /// At most one option is checked: ticking one unticks the others.
+    single: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,7 +72,15 @@ impl<T: Clone> MultiSelect<T> {
             loading: false,
             error: None,
             truncated: false,
+            page: 100,
+            single: false,
         }
+    }
+
+    /// The same checklist with at most one option checked.
+    pub fn single(mut self) -> Self {
+        self.single = true;
+        self
     }
 
     pub fn loading(title: impl Into<String>) -> Self {
@@ -147,7 +159,11 @@ impl<T: Clone> MultiSelect<T> {
             _ => match plain_char(key) {
                 Some(' ') => {
                     if let Some(&i) = self.visible().get(self.selected) {
-                        self.checked[i] = !self.checked[i];
+                        let on = !self.checked[i];
+                        if on && self.single {
+                            self.checked.fill(false);
+                        }
+                        self.checked[i] = on;
                     }
                 }
                 Some(c) => {
@@ -204,7 +220,10 @@ pub fn render_multiselect<T: Clone>(
         lines.push(Line::styled("No matches", theme.dim()));
     } else if m.truncated {
         lines.push(Line::styled(
-            truncate_to_width("showing the first 100 — type to narrow", inner),
+            truncate_to_width(
+                &format!("showing the first {} — type to narrow", m.page),
+                inner,
+            ),
             theme.dim(),
         ));
     }
@@ -355,6 +374,56 @@ mod tests {
         let screen = draw(&m);
         assert!(
             screen.contains("showing the first 100 — type to narrow"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn multiselect_single_unticks_the_others() {
+        let mut m = MultiSelect::loading("Assignee").single();
+        m.set_options(labels(), |v| *v == "docs");
+        assert_eq!(m.checked, [true, false, false]);
+        m.handle(&code(KeyCode::Down));
+        m.handle(&key(' '));
+        assert_eq!(m.checked, [false, true, false], "ticking one unticks docs");
+        m.handle(&code(KeyCode::Down));
+        m.handle(&key(' '));
+        assert_eq!(m.checked, [false, false, true]);
+        let MultiOutcome::Apply {
+            added,
+            removed,
+            chosen,
+        } = m.handle(&code(KeyCode::Enter))
+        else {
+            panic!("expected Apply")
+        };
+        assert_eq!(
+            (added, removed, chosen),
+            (vec!["🐛 bug"], vec!["docs"], vec!["🐛 bug"])
+        );
+        m.handle(&key(' '));
+        assert_eq!(m.checked, [false, false, false], "unticking leaves none");
+        let MultiOutcome::Apply { chosen, .. } = m.handle(&code(KeyCode::Enter)) else {
+            panic!("expected Apply")
+        };
+        assert!(chosen.is_empty());
+        // A plain checklist still ticks several.
+        let mut several = MultiSelect::new("Labels", labels(), |v| *v == "docs");
+        several.handle(&code(KeyCode::Down));
+        several.handle(&key(' '));
+        assert_eq!(several.checked, [true, true, false]);
+    }
+
+    #[test]
+    fn a_longer_page_says_its_own_size() {
+        let mut m = MultiSelect::new("Labels", labels(), |_| false);
+        m.truncated = true;
+        m.page = 250;
+        let screen = render_to_string(60, 10, |f| {
+            render_multiselect(f, f.area(), &m, &Theme::plain())
+        });
+        assert!(
+            screen.contains("showing the first 250 — type to narrow"),
             "{screen}"
         );
     }

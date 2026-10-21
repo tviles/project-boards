@@ -1,7 +1,7 @@
 //! The popovers: what each one edits and what its keys do.
 
 use super::*;
-use crate::model::{ContentId, LabelRef, MilestoneRef, RepoCandidates, UserRef};
+use crate::model::{ContentId, LabelRef, MilestoneRef, RepoCandidates, TeamCandidates, UserRef};
 use crate::model::{
     FieldValue, Iteration, OptionId, format_iso_date, parse_date_input, parse_iso_date,
     parse_number_input,
@@ -52,6 +52,14 @@ pub enum NewKind {
     Issue,
     Draft,
     Existing,
+}
+
+/// Where an assignee or label checklist takes its choices from: a GitHub repository's
+/// candidates, or a Linear team's (by team id).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CandidateSource {
+    Repo(RepoSlug),
+    Team(String),
 }
 
 /// What a chosen repository is for.
@@ -111,18 +119,20 @@ pub enum Popup {
         field: FieldId,
         select: MultiSelect<OptionId>,
     },
-    /// `a`: the item's assignees, from its repository's assignable users.
+    /// `a`: the item's assignees, from its repository's assignable users or its Linear
+    /// team's members (one at most there).
     Assignees {
         item: ItemId,
-        repo: RepoSlug,
+        source: CandidateSource,
         /// Opened from the `e` menu, so Esc goes back to it.
         from_menu: bool,
         select: MultiSelect<UserRef>,
     },
-    /// `t`: the item's labels, from its repository's labels.
+    /// `t`: the item's labels, from its repository's labels or its Linear team's and the
+    /// workspace's.
     Labels {
         item: ItemId,
-        repo: RepoSlug,
+        source: CandidateSource,
         /// Opened from the `e` menu, so Esc goes back to it.
         from_menu: bool,
         select: MultiSelect<LabelRef>,
@@ -325,22 +335,66 @@ fn submitted_text(form: &TextForm) -> String {
 
 /// How a popover's title names the item: its number, or "draft". The item's own title is
 /// already on screen (the highlighted card or the open detail), and repeating it read like a
-/// message ("Edit · Crash when …").
+/// message ("Edit · Crash when …"). A Linear key keeps its case (`TBA-1`).
 fn item_ref(item: &crate::model::Item) -> String {
-    item.ref_label().to_lowercase()
+    match item.reference().and_then(|r| r.key.as_ref()) {
+        Some(key) => key.clone(),
+        None => item.ref_label().to_lowercase(),
+    }
 }
 
 /// Shown in a popover whose item left the board while its candidates loaded.
 pub(super) const GONE: &str = "This item is no longer on the board";
 
-/// The users to offer: the repository's, plus current assignees it did not list (so they
-/// can be removed), and the logins assigned now.
-pub(super) fn assignee_options(
-    c: &RepoCandidates,
+/// The lists an assignee or label checklist is filled from: a repository's candidates or a
+/// Linear team's.
+pub(super) trait CandidateLists {
+    fn users(&self) -> &[UserRef];
+    fn labels(&self) -> &[LabelRef];
+    /// A list hit its page size, so it is partial.
+    fn truncated(&self) -> bool;
+    /// How many entries a page of each list holds.
+    fn page(&self) -> usize;
+}
+
+impl CandidateLists for RepoCandidates {
+    fn users(&self) -> &[UserRef] {
+        &self.users
+    }
+    fn labels(&self) -> &[LabelRef] {
+        &self.labels
+    }
+    fn truncated(&self) -> bool {
+        self.truncated
+    }
+    fn page(&self) -> usize {
+        100
+    }
+}
+
+impl CandidateLists for TeamCandidates {
+    fn users(&self) -> &[UserRef] {
+        &self.users
+    }
+    fn labels(&self) -> &[LabelRef] {
+        &self.labels
+    }
+    fn truncated(&self) -> bool {
+        self.truncated
+    }
+    fn page(&self) -> usize {
+        250
+    }
+}
+
+/// The users to offer: the repository's (or team's), plus current assignees it did not list
+/// (so they can be removed), and the logins assigned now.
+pub(super) fn assignee_options<C: CandidateLists>(
+    c: &C,
     item: &Item,
 ) -> (Vec<MultiOption<UserRef>>, Vec<String>) {
     let current: Vec<String> = item.assignees().iter().map(|s| s.to_string()).collect();
-    let mut users = c.users.clone();
+    let mut users = c.users().to_vec();
     for login in &current {
         if !users.iter().any(|u| &u.login == login)
             && let Some(id) = item.content_fields.assignee_ids.get(login)
@@ -362,13 +416,14 @@ pub(super) fn assignee_options(
     (options, current)
 }
 
-/// The labels to offer, current ones the repository did not list included.
-pub(super) fn label_options(
-    c: &RepoCandidates,
+/// The labels to offer, current ones the repository (or team) did not list included. A
+/// Linear issue's labels of single-select groups are its group fields' values, not labels.
+pub(super) fn label_options<C: CandidateLists>(
+    c: &C,
     item: &Item,
 ) -> (Vec<MultiOption<LabelRef>>, Vec<String>) {
     let current: Vec<String> = item.label_names().iter().map(|s| s.to_string()).collect();
-    let mut labels = c.labels.clone();
+    let mut labels = c.labels().to_vec();
     for l in item.labels() {
         if !labels.iter().any(|x| x.name == l.name)
             && let Some(id) = item.content_fields.label_ids.get(&l.name)
@@ -420,13 +475,14 @@ pub(super) fn milestone_choices(
     out
 }
 
-/// Fills a waiting assignee or label checklist once its repository's candidates have loaded
-/// (or failed). `options` lists the choices and the names checked now; `name` names a choice.
-pub(super) fn fill_checklist<T: Clone>(
+/// Fills a waiting assignee or label checklist once its repository's (or team's) candidates
+/// have loaded (or failed). `options` lists the choices and the names checked now; `name`
+/// names a choice.
+pub(super) fn fill_checklist<T: Clone, C: CandidateLists>(
     select: &mut MultiSelect<T>,
-    lookup: Option<&Lookup<RepoCandidates>>,
+    lookup: Option<&Lookup<C>>,
     item: Option<&Item>,
-    options: impl Fn(&RepoCandidates, &Item) -> (Vec<MultiOption<T>>, Vec<String>),
+    options: impl Fn(&C, &Item) -> (Vec<MultiOption<T>>, Vec<String>),
     name: impl Fn(&T) -> String,
 ) {
     match lookup {
@@ -438,7 +494,8 @@ pub(super) fn fill_checklist<T: Clone>(
             if let Some(it) = item {
                 let (choices, current) = options(c, it);
                 select.set_options(choices, |v| current.contains(&name(v)));
-                select.truncated = c.truncated;
+                select.truncated = c.truncated();
+                select.page = c.page();
             }
         }
         Some(Lookup::Failed(e)) => {
@@ -786,8 +843,8 @@ impl App {
         Vec::new()
     }
 
-    /// `a`, `t`, or the milestone entry: a popover over the item's repository candidates,
-    /// loaded on first need.
+    /// `a`, `t`, or the milestone entry: a popover over the item's repository candidates (on
+    /// Linear, its team's), loaded on first need.
     pub(crate) fn open_candidates(&mut self, kind: OpKind, from_menu: bool) -> Vec<Command> {
         let Some(item) = self.action_item().cloned() else {
             self.status.flash = Some("Select an item first".into());
@@ -797,41 +854,78 @@ impl App {
             self.status.flash = Some(reason);
             return Vec::new();
         }
-        let Some(repo) = self.candidate_repo(&item) else {
-            self.status.flash = Some(if item.reference().is_some() {
-                "Can't tell this item's repository; refresh with r".into()
-            } else {
-                "Open the board from a repository, or link one to the project, to assign drafts"
-                    .into()
-            });
-            return Vec::new();
+        let source = match self.candidate_source(&item) {
+            Ok(source) => source,
+            Err(why) => {
+                self.status.flash = Some(why);
+                return Vec::new();
+            }
         };
         let title = |what: &str| format!("{what} · {}", item_ref(&item));
-        let (id, r) = (item.id.clone(), repo.clone());
+        let id = item.id.clone();
         let popup = match kind {
-            OpKind::Assignees => Popup::Assignees {
-                item: id,
-                repo: r,
-                from_menu,
-                select: MultiSelect::loading(title("Assignees")),
-            },
+            OpKind::Assignees => {
+                let one = provider_caps(self.board_provider()).max_assignees == Some(1);
+                let select = if one {
+                    MultiSelect::loading(title("Assignee")).single()
+                } else {
+                    MultiSelect::loading(title("Assignees"))
+                };
+                Popup::Assignees {
+                    item: id,
+                    source: source.clone(),
+                    from_menu,
+                    select,
+                }
+            }
             OpKind::Labels => Popup::Labels {
                 item: id,
-                repo: r,
+                source: source.clone(),
                 from_menu,
                 select: MultiSelect::loading(title("Labels")),
             },
-            _ => Popup::Milestone {
-                item: id,
-                repo: r,
-                from_menu,
-                picker: ListPicker::loading(title("Milestone")),
-            },
+            _ => {
+                // Milestones are GitHub's: the check above refuses them on Linear.
+                let CandidateSource::Repo(repo) = &source else {
+                    return Vec::new();
+                };
+                Popup::Milestone {
+                    item: id,
+                    repo: repo.clone(),
+                    from_menu,
+                    picker: ListPicker::loading(title("Milestone")),
+                }
+            }
         };
         self.open_popup(popup);
-        let cmds = self.need_candidates(&repo);
+        let cmds = match &source {
+            CandidateSource::Repo(repo) => self.need_candidates(repo),
+            CandidateSource::Team(team) => self.need_team_candidates(team),
+        };
         self.refresh_popup();
         cmds
+    }
+
+    /// Where `item`'s candidates come from: its repository, or on a Linear board its team. A
+    /// Linear issue of a team the board does not know yet needs a refresh.
+    fn candidate_source(&self, item: &Item) -> Result<CandidateSource, String> {
+        if self.is_linear() {
+            return self
+                .project()
+                .and_then(|p| crate::model::teams::issue_team(p, item))
+                .map(|team| CandidateSource::Team(team.id.clone()))
+                .ok_or_else(|| self.denial_text(Denial::NeedsRefresh));
+        }
+        match self.candidate_repo(item) {
+            Some(repo) => Ok(CandidateSource::Repo(repo)),
+            None if item.reference().is_some() => {
+                Err("Can't tell this item's repository; refresh with r".into())
+            }
+            None => Err(
+                "Open the board from a repository, or link one to the project, to assign drafts"
+                    .into(),
+            ),
+        }
     }
 
     /// Submits an op that needs the item's content node id; refuses (needs a refresh) without.
@@ -2054,6 +2148,8 @@ mod tests {
                 ("Move to the next column".to_string(), ">".to_string()),
                 ("Move up".to_string(), "K".to_string()),
                 ("Move down".to_string(), "J".to_string()),
+                ("Assignees".to_string(), "a".to_string()),
+                ("Labels".to_string(), "t".to_string()),
                 ("Edit a field".to_string(), "e".to_string()),
                 ("Comment".to_string(), "c".to_string()),
                 ("Close".to_string(), "X".to_string()),

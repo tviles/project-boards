@@ -20,7 +20,7 @@ mod popups;
 
 use crate::ops::OpId;
 pub use edit::{Confirm, ConfirmAction, FailedEdit, Lookup};
-pub use popups::{FieldTarget, LineKind, MenuEntry, NewKind, Popup, RepoPurpose};
+pub use popups::{CandidateSource, FieldTarget, LineKind, MenuEntry, NewKind, Popup, RepoPurpose};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -68,6 +68,8 @@ pub enum Command {
     },
     OpenUrl(String),
     LoadCandidates(RepoSlug),
+    /// A Linear team's members and labels, by team id.
+    LoadTeamCandidates(String),
     LoadRepos,
     LookupRepo(RepoSlug),
     Search {
@@ -162,6 +164,8 @@ pub struct App {
     pub popup: Option<Popup>,
     /// Assignable users, labels and milestones per repository, loaded when first needed.
     pub(crate) candidates: HashMap<RepoSlug, Lookup<RepoCandidates>>,
+    /// Members and labels per Linear team id, loaded when first needed.
+    pub(crate) team_candidates: HashMap<String, Lookup<crate::model::TeamCandidates>>,
     /// Repositories the user can push to, for the repository picker.
     pub(crate) repos: Option<Lookup<PushableRepos>>,
     /// Numbers the placeholders of new items (`local:N`).
@@ -190,6 +194,7 @@ pub(crate) fn task_words(task: &SyncTask) -> &'static str {
         SyncTask::Detail(_) => "could not load the item",
         SyncTask::Projects => "could not list boards",
         SyncTask::Candidates(_) => "could not load the repository's users and labels",
+        SyncTask::TeamCandidates(_) => "could not load the team's members and labels",
         SyncTask::Repos | SyncTask::RepoLookup(_) => "could not list repositories",
         SyncTask::Search(_) => "search failed",
     }
@@ -288,6 +293,7 @@ impl App {
             confirm: None,
             popup: None,
             candidates: HashMap::new(),
+            team_candidates: HashMap::new(),
             repos: None,
             temp_counter: 0,
             repo_lookups: HashMap::new(),
@@ -480,6 +486,7 @@ impl App {
         self.pending_kinds.clear();
         self.error_sel = 0;
         self.candidates.clear();
+        self.team_candidates.clear();
         self.repos = None;
         self.repo_lookups.clear();
         self.content_search = None;
@@ -1212,6 +1219,10 @@ impl App {
             SyncEvent::Access { scopes } => self.set_scopes(scopes),
             SyncEvent::Candidates { repo, candidates } => {
                 self.candidates.insert(repo, Lookup::Ready(candidates));
+                self.refresh_popup();
+            }
+            SyncEvent::TeamCandidates { team, candidates } => {
+                self.team_candidates.insert(team, Lookup::Ready(candidates));
                 self.refresh_popup();
             }
             SyncEvent::Repos(list) => {

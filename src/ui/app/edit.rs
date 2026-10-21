@@ -9,7 +9,7 @@ use crate::model::{
 use crate::ops::{Confirmed, NewItem, Op, OpId};
 use crate::store::BoardSnapshot;
 use crate::ui::app::popups::{
-    GONE, assignee_options, fill_checklist, label_options, milestone_choices,
+    CandidateSource, GONE, assignee_options, fill_checklist, label_options, milestone_choices,
 };
 use crate::ui::editor::{Edited, title_and_body, trim_blank_lines};
 use crate::ui::marks::ItemMarks;
@@ -304,6 +304,20 @@ impl App {
         vec![Command::LoadCandidates(repo.clone())]
     }
 
+    /// Asks for the Linear team `team`'s candidates unless they are loaded or loading; after
+    /// a failure, again.
+    pub(crate) fn need_team_candidates(&mut self, team: &str) -> Vec<Command> {
+        if matches!(
+            self.team_candidates.get(team),
+            Some(Lookup::Ready(_) | Lookup::Loading)
+        ) {
+            return Vec::new();
+        }
+        self.team_candidates
+            .insert(team.to_string(), Lookup::Loading);
+        vec![Command::LoadTeamCandidates(team.to_string())]
+    }
+
     pub(crate) fn need_repos(&mut self) -> Vec<Command> {
         if matches!(self.repos, Some(Lookup::Ready(_) | Lookup::Loading)) {
             return Vec::new();
@@ -357,6 +371,7 @@ impl App {
     /// ruling E23). The "add existing" search stays while its popover is open.
     pub(crate) fn clear_lookups(&mut self) {
         self.candidates.clear();
+        self.team_candidates.clear();
         self.repos = None;
         self.repo_lookups.clear();
         if !matches!(self.popup, Some(Popup::Search { .. })) {
@@ -391,6 +406,10 @@ impl App {
             SyncTask::Candidates(repo) => {
                 self.candidates
                     .insert(repo.clone(), Lookup::Failed(message));
+            }
+            SyncTask::TeamCandidates(team) => {
+                self.team_candidates
+                    .insert(team.clone(), Lookup::Failed(message));
             }
             SyncTask::Repos => self.repos = Some(Lookup::Failed(message)),
             SyncTask::RepoLookup(slug) => {
@@ -436,23 +455,49 @@ impl App {
                 _ => {}
             },
             Popup::Assignees {
-                item, repo, select, ..
-            } if select.loading => fill_checklist(
+                item,
+                source,
                 select,
-                self.candidates.get(repo),
-                self.item(item),
-                assignee_options,
-                |u: &UserRef| u.login.clone(),
-            ),
+                ..
+            } if select.loading => {
+                let (it, name) = (self.item(item), |u: &UserRef| u.login.clone());
+                match source {
+                    CandidateSource::Repo(repo) => fill_checklist(
+                        select,
+                        self.candidates.get(repo),
+                        it,
+                        assignee_options,
+                        name,
+                    ),
+                    CandidateSource::Team(team) => fill_checklist(
+                        select,
+                        self.team_candidates.get(team),
+                        it,
+                        assignee_options,
+                        name,
+                    ),
+                }
+            }
             Popup::Labels {
-                item, repo, select, ..
-            } if select.loading => fill_checklist(
+                item,
+                source,
                 select,
-                self.candidates.get(repo),
-                self.item(item),
-                label_options,
-                |l: &LabelRef| l.name.clone(),
-            ),
+                ..
+            } if select.loading => {
+                let (it, name) = (self.item(item), |l: &LabelRef| l.name.clone());
+                match source {
+                    CandidateSource::Repo(repo) => {
+                        fill_checklist(select, self.candidates.get(repo), it, label_options, name)
+                    }
+                    CandidateSource::Team(team) => fill_checklist(
+                        select,
+                        self.team_candidates.get(team),
+                        it,
+                        label_options,
+                        name,
+                    ),
+                }
+            }
             Popup::Milestone {
                 item, repo, picker, ..
             } if picker.loading => match self.candidates.get(repo) {
@@ -6143,5 +6188,265 @@ pub(crate) mod tests {
             "{flash}"
         );
         assert!(a.store.pending().is_empty());
+    }
+
+    fn team_candidates(team: &str) -> crate::model::TeamCandidates {
+        let user = |id: &str, name: &str| crate::model::UserRef {
+            id: id.into(),
+            login: name.into(),
+        };
+        let label = |id: &str, name: &str| crate::model::LabelRef {
+            id: id.into(),
+            name: name.into(),
+            color: "5e6ad2".into(),
+        };
+        crate::model::TeamCandidates {
+            team: team.into(),
+            users: vec![user("u-1", "Ada Lovelace"), user("u-2", "Grace Hopper")],
+            labels: vec![label("l-docs", "Docs"), label("l-ux", "UX")],
+            truncated: false,
+        }
+    }
+
+    /// `linear_app` with TBA-1 assigned to Ada Lovelace and labelled Docs (besides Bug, in
+    /// the Type group).
+    fn linear_app_assigned() -> App {
+        let mut snap = linear_snapshot();
+        let tba1 = snap.items.get_mut(&ItemId::new("i-tba-1")).unwrap();
+        tba1.values.insert(
+            FieldId::new(crate::linear::ids::ASSIGNEES),
+            FieldValue::Users(vec!["Ada Lovelace".into()]),
+        );
+        tba1.content_fields
+            .assignee_ids
+            .insert("Ada Lovelace".into(), "u-1".into());
+        tba1.values.insert(
+            FieldId::new(crate::linear::ids::LABELS),
+            FieldValue::Labels(vec![crate::model::Label {
+                name: "Docs".into(),
+                color: "5e6ad2".into(),
+            }]),
+        );
+        tba1.content_fields
+            .label_ids
+            .insert("Docs".into(), "l-docs".into());
+        app_with(snap)
+    }
+
+    fn team_loaded(a: &mut App, team: &str) {
+        a.on_sync(SyncEvent::TeamCandidates {
+            team: team.into(),
+            candidates: team_candidates(team),
+        });
+    }
+
+    fn assignee_select(a: &App) -> &crate::ui::multiselect::MultiSelect<crate::model::UserRef> {
+        match &a.popup {
+            Some(Popup::Assignees { select, .. }) => select,
+            other => panic!("expected the assignee popover, got {other:?}"),
+        }
+    }
+
+    fn checked_labels<T: Clone>(m: &crate::ui::multiselect::MultiSelect<T>) -> Vec<(String, bool)> {
+        m.options
+            .iter()
+            .zip(&m.checked)
+            .map(|(o, c)| (o.label.clone(), *c))
+            .collect()
+    }
+
+    fn user(id: &str, name: &str) -> crate::model::UserRef {
+        crate::model::UserRef {
+            id: id.into(),
+            login: name.into(),
+        }
+    }
+
+    #[test]
+    fn linear_assignee_popup_ticks_one_and_sends_assignee_id() {
+        let mut a = linear_app_assigned();
+        pick(&mut a, "TBA-2");
+        assert_eq!(
+            a.handle_key(key('a')),
+            vec![Command::LoadTeamCandidates(TBA_ID.into())]
+        );
+        assert!(matches!(
+            &a.popup,
+            Some(Popup::Assignees { source: CandidateSource::Team(t), select, .. })
+                if t == TBA_ID && select.loading
+        ));
+        assert_eq!(assignee_select(&a).title, "Assignee · TBA-2");
+        team_loaded(&mut a, TBA_ID);
+        a.handle_key(key(' '));
+        a.handle_key(code(KeyCode::Down));
+        a.handle_key(key(' '));
+        assert_eq!(
+            checked_labels(assignee_select(&a)),
+            [
+                ("Ada Lovelace".to_string(), false),
+                ("Grace Hopper".to_string(), true)
+            ],
+            "ticking Grace unticks Ada"
+        );
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [Op::Assignees {
+                item: ItemId::new("i-tba-2"),
+                content: crate::model::ContentId::Issue("i-tba-2".into()),
+                add: vec![user("u-2", "Grace Hopper")],
+                remove: vec![],
+                all: vec![user("u-2", "Grace Hopper")],
+            }]
+        );
+        // Switching TBA-1 from Ada to Grace adds one and removes the other.
+        pick(&mut a, "TBA-1");
+        assert!(
+            a.handle_key(key('a')).is_empty(),
+            "TBA's members are loaded"
+        );
+        assert_eq!(
+            checked_labels(assignee_select(&a)),
+            [
+                ("Ada Lovelace".to_string(), true),
+                ("Grace Hopper".to_string(), false)
+            ]
+        );
+        a.handle_key(code(KeyCode::Down));
+        a.handle_key(key(' '));
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(2)]);
+        assert_eq!(
+            pending_ops(&a)[1],
+            Op::Assignees {
+                item: ItemId::new("i-tba-1"),
+                content: crate::model::ContentId::Issue("i-tba-1".into()),
+                add: vec![user("u-2", "Grace Hopper")],
+                remove: vec![user("u-1", "Ada Lovelace")],
+                all: vec![user("u-2", "Grace Hopper")],
+            }
+        );
+    }
+
+    #[test]
+    fn unassigning_sends_none() {
+        let mut a = linear_app_assigned();
+        team_loaded(&mut a, TBA_ID);
+        pick(&mut a, "TBA-1");
+        assert!(a.handle_key(key('a')).is_empty());
+        a.handle_key(key(' '));
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [Op::Assignees {
+                item: ItemId::new("i-tba-1"),
+                content: crate::model::ContentId::Issue("i-tba-1".into()),
+                add: vec![],
+                remove: vec![user("u-1", "Ada Lovelace")],
+                all: vec![],
+            }]
+        );
+    }
+
+    #[test]
+    fn team_candidates_load_once_per_team_and_r_forgets_them() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        assert_eq!(
+            a.handle_key(key('a')),
+            vec![Command::LoadTeamCandidates(TBA_ID.into())]
+        );
+        a.handle_key(code(KeyCode::Esc));
+        pick(&mut a, "TBA-2");
+        assert!(a.handle_key(key('t')).is_empty(), "TBA's are loading");
+        team_loaded(&mut a, TBA_ID);
+        assert!(matches!(&a.popup, Some(Popup::Labels { select, .. }) if !select.loading));
+        a.handle_key(code(KeyCode::Esc));
+        pick(&mut a, "TBB-1");
+        assert_eq!(
+            a.handle_key(key('a')),
+            vec![Command::LoadTeamCandidates(TBB_ID.into())],
+            "another team, another list"
+        );
+        a.handle_key(code(KeyCode::Esc));
+        a.handle_key(key('r'));
+        pick(&mut a, "TBA-1");
+        assert_eq!(
+            a.handle_key(key('a')),
+            vec![Command::LoadTeamCandidates(TBA_ID.into())],
+            "r forgot them"
+        );
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::TeamCandidates(TBA_ID.into()),
+            error: BackendError::Network("offline".into()),
+        });
+        let select = assignee_select(&a);
+        assert!(!select.loading);
+        let error = select.error.clone().unwrap_or_default();
+        assert!(
+            error.starts_with("could not load the team's members and labels")
+                && error.contains("offline"),
+            "{error}"
+        );
+        assert!(a.candidates.is_empty(), "no repository was asked");
+    }
+
+    #[test]
+    fn linear_labels_leave_out_group_labels() {
+        let mut a = linear_app_assigned();
+        team_loaded(&mut a, TBA_ID);
+        pick(&mut a, "TBA-1");
+        assert!(a.handle_key(key('t')).is_empty());
+        let Some(Popup::Labels { select, .. }) = &a.popup else {
+            panic!("labels")
+        };
+        assert_eq!(
+            checked_labels(select),
+            [("Docs".to_string(), true), ("UX".to_string(), false)],
+            "Bug is the Type field's, not a label to tick"
+        );
+        assert_eq!(select.options[0].color.as_deref(), Some("5e6ad2"));
+        assert_eq!(select.page, 250, "a cut list says Linear's page size");
+        a.handle_key(code(KeyCode::Down));
+        a.handle_key(key(' '));
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [Op::Labels {
+                item: ItemId::new("i-tba-1"),
+                content: crate::model::ContentId::Issue("i-tba-1".into()),
+                add: vec![crate::model::LabelRef {
+                    id: "l-ux".into(),
+                    name: "UX".into(),
+                    color: "5e6ad2".into(),
+                }],
+                remove: vec![],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_linear_issue_of_an_unknown_team_needs_a_refresh() {
+        let mut snap = linear_snapshot();
+        snap.project.linear.as_mut().unwrap().teams.clear();
+        let mut a = app_with(snap);
+        pick(&mut a, "TBA-1");
+        assert!(a.handle_key(key('a')).is_empty());
+        assert_eq!(a.popup, None);
+        assert_eq!(
+            a.status.flash,
+            Some(a.denial_text(crate::model::caps::Denial::NeedsRefresh))
+        );
+    }
+
+    #[test]
+    fn linear_assignee_popover() {
+        let mut a = linear_app_assigned();
+        team_loaded(&mut a, TBA_ID);
+        pick(&mut a, "TBA-1");
+        a.handle_key(key('a'));
+        let screen =
+            crate::ui::fixtures::render_to_string(100, 20, |f| crate::ui::chrome::draw(f, &mut a));
+        assert!(screen.contains("[x] Ada Lovelace"), "{screen}");
+        insta::assert_snapshot!(screen);
     }
 }

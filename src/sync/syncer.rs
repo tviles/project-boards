@@ -515,6 +515,22 @@ impl Syncer {
         }
     }
 
+    /// A Linear team's members and labels, from the Linear backend whatever board is open.
+    pub async fn team_candidates(&self, team: &str) {
+        let result = match self.backends.get(Provider::Linear).as_deref() {
+            Ok(Backend::Linear(linear)) => linear.team_candidates(team).await,
+            Ok(Backend::Github(_)) => Err(disagree()),
+            Err(e) => Err(e.clone()),
+        };
+        match result {
+            Ok(candidates) => self.send(SyncEvent::TeamCandidates {
+                team: team.to_string(),
+                candidates,
+            }),
+            Err(e) => self.fail(SyncTask::TeamCandidates(team.to_string()), e),
+        }
+    }
+
     pub async fn repos(&self) {
         let result = match self.github().as_deref() {
             Ok(Backend::Github(gh)) => gh.pushable_repos().await,
@@ -1383,6 +1399,45 @@ mod tests {
             .collect();
         assert_eq!(sent, ["RepoProjects", "RepoCandidates", "SearchContent"]);
         assert!(lin.requests().is_empty(), "nothing goes to Linear");
+    }
+
+    #[tokio::test]
+    async fn team_candidates_go_to_linear() {
+        let (gh, lin, s, mut rx) = setup_both(Provider::Linear);
+        lin.push(
+            "TeamCandidates",
+            json!({"team": {"members": {"nodes": [{"id": "u-1", "displayName": "Ada Lovelace"}]},
+                   "labels": {"nodes": []}},
+                   "issueLabels": {"nodes": []}}),
+        );
+        s.team_candidates(TEAM).await;
+        let events = drain(&mut rx);
+        assert!(
+            matches!(&events[..], [SyncEvent::TeamCandidates { team, candidates }]
+                if team == TEAM && candidates.users.len() == 1),
+            "{events:?}"
+        );
+        assert_eq!(lin.requests()[0].variables, json!({"teamId": TEAM}));
+        assert!(gh.requests().is_empty());
+        // A failure names the team, for the popover that waits on it.
+        lin.push_error("TeamCandidates", BackendError::Network("offline".into()));
+        s.team_candidates(TEAM).await;
+        assert!(matches!(
+            &drain(&mut rx)[..],
+            [SyncEvent::Failed { task: SyncTask::TeamCandidates(team), .. }] if team == TEAM
+        ));
+        // Without a Linear backend there is nothing to ask.
+        let (_, s, mut rx) = setup(2000);
+        s.team_candidates(TEAM).await;
+        assert!(matches!(
+            &drain(&mut rx)[..],
+            [SyncEvent::Failed {
+                task: SyncTask::TeamCandidates(_),
+                error: BackendError::NoCredentials {
+                    provider: Provider::Linear
+                }
+            }]
+        ));
     }
 
     #[tokio::test]

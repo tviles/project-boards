@@ -389,6 +389,7 @@ impl Runner {
                 SyncJob::RepoProjects(repo) => s.repo_projects(&repo).await,
                 SyncJob::Projects(repo) => s.projects(repo.as_ref()).await,
                 SyncJob::Candidates(repo) => s.candidates(&repo).await,
+                SyncJob::TeamCandidates(team) => s.team_candidates(&team).await,
                 SyncJob::Repos => s.repos().await,
                 SyncJob::LookupRepo(slug) => s.lookup_repo(&slug).await,
                 SyncJob::Search { query, scope } => s.search(&query, &scope).await,
@@ -414,6 +415,13 @@ fn unanswered_edit(job: &SyncJob, provider: Option<Provider>) -> Option<crate::s
     };
     match job {
         SyncJob::Candidates(repo) => failed(SyncTask::Candidates(repo.clone())),
+        // Only a Linear board asks for a team's candidates, whatever the job's tag.
+        SyncJob::TeamCandidates(team) => Some(SyncEvent::Failed {
+            task: SyncTask::TeamCandidates(team.clone()),
+            error: BackendError::NoCredentials {
+                provider: Provider::Linear,
+            },
+        }),
         SyncJob::Repos => failed(SyncTask::Repos),
         SyncJob::LookupRepo(slug) => failed(SyncTask::RepoLookup(slug.clone())),
         SyncJob::Search { query, .. } => failed(SyncTask::Search(query.clone())),
@@ -580,5 +588,18 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn team_candidates_nobody_could_load_name_linear() {
+        assert_eq!(
+            unanswered_edit(&SyncJob::TeamCandidates("team-a".into()), None),
+            Some(SyncEvent::Failed {
+                task: crate::sync::SyncTask::TeamCandidates("team-a".into()),
+                error: BackendError::NoCredentials {
+                    provider: Provider::Linear
+                },
+            })
+        );
     }
 }
