@@ -378,7 +378,6 @@ impl Controller {
         self.queue.set_limit(profile.max_in_flight);
         self.app.store =
             Box::new(MemoryStore::new(cached.clone()).with_window(profile.recent_window));
-
         self.app.status.stale = cached.is_some();
         if let Some(view) = state.last_view(&board) {
             self.app.select_view(&view);
