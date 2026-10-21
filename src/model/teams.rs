@@ -42,8 +42,13 @@ pub enum TeamRefusal {
         team: String,
         kinds: &'static str,
     },
-    /// The board was cached before it knew its teams, or the issue's team is not one of them.
+    /// The board was cached before it knew its teams (by 0.4), or a cycle started after the
+    /// board was resolved.
     NeedsRefresh,
+    /// The board knows its teams, and the issue's team (its key) is not one of them.
+    TeamNotOnBoard {
+        team: String,
+    },
 }
 
 impl TeamRefusal {
@@ -61,6 +66,7 @@ impl TeamRefusal {
             Self::StatusRequired => "Every Linear issue has a status".into(),
             Self::NoStateOfKind { team, kinds } => format!("{team} has no {kinds} state"),
             Self::NeedsRefresh => crate::model::Denial::NeedsRefresh.message(&|_| None),
+            Self::TeamNotOnBoard { team } => format!("{team} is not one of this board's teams"),
         }
     }
 }
@@ -107,6 +113,18 @@ pub fn issue_team<'a>(project: &'a Project, item: &Item) -> Option<&'a TeamMeta>
         .teams
         .iter()
         .find(|t| &t.key == key)
+}
+
+/// Why `item`'s team cannot be used: a board that knows no teams (cached by 0.4) needs a
+/// refresh; one that knows them says the issue's team is not one of them.
+pub fn unknown_team(project: &Project, item: &Item) -> TeamRefusal {
+    let knows_teams = project.linear.as_ref().is_some_and(|m| !m.teams.is_empty());
+    match item.reference() {
+        Some(r) if knows_teams => TeamRefusal::TeamNotOnBoard {
+            team: r.container.clone(),
+        },
+        _ => TeamRefusal::NeedsRefresh,
+    }
 }
 
 /// `value` for an issue of `team` in `field`. Status: the team's state of the value's name.
@@ -175,8 +193,9 @@ pub fn for_team(
 }
 
 /// `value` for `item` in `field`: unchanged on GitHub boards; else its team's value
-/// (`for_team`). A team-owned field of an issue whose team the board does not know needs a
-/// refresh, as does every label group while the board knows no teams (cached by 0.4).
+/// (`for_team`). A team-owned field of an issue whose team the board does not know is
+/// refused (`unknown_team`), as is every label group while the board knows no teams (cached
+/// by 0.4).
 pub fn for_issue(
     project: &Project,
     item: &Item,
@@ -195,7 +214,7 @@ pub fn for_issue(
         None => false,
     };
     if team_owned {
-        Err(TeamRefusal::NeedsRefresh)
+        Err(unknown_team(project, item))
     } else {
         Ok(value)
     }
@@ -652,19 +671,17 @@ mod tests {
     }
 
     #[test]
-    fn an_issue_of_an_unknown_team_needs_refresh() {
+    fn an_issue_of_a_team_not_on_the_board_says_so() {
         let p = project();
         let tbc = issue("TBC", 1);
+        let not_on_board = Err(TeamRefusal::TeamNotOnBoard { team: "TBC".into() });
         let r = for_issue(&p, &tbc, status(&p), select("s-a-todo", "Todo"));
-        assert_eq!(r, Err(TeamRefusal::NeedsRefresh));
-        assert_eq!(
-            refusal(r),
-            crate::model::Denial::NeedsRefresh.message(&|_| None)
-        );
+        assert_eq!(r, not_on_board);
+        assert_eq!(refusal(r), "TBC is not one of this board's teams");
         let r = for_issue(&p, &tbc, field(&p, CYCLE_FIELD), cycle("c-now"));
-        assert_eq!(r, Err(TeamRefusal::NeedsRefresh));
+        assert_eq!(r, not_on_board);
         let r = for_issue(&p, &tbc, group(&p, "lg-type"), select("l-bug", "Bug"));
-        assert_eq!(r, Err(TeamRefusal::NeedsRefresh));
+        assert_eq!(r, not_on_board);
         let urgent = select("linear:priority:1", "Urgent");
         assert_eq!(
             for_issue(&p, &tbc, field(&p, PRIORITY), urgent.clone()),
@@ -686,6 +703,13 @@ mod tests {
         meta.owners.clear();
         let tba_issue = issue("TBA", 1);
         let r = for_issue(&p, &tba_issue, status(&p), select("s-a-todo", "Todo"));
+        assert_eq!(r, Err(TeamRefusal::NeedsRefresh));
+        assert_eq!(
+            refusal(r),
+            crate::model::Denial::NeedsRefresh.message(&|_| None)
+        );
+        // The board knows no teams, so it cannot say TBC is not one of them.
+        let r = for_issue(&p, &issue("TBC", 1), status(&p), select("s-a-todo", "Todo"));
         assert_eq!(r, Err(TeamRefusal::NeedsRefresh));
         // Without owners nothing says which groups are the workspace's.
         let r = for_issue(

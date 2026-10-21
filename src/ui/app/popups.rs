@@ -932,14 +932,15 @@ impl App {
     }
 
     /// Where `item`'s candidates come from: its repository, or on a Linear board its team. A
-    /// Linear issue of a team the board does not know yet needs a refresh.
+    /// Linear issue of a team the board does not know is refused (`teams::unknown_team`).
     fn candidate_source(&self, item: &Item) -> Result<CandidateSource, String> {
         if self.is_linear() {
-            return self
-                .project()
-                .and_then(|p| crate::model::teams::issue_team(p, item))
+            let Some(project) = self.project() else {
+                return Err(self.denial_text(Denial::NeedsRefresh));
+            };
+            return crate::model::teams::issue_team(project, item)
                 .map(|team| CandidateSource::Team(team.id.clone()))
-                .ok_or_else(|| self.denial_text(Denial::NeedsRefresh));
+                .ok_or_else(|| crate::model::teams::unknown_team(project, item).message());
         }
         match self.candidate_repo(item) {
             Some(repo) => Ok(CandidateSource::Repo(repo)),

@@ -2,7 +2,7 @@
 //! settles when GitHub answers. Failed edits go to the error log.
 
 use super::*;
-use crate::model::teams::{StateGoal, TeamRefusal, issue_team, state_for};
+use crate::model::teams::{StateGoal, TeamRefusal, issue_team, state_for, unknown_team};
 use crate::model::{
     CloseReason, ContentId, Denial, EditContext, ItemContent, OpKind, check, check_new,
 };
@@ -2198,7 +2198,7 @@ impl App {
         let project = self
             .project()
             .ok_or_else(|| refused(TeamRefusal::NeedsRefresh))?;
-        let team = issue_team(project, item).ok_or_else(|| refused(TeamRefusal::NeedsRefresh))?;
+        let team = issue_team(project, item).ok_or_else(|| refused(unknown_team(project, item)))?;
         let value = state_for(project, team, goal).map_err(refused)?;
         Ok(Op::SetField {
             item: item.id.clone(),
@@ -2235,8 +2235,12 @@ impl App {
             target(self, StateGoal::Canceled),
         );
         // An issue whose team is not known has no states to name: say so, open nothing.
-        if self.project().and_then(|p| issue_team(p, item)).is_none() {
-            self.status.flash = Some(TeamRefusal::NeedsRefresh.message());
+        let unknown = match self.project() {
+            Some(p) => issue_team(p, item).is_none().then(|| unknown_team(p, item)),
+            None => Some(TeamRefusal::NeedsRefresh),
+        };
+        if let Some(reason) = unknown {
+            self.status.flash = Some(reason.message());
             return Vec::new();
         }
         let label = |what: &str, name: Result<String, String>| {
@@ -6111,6 +6115,29 @@ pub(crate) mod tests {
         assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(2)]);
     }
 
+    #[test]
+    fn an_issue_of_a_team_not_on_the_board_says_so() {
+        let mut snap = linear_snapshot();
+        snap.upsert_items(vec![linear_issue("TBC", 1, ("s-a-todo", "Todo"))]);
+        let mut a = app_with(snap);
+        let said = Some("TBC is not one of this board's teams");
+        pick(&mut a, "TBC-1");
+        // A move,
+        assert!(a.handle_key(key('>')).is_empty());
+        assert_eq!(a.status.flash.as_deref(), said);
+        // closing it,
+        a.status.flash = None;
+        assert!(a.handle_key(key('X')).is_empty());
+        assert_eq!(a.popup, None);
+        assert_eq!(a.status.flash.as_deref(), said);
+        // and assigning people: none of them name a refresh.
+        a.status.flash = None;
+        assert!(a.handle_key(key('a')).is_empty());
+        assert_eq!(a.popup, None);
+        assert_eq!(a.status.flash.as_deref(), said);
+        assert!(a.store.pending().is_empty());
+    }
+
     /// Review Focus 5.
     #[test]
     fn a_forbidden_edit_is_undone_and_later_edits_still_go() {
@@ -7342,6 +7369,22 @@ pub(crate) mod tests {
         assert_eq!(
             a.status.flash.as_deref(),
             Some("TBA has no \"In Review\" state; adding TBA-12 without it")
+        );
+        // An issue of a team the board does not list takes none of its states.
+        let mut a = linear_app();
+        pick(&mut a, "TBA-2");
+        add_existing_linear(&mut a, "TBC-12");
+        let tbc = linear_issue("TBC", 12, ("s-c-todo", "Todo"));
+        assert_eq!(
+            a.on_sync(SyncEvent::IssueFound {
+                key: "TBC-12".into(),
+                item: Some(tbc),
+            }),
+            vec![Command::Send(1)]
+        );
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("TBC is not one of this board's teams; adding TBC-12 without it")
         );
     }
 
