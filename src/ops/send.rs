@@ -949,6 +949,7 @@ mod tests {
             t.push_error("IssueCreate", limited.clone());
             t.push_error("IssueByKey", limited.clone());
             t.push_error("IssueCreate", conflict_on_insert_of_issue());
+            // Hand-written: the lookup finds the issue.
             t.push("IssueByKey", json!({"issue": issue_json()}));
             let b = backend(&t);
             let op = new_issue();

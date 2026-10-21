@@ -323,6 +323,7 @@ mod tests {
     async fn a_failed_create_whose_id_exists_returns_the_existing_issue() {
         let t = Arc::new(FixtureTransport::new());
         t.push_error("IssueCreate", conflict_on_insert("Issue"));
+        // Hand-written: the lookup finds the issue.
         t.push("IssueByKey", json!({"issue": issue_json()}));
         let item = linear(&t).create_issue(create_input()).await.unwrap();
         assert_eq!(item, the_issue());
@@ -335,6 +336,7 @@ mod tests {
             "IssueCreate",
             json!({"issueCreate": {"success": true, "issue": null}}),
         );
+        // Hand-written: the lookup finds the issue.
         t.push("IssueByKey", json!({"issue": issue_json()}));
         let item = linear(&t).create_issue(create_input()).await.unwrap();
         assert_eq!(item, the_issue());
@@ -403,6 +405,7 @@ mod tests {
     async fn a_failed_comment_whose_id_exists_is_success() {
         let t = Arc::new(FixtureTransport::new());
         t.push_error("CommentCreate", conflict_on_insert("Comment"));
+        // Hand-written: the lookup finds the comment.
         t.push("CommentById", json!({"comment": {"id": COMMENT_ID}}));
         linear(&t)
             .create_comment(COMMENT_ID, "i-7", "Looks good")
@@ -419,6 +422,7 @@ mod tests {
             "CommentCreate",
             json!({"commentCreate": {"success": false, "comment": null}}),
         );
+        // Hand-written: the lookup finds the comment.
         t.push("CommentById", json!({"comment": {"id": COMMENT_ID}}));
         linear(&t)
             .create_comment(COMMENT_ID, "i-7", "Looks good")
