@@ -20,7 +20,7 @@ mod popups;
 
 use crate::ops::OpId;
 pub use edit::{Confirm, ConfirmAction, FailedEdit, Lookup};
-pub use popups::{FieldTarget, LineKind, MenuEntry, NewKind, Popup, RepoPurpose};
+pub use popups::{CandidateSource, FieldTarget, LineKind, MenuEntry, NewKind, Popup, RepoPurpose};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -54,6 +54,13 @@ pub enum EditPurpose {
         repo: RepoRef,
         presets: Vec<(FieldId, FieldValue)>,
     },
+    /// A new Linear issue in `team`; `None` while the form's Team line chooses it. `presets`
+    /// are the column's and lane's values as the board shows them, resolved for the team on
+    /// submit (spec section 9).
+    NewLinearIssue {
+        team: Option<TeamMeta>,
+        presets: Vec<(FieldId, FieldValue)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,6 +75,10 @@ pub enum Command {
     },
     OpenUrl(String),
     LoadCandidates(RepoSlug),
+    /// A Linear team's members and labels, by team id.
+    LoadTeamCandidates(String),
+    /// Look up a Linear issue by its key (`TBA-12`), for "add existing".
+    LookupIssue(String),
     LoadRepos,
     LookupRepo(RepoSlug),
     Search {
@@ -128,6 +139,9 @@ pub struct App {
     pub detail: Option<DetailState>,
     pub picker: Option<PickerState>,
     pub setup: Option<String>,
+    /// The setup screen is for a board whose credentials failed, so `B` may open another
+    /// board; not when no provider has credentials, or the board list itself failed.
+    pub setup_offers_boards: bool,
     pub table_selected: usize,
     pub board_sel: BoardSelection,
     pub collapsed: HashSet<String>,
@@ -162,10 +176,15 @@ pub struct App {
     pub popup: Option<Popup>,
     /// Assignable users, labels and milestones per repository, loaded when first needed.
     pub(crate) candidates: HashMap<RepoSlug, Lookup<RepoCandidates>>,
+    /// Members and labels per Linear team id, loaded when first needed.
+    pub(crate) team_candidates: HashMap<String, Lookup<crate::model::TeamCandidates>>,
     /// Repositories the user can push to, for the repository picker.
     pub(crate) repos: Option<Lookup<PushableRepos>>,
     /// Numbers the placeholders of new items (`local:N`).
     temp_counter: u64,
+    /// The team the last new Linear issue went to this session, which the next one's Team
+    /// line starts with (T2).
+    pub(crate) last_team: Option<TeamMeta>,
     pub(crate) repo_lookups: HashMap<RepoSlug, Lookup<Option<RepoRef>>>,
     /// The latest "add existing" search and its results (`search` is the quick-search text).
     pub(crate) content_search: Option<(String, Lookup<Vec<ContentHit>>)>,
@@ -190,12 +209,13 @@ pub(crate) fn task_words(task: &SyncTask) -> &'static str {
         SyncTask::Detail(_) => "could not load the item",
         SyncTask::Projects => "could not list boards",
         SyncTask::Candidates(_) => "could not load the repository's users and labels",
+        SyncTask::TeamCandidates(_) => "could not load the team's members and labels",
+        SyncTask::IssueByKey(_) => "could not look up the issue",
         SyncTask::Repos | SyncTask::RepoLookup(_) => "could not list repositories",
         SyncTask::Search(_) => "search failed",
     }
 }
 
-/// The setup screen text for errors the user has to fix outside the app.
 /// Whether every option behind `bucket` (its key and aliases) has a kind in `excluded`. A
 /// bucket with no option (No Status, an iteration) never does.
 fn all_excluded(bucket: &Bucket, field: &Field, excluded: &[OptionKind]) -> bool {
@@ -213,6 +233,7 @@ fn all_excluded(bucket: &Bucket, field: &Field, excluded: &[OptionKind]) -> bool
         })
 }
 
+/// The setup screen text for errors the user has to fix outside the app.
 pub fn setup_message(error: &BackendError) -> Option<String> {
     use crate::model::Provider::{Github, Linear};
     match error {
@@ -269,6 +290,7 @@ impl App {
             detail: None,
             picker: None,
             setup: None,
+            setup_offers_boards: false,
             table_selected: 0,
             board_sel: BoardSelection::default(),
             collapsed: HashSet::new(),
@@ -288,8 +310,10 @@ impl App {
             confirm: None,
             popup: None,
             candidates: HashMap::new(),
+            team_candidates: HashMap::new(),
             repos: None,
             temp_counter: 0,
+            last_team: None,
             repo_lookups: HashMap::new(),
             content_search: None,
             pane_repo: None,
@@ -469,6 +493,11 @@ impl App {
     /// "loaded N of M" note. Config warnings stay. Edits still pending are never sent now;
     /// they are the new error log's entries, so none vanishes unrecorded.
     pub fn reset_for_new_board(&mut self) {
+        self.setup = None;
+        self.setup_offers_boards = false;
+        if self.mode == Mode::Setup {
+            self.mode = Mode::Normal;
+        }
         self.sticky.clear();
         self.search.clear();
         self.input.clear();
@@ -480,6 +509,7 @@ impl App {
         self.pending_kinds.clear();
         self.error_sel = 0;
         self.candidates.clear();
+        self.team_candidates.clear();
         self.repos = None;
         self.repo_lookups.clear();
         self.content_search = None;
@@ -931,6 +961,9 @@ impl App {
                 KeyCode::Char('r') => vec![Command::Retry],
                 // Esc never quits; the keymap's Quit does, asking first while edits are sending.
                 _ if action == Some(Action::Quit) => self.request_quit(),
+                _ if action == Some(Action::PickBoard) && self.setup_offers_boards => {
+                    self.pick_board()
+                }
                 _ => Vec::new(),
             },
             Mode::Picker => self.handle_picker_key(key),
@@ -1068,21 +1101,26 @@ impl App {
                         self.restore_selection();
                         Vec::new()
                     }
-                    Some(Action::PickBoard) if self.pending_count() > 0 => {
-                        let n = self.pending_count();
-                        self.status.flash = Some(format!(
-                            "{n} edit{} still sending; switch boards when {} done",
-                            if n == 1 { " is" } else { "s are" },
-                            if n == 1 { "it is" } else { "they are" }
-                        ));
-                        Vec::new()
-                    }
-                    Some(Action::PickBoard) => vec![Command::ShowPicker],
+                    Some(Action::PickBoard) => self.pick_board(),
                     Some(Action::Quit) => self.request_quit(),
                     _ => Vec::new(),
                 }
             }
         }
+    }
+
+    /// `B`: the board picker, unless edits are still sending.
+    fn pick_board(&mut self) -> Vec<Command> {
+        let n = self.pending_count();
+        if n > 0 {
+            self.status.flash = Some(format!(
+                "{n} edit{} still sending; switch boards when {} done",
+                if n == 1 { " is" } else { "s are" },
+                if n == 1 { "it is" } else { "they are" }
+            ));
+            return Vec::new();
+        }
+        vec![Command::ShowPicker]
     }
 
     fn handle_picker_key(&mut self, key: KeyEvent) -> Vec<Command> {
@@ -1092,16 +1130,26 @@ impl App {
         };
         match picker.handle(&key) {
             PickerOutcome::None => Vec::new(),
+            // Opened from the setup screen, the picker goes back to it: a chosen board leaves
+            // it once it opens (`reset_for_new_board`).
             PickerOutcome::Chosen(board) => {
                 self.picker = None;
-                self.mode = Mode::Normal;
+                self.mode = self.after_picker();
                 vec![Command::PickBoard(board)]
             }
             PickerOutcome::Cancel => {
                 self.picker = None;
-                self.mode = Mode::Normal;
+                self.mode = self.after_picker();
                 Vec::new()
             }
+        }
+    }
+
+    fn after_picker(&self) -> Mode {
+        if self.setup.is_some() {
+            Mode::Setup
+        } else {
+            Mode::Normal
         }
     }
 
@@ -1193,9 +1241,22 @@ impl App {
                 if matches!(task, SyncTask::FullLoad | SyncTask::Resolve) {
                     self.status.loading = None;
                 }
-                if let Some(message) = setup_message(&error) {
+                if let Some(mut message) = setup_message(&error) {
+                    // A failed board list has no board to offer; any other failure is the
+                    // board's, and another provider's boards may still open.
+                    self.setup_offers_boards = !matches!(task, SyncTask::Projects);
+                    if self.setup_offers_boards
+                        && let Some(k) = self.keymap.keys_for(Action::PickBoard).first()
+                    {
+                        message
+                            .push_str(&format!("\nOr press {} to open another board.", k.label()));
+                    }
                     self.setup = Some(message);
-                    self.mode = Mode::Setup;
+                    // The dead board is still polled: its next failure leaves a picker opened
+                    // from the setup screen open, and Esc goes back to the fresh message.
+                    if !(self.mode == Mode::Picker && self.setup_offers_boards) {
+                        self.mode = Mode::Setup;
+                    }
                 } else if let (SyncTask::Detail(id), Some(state)) = (&task, self.detail.as_mut()) {
                     if &state.item == id {
                         state.loading_older = false;
@@ -1214,6 +1275,11 @@ impl App {
                 self.candidates.insert(repo, Lookup::Ready(candidates));
                 self.refresh_popup();
             }
+            SyncEvent::TeamCandidates { team, candidates } => {
+                self.team_candidates.insert(team, Lookup::Ready(candidates));
+                self.refresh_popup();
+            }
+            SyncEvent::IssueFound { key, item } => cmds.extend(self.issue_found(&key, item)),
             SyncEvent::Repos(list) => {
                 self.repos = Some(Lookup::Ready(list));
                 self.refresh_popup();
@@ -2498,6 +2564,84 @@ mod tests {
                 .unwrap()
                 .contains("No Linear API key found")
         );
+    }
+
+    /// A board whose credentials fail: its setup text, then the line offering another board.
+    fn failing_board_setup(error: &BackendError) -> String {
+        format!(
+            "{}\nOr press B to open another board.",
+            setup_message(error).unwrap()
+        )
+    }
+
+    #[test]
+    fn cancelling_the_picker_returns_to_setup() {
+        let mut a = app();
+        let error = BackendError::NoCredentials {
+            provider: Provider::Linear,
+        };
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::Resolve,
+            error: error.clone(),
+        });
+        assert_eq!(a.mode, Mode::Setup);
+        assert_eq!(a.setup, Some(failing_board_setup(&error)));
+        assert_eq!(a.handle_key(key('B')), vec![Command::ShowPicker]);
+        a.picker = Some(PickerState::loading(false)); // as the controller opens it
+        a.mode = Mode::Picker;
+        assert!(a.handle_key(code(KeyCode::Esc)).is_empty());
+        assert_eq!(a.mode, Mode::Setup);
+        assert_eq!(a.setup, Some(failing_board_setup(&error)));
+        assert!(a.picker.is_none());
+        assert_eq!(
+            a.handle_key(key('r')),
+            vec![Command::Retry],
+            "r still retries"
+        );
+    }
+
+    #[test]
+    fn setup_with_pending_edits_refuses_to_switch() {
+        let mut a = app();
+        a.submit(OpKind::Move, edit::tests::set_status("a", "o_done", "Done"));
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::FullLoad,
+            error: BackendError::Unauthorized {
+                provider: Provider::Github,
+            },
+        });
+        assert_eq!(a.mode, Mode::Setup);
+        assert!(a.handle_key(key('B')).is_empty());
+        assert_eq!(a.mode, Mode::Setup);
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("1 edit is still sending; switch boards when it is done")
+        );
+    }
+
+    #[test]
+    fn the_start_time_setup_text_has_no_board_line() {
+        let all = setup_message_for_all(&[
+            BackendError::NoCredentials {
+                provider: Provider::Github,
+            },
+            BackendError::NoCredentials {
+                provider: Provider::Linear,
+            },
+        ]);
+        assert!(!all.contains("another board"), "{all}");
+        // A failed board list has no other board to offer either.
+        let mut a = app();
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::Projects,
+            error: BackendError::Unauthorized {
+                provider: Provider::Github,
+            },
+        });
+        assert_eq!(a.mode, Mode::Setup);
+        assert!(!a.setup.as_deref().unwrap().contains("another board"));
+        assert!(a.handle_key(key('B')).is_empty());
+        assert_eq!(a.mode, Mode::Setup);
     }
 
     #[test]

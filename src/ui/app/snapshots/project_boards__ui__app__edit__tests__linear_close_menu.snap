@@ -1,0 +1,24 @@
+---
+source: src/ui/app/edit.rs
+expression: screen
+---
+Launch · Linear
+ Board   All issues  ▥ board
+Todo 2                                            In Progress 1 ‹ 1–2 of 6 ›
+╭───────────────────────────────────────────────╮ ╭───────────────────────────────────────────────╮
+│● TBA-1                                        │ │● TBA-2                                        │
+│Issue TBA-1                                    │ │Issue TBA-2                                    │
+╰───────────────────────────────────────────────╯ ╰───────────────────────────────────────────────╯
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃● TBB-1          ┌ Close TBB-1 'Issue TBB-1'? ──────────────────────────────────┐
+┃Issue TBB-1      │>                                                             │
+┗━━━━━━━━━━━━━━━━━│Close as completed (Done)                                     │
+                  │Close as canceled (none)                                      │
+                  └──────────────────────────────────────────────────────────────┘
+
+
+
+
+
+
+a assignees · t labels · e field · < > move · X close · c comment · space actions · ? help

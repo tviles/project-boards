@@ -87,7 +87,7 @@ pub struct EditContext {
     /// A repo refusal must record both "repo" and "public_repo", because either grants repo
     /// access and only a refusal of every alias counts.
     pub refused: Vec<String>,
-    /// The board's provider; a provider that cannot be edited refuses everything first.
+    /// The board's provider; an op kind the provider lacks is refused first.
     pub provider: Provider,
     /// The board is a Linear team's board, where every issue of the team is present.
     pub team_board: bool,
@@ -138,9 +138,24 @@ const GITHUB_CAPS: ProviderCaps = ProviderCaps {
     remove_on_team_boards: true,
 };
 
-/// Read-only until the operations are wired in, one by one.
+/// The operations wired in so far, one by one; the rest keep the 0.4 text.
 const LINEAR_CAPS: ProviderCaps = ProviderCaps {
-    ops: &[],
+    ops: &[
+        OpKind::Move,
+        OpKind::Reorder,
+        OpKind::SetField,
+        OpKind::Close,
+        OpKind::Reopen,
+        OpKind::Title,
+        OpKind::Body,
+        OpKind::Comment,
+        OpKind::Archive,
+        OpKind::Unarchive,
+        OpKind::Remove,
+        OpKind::Assignees,
+        OpKind::Labels,
+        OpKind::Create,
+    ],
     drafts: false,
     milestones: false,
     max_assignees: Some(1),
@@ -571,8 +586,12 @@ mod tests {
             with(ItemContent::Draft { title: "d".into() }),
         ];
         let linear = linear_ctx();
+        let lacking = OpKind::ALL
+            .into_iter()
+            .chain([Create])
+            .filter(|k| !LINEAR_CAPS.ops.contains(k));
         for item in &items {
-            for kind in OpKind::ALL.into_iter().chain([Create]) {
+            for kind in lacking.clone() {
                 let denial = check(kind, item, &linear).unwrap_err();
                 let expected = match kind {
                     Milestone => "Linear issues have no milestones",
@@ -588,28 +607,86 @@ mod tests {
                 );
                 assert_eq!(denial.message(&none), expected, "{kind:?}");
             }
-            assert!(capabilities(item, &linear).is_empty());
-        }
-        assert_eq!(
-            check(Move, &issue("i", 1, "x"), &linear)
-                .unwrap_err()
-                .message(&none),
-            LINEAR_READ_ONLY
-        );
-        for needs_repo in [false, true] {
-            let denial = check_new(needs_repo, &linear).unwrap_err();
-            assert_eq!(denial.message(&none), LINEAR_READ_ONLY);
+            assert!(
+                capabilities(item, &linear)
+                    .iter()
+                    .all(|k| LINEAR_CAPS.ops.contains(k))
+            );
         }
         let also_no_scope = EditContext {
             viewer_can_update: false,
             scopes: Some(vec![]),
             ..linear
         };
+        let archived = items[2].clone();
         assert_eq!(
-            check_new(false, &also_no_scope).unwrap_err().message(&none),
-            LINEAR_READ_ONLY,
+            check(Milestone, &archived, &also_no_scope)
+                .unwrap_err()
+                .message(&none),
+            "Linear issues have no milestones",
             "the provider reason wins over every other"
         );
+    }
+
+    #[test]
+    fn linear_creates_issues_without_scope_checks() {
+        let linear = linear_ctx();
+        for needs_repo in [false, true] {
+            assert_eq!(check_new(needs_repo, &linear), Ok(()));
+            let no_scopes = EditContext {
+                scopes: Some(vec![]),
+                ..linear_ctx()
+            };
+            assert_eq!(check_new(needs_repo, &no_scopes), Ok(()));
+        }
+        let read_only = EditContext {
+            viewer_can_update: false,
+            ..linear_ctx()
+        };
+        assert_eq!(check_new(false, &read_only), Err(Denial::ReadOnly));
+        assert!(!provider_caps(Provider::Linear).drafts);
+    }
+
+    #[test]
+    fn linear_moves_and_sets_fields_by_the_matrix() {
+        let linear = linear_ctx();
+        assert_eq!(
+            provider_caps(Provider::Linear).ops,
+            [
+                Move, Reorder, SetField, Close, Reopen, Title, Body, Comment, Archive, Unarchive,
+                Remove, Assignees, Labels, Create
+            ]
+        );
+        let i = issue("i", 1, "x");
+        assert_eq!(
+            capabilities(&i, &linear),
+            [
+                Move, Reorder, SetField, Archive, Remove, Title, Body, Assignees, Labels, Comment,
+                Close
+            ]
+        );
+        assert_eq!(
+            check(Move, &issue("local:1", 0, "New"), &linear),
+            Err(Denial::Creating(Provider::Linear))
+        );
+        let mut archived = issue("i", 1, "x");
+        archived.archived = true;
+        assert_eq!(check(Move, &archived, &linear), Err(Denial::Archived));
+        assert_eq!(check(SetField, &archived, &linear), Err(Denial::Archived));
+        let private = with(ItemContent::Redacted);
+        assert_eq!(check(Move, &private, &linear), Ok(()));
+        assert_eq!(check(SetField, &private, &linear), Err(Denial::Private));
+        let read_only = EditContext {
+            viewer_can_update: false,
+            ..linear_ctx()
+        };
+        assert_eq!(check(Move, &i, &read_only), Err(Denial::ReadOnly));
+        // No scope checks on Linear.
+        let no_scopes = EditContext {
+            scopes: Some(vec![]),
+            ..linear_ctx()
+        };
+        assert_eq!(check(SetField, &i, &no_scopes), Ok(()));
     }
 
     #[test]

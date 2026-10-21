@@ -1,18 +1,24 @@
 //! Offline replays of the Linear fixtures recorded from the testbed (tests/live_linear.rs,
-//! `record_board_fixtures`): each scenario's files are queued on a `FixtureTransport` and
-//! read back through the app's `Linear` client.
+//! `record_board_fixtures` and `record_edit_fixtures`): each scenario's files are queued on a
+//! `FixtureTransport` and read back through the app's `Linear` client, or `ops::send`. The
+//! success answers of the client's mutations live here; src/linear/write.rs and
+//! src/ops/send.rs keep only hand-written error and edge answers.
 
 #[path = "common/linear_testbed.rs"]
 mod linear_testbed;
 
+use project_boards::backend::Backend;
 use project_boards::linear::Linear;
 use project_boards::linear::client::MAX_PAGE;
-use project_boards::linear::convert::PolledIssue;
+use project_boards::linear::convert::{PolledIssue, item_from_wire};
 use project_boards::linear::ids;
 use project_boards::linear::record::INVENTED_PEOPLE;
 use project_boards::model::*;
+use project_boards::ops::send::send;
+use project_boards::ops::{Confirmed, NewItem, Op};
 use project_boards::transport::fixture::FixtureTransport;
-use serde_json::Value;
+use project_boards_queries::linear as ops;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,6 +27,42 @@ const RECORDED: &str = "tests/fixtures/recorded/linear";
 const TBA_ID: &str = "152b24bd-5efb-4bf0-8d81-021700a5a8f0";
 const TYPE_GROUP: &str = "5649c6a3-6c17-4e06-a924-e776eb41d42b";
 const COMMENTED_ISSUE: &str = "ea7a48d9-a787-45f0-83cf-ee292ba99925";
+/// The scenario `record_edit_fixtures` (tests/live_linear.rs) records.
+const EDITS: &str = "edits";
+/// The `issueUpdate`s `every_edit` sends, in order: `IssueUpdate__<n>` answers the n-th.
+const EDIT_UPDATES: [&str; 18] = [
+    "status",
+    "priority",
+    "priority cleared",
+    "estimate",
+    "due",
+    "cycle",
+    "type set",
+    "type swapped",
+    "type cleared",
+    "label added",
+    "label removed",
+    "assigned",
+    "unassigned",
+    "title",
+    "description",
+    "reorder",
+    "added to project",
+    "removed from project",
+];
+/// The other operations `every_edit` sends, once each.
+const EDIT_ONCE: [&str; 6] = [
+    "TeamCandidates",
+    "CommentCreate",
+    "IssueArchive",
+    "IssueUnarchive",
+    "IssueCreate",
+    "IssueByKey",
+];
+/// What `every_edit` sets (its `EDIT_DUE_DATE`, `EDIT_ESTIMATE` and `EDIT_PRIORITY`).
+const EDIT_DUE_DATE: &str = "2026-12-01";
+const EDIT_ESTIMATE: f64 = 3.0;
+const EDIT_PRIORITY: u8 = 2;
 
 /// The scenario's files as (operation, number, path).
 fn files(scenario: &str) -> Vec<(String, usize, PathBuf)> {
@@ -161,7 +203,7 @@ fn recorded_fixtures_hold_only_invented_people() {
     let url_key = linear_testbed::testbed().url_key;
     let mut checked = 0;
     let mut persons = 0;
-    for scenario in ["team-board", "project-board", "boards", "poll"] {
+    for scenario in ["team-board", "project-board", "boards", "poll", EDITS] {
         for (_, _, path) in files(scenario) {
             let text = std::fs::read_to_string(&path).unwrap();
             let body: Value = serde_json::from_str(&text).unwrap();
@@ -477,4 +519,405 @@ async fn poll_fixture_decodes() {
         })
         .collect();
     assert_eq!(keys, ["TBA-16", "TBA-20"]);
+}
+
+/// The option or cycle id `item` has in `field`.
+fn chosen<'a>(item: &'a Item, field: &str) -> Option<&'a str> {
+    match item.values.get(&fid(field))? {
+        FieldValue::SingleSelect { option_id, .. } => Some(option_id.as_str()),
+        FieldValue::Iteration { iteration_id, .. } => Some(iteration_id.as_str()),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn edit_fixtures_decode() {
+    // Exactly what the scenario sends, and nothing else.
+    let recorded = files(EDITS);
+    let count = |operation: &str| recorded.iter().filter(|(o, ..)| o == operation).count();
+    assert_eq!(count("IssueUpdate"), EDIT_UPDATES.len());
+    for operation in EDIT_ONCE {
+        assert_eq!(count(operation), 1, "{operation}");
+    }
+    assert_eq!(recorded.len(), EDIT_UPDATES.len() + EDIT_ONCE.len());
+
+    // The replay answers each operation in recorded order, whatever is sent.
+    let linear = replay(EDITS);
+    let mut updates = Vec::new();
+    for step in EDIT_UPDATES {
+        let item = linear
+            .update_issue("replayed", json!({}))
+            .await
+            .unwrap_or_else(|e| panic!("{step}: {e}"));
+        updates.push(item);
+    }
+    let at = |step: &str| &updates[EDIT_UPDATES.iter().position(|s| *s == step).unwrap()];
+    let throwaway = &updates[0];
+    assert!(
+        updates.iter().all(|i| i.id == throwaway.id),
+        "every update is of the one throwaway issue"
+    );
+    assert!(key(throwaway).starts_with("TBA-"), "{}", key(throwaway));
+    assert!(at("title").title().starts_with("pb-live throwaway"));
+
+    let high = ids::priority_option(EDIT_PRIORITY);
+    assert!(chosen(at("status"), ids::STATUS).is_some());
+    assert_eq!(chosen(at("priority"), ids::PRIORITY), Some(high.as_str()));
+    assert_eq!(at("priority cleared").value(&fid(ids::PRIORITY)), None);
+    assert_eq!(
+        at("estimate").value(&fid(ids::ESTIMATE)),
+        Some(&FieldValue::Number(EDIT_ESTIMATE))
+    );
+    assert_eq!(
+        at("due").value(&fid(ids::DUE)),
+        Some(&FieldValue::Date(EDIT_DUE_DATE.into()))
+    );
+    assert!(matches!(
+        at("cycle").value(&fid(ids::CYCLE)),
+        Some(FieldValue::Iteration { .. })
+    ));
+
+    // The Type group: a label, another in its place, then none.
+    let group = ids::group(TYPE_GROUP);
+    let set = chosen(at("type set"), group.as_str()).expect("a Type label");
+    let swapped = chosen(at("type swapped"), group.as_str()).expect("a Type label");
+    assert_ne!(set, swapped);
+    assert_eq!(at("type cleared").value(&group), None);
+
+    let labels = |step: &str| at(step).content_fields.label_ids.len();
+    assert_eq!(labels("label added"), labels("type cleared") + 1);
+    assert_eq!(labels("label removed"), labels("type cleared"));
+
+    let assigned = &at("assigned").content_fields.assignee_ids;
+    assert_eq!(assigned.len(), 1);
+    assert!(assigned.keys().all(|name| is_invented(name)));
+    assert!(at("unassigned").content_fields.assignee_ids.is_empty());
+    assert_eq!(at("unassigned").value(&fid(ids::ASSIGNEES)), None);
+
+    let order = |step: &str| at(step).content_fields.sort_order;
+    assert!(order("reorder").is_some());
+    assert_ne!(order("reorder"), order("description"));
+
+    let project = |step: &str| match at(step).value(&fid(ids::PROJECT)) {
+        Some(FieldValue::SingleSelect { name, .. }) => Some(name.as_str()),
+        _ => None,
+    };
+    assert_eq!(project("removed from project"), None);
+    assert_eq!(project("added to project"), Some("Testbed project"));
+
+    // The candidates: members (invented) and labels, without the Type group or its labels.
+    let candidates = linear.team_candidates(TBA_ID).await.unwrap();
+    assert!(!candidates.users.is_empty());
+    assert!(candidates.users.iter().all(|u| is_invented(&u.login)));
+    assert!(!candidates.labels.is_empty());
+    for name in ["Type", "Bug", "Feature", "Chore"] {
+        assert!(
+            candidates.labels.iter().all(|l| l.name != name),
+            "{name} is offered as a loose label"
+        );
+    }
+
+    linear
+        .create_comment("replayed", "replayed", "replayed")
+        .await
+        .unwrap();
+    // A payload without its issue confirms as applied (plan Decision 7).
+    if let Some(item) = linear.archive("replayed").await.unwrap() {
+        assert!(item.archived);
+    }
+    if let Some(item) = linear.unarchive("replayed").await.unwrap() {
+        assert!(!item.archived);
+    }
+
+    // The new issue, created with its presets; no client id, so no fallback lookup.
+    let created = linear.create_issue(json!({})).await.unwrap();
+    assert_ne!(created.id, throwaway.id);
+    assert!(key(&created).starts_with("TBA-"), "{}", key(&created));
+    assert_eq!(
+        chosen(&created, ids::STATUS),
+        chosen(at("status"), ids::STATUS)
+    );
+    assert_eq!(chosen(&created, ids::PRIORITY), Some(high.as_str()));
+    assert_eq!(chosen(&created, group.as_str()), Some(set));
+
+    let by_key = linear
+        .issue_by_key("TBA-1")
+        .await
+        .unwrap()
+        .expect("the issue");
+    assert_eq!(by_key.id, throwaway.id);
+}
+
+/// A recorded `edits/` answer, `{"data": ...}`.
+fn recorded_edit(file: &str) -> Value {
+    let path = Path::new(RECORDED).join(EDITS).join(format!("{file}.json"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    serde_json::from_str(&text).unwrap()
+}
+
+/// The issue in a recorded answer at `data.<at[0]>.<at[1]>...`, decoded as the app does.
+fn recorded_issue(file: &str, at: &[&str]) -> Item {
+    let body = recorded_edit(file);
+    let issue = at.iter().fold(&body["data"], |v, key| &v[*key]);
+    item_from_wire(issue).unwrap_or_else(|| panic!("{file}: the issue does not decode"))
+}
+
+/// A client whose transport answers `operation` with each recorded `files`, in order.
+fn answering(answers: &[(&str, &str)]) -> (Arc<FixtureTransport>, Linear) {
+    let t = Arc::new(FixtureTransport::new());
+    for (operation, file) in answers {
+        t.push_file(
+            operation,
+            Path::new(RECORDED).join(EDITS).join(format!("{file}.json")),
+        );
+    }
+    (t.clone(), Linear::new(t))
+}
+
+/// Each client mutation and lookup sends its named operation with the caller's ids and
+/// input, and returns the issue Linear recorded answering it. (Moved from the hand-written
+/// success answers in src/linear/write.rs.)
+#[tokio::test]
+async fn the_client_sends_each_edit_and_returns_the_recorded_issue() {
+    let updated = recorded_issue("IssueUpdate__2", &["issueUpdate", "issue"]);
+    let id = updated.id.as_str().to_string();
+    let (t, l) = answering(&[
+        ("IssueUpdate", "IssueUpdate__2"),
+        ("IssueArchive", "IssueArchive__1"),
+        ("IssueUnarchive", "IssueUnarchive__1"),
+        ("IssueByKey", "IssueByKey__1"),
+        ("TeamCandidates", "TeamCandidates__1"),
+    ]);
+    let priority = json!({"priority": EDIT_PRIORITY});
+    assert_eq!(
+        l.update_issue(&id, priority.clone()).await.unwrap(),
+        updated
+    );
+    assert_eq!(
+        l.archive(&id).await.unwrap(),
+        Some(recorded_issue(
+            "IssueArchive__1",
+            &["issueArchive", "entity"]
+        ))
+    );
+    assert_eq!(
+        l.unarchive(&id).await.unwrap(),
+        Some(recorded_issue(
+            "IssueUnarchive__1",
+            &["issueUnarchive", "entity"]
+        ))
+    );
+    let by_key = recorded_issue("IssueByKey__1", &["issue"]);
+    let issue_key = key(&by_key);
+    assert_eq!(l.issue_by_key(&issue_key).await.unwrap(), Some(by_key));
+    l.team_candidates(TBA_ID).await.unwrap();
+    let sent: Vec<(String, &str, Value)> = t
+        .requests()
+        .into_iter()
+        .map(|r| {
+            let query = match r.operation_name.as_str() {
+                "IssueUpdate" => ops::issue_update::QUERY,
+                "IssueArchive" => ops::issue_archive::QUERY,
+                "IssueUnarchive" => ops::issue_unarchive::QUERY,
+                "IssueByKey" => ops::issue_by_key::QUERY,
+                "TeamCandidates" => ops::team_candidates::QUERY,
+                other => panic!("sent {other}"),
+            };
+            assert_eq!(r.query, query, "{}", r.operation_name);
+            (r.operation_name, query, r.variables)
+        })
+        .collect();
+    let variables: Vec<&Value> = sent.iter().map(|(_, _, v)| v).collect();
+    assert_eq!(
+        variables,
+        [
+            &json!({"id": id, "input": priority}),
+            &json!({"id": id}),
+            &json!({"id": id}),
+            &json!({"id": issue_key}),
+            &json!({"teamId": TBA_ID}),
+        ]
+    );
+
+    // A create sends its client id and needs no lookup when it succeeds.
+    let created = recorded_issue("IssueCreate__1", &["issueCreate", "issue"]);
+    let input = json!({"id": created.id.as_str(), "teamId": TBA_ID, "title": created.title()});
+    let (t, l) = answering(&[("IssueCreate", "IssueCreate__1")]);
+    assert_eq!(l.create_issue(input.clone()).await.unwrap(), created);
+    let requests = t.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].query, ops::issue_create::QUERY);
+    assert_eq!(requests[0].variables, json!({"input": input}));
+
+    // So does a comment.
+    let comment = recorded_edit("CommentCreate__1");
+    let comment_id = comment["data"]["commentCreate"]["comment"]["id"]
+        .as_str()
+        .unwrap();
+    let (t, l) = answering(&[("CommentCreate", "CommentCreate__1")]);
+    l.create_comment(comment_id, &id, "Looks good")
+        .await
+        .unwrap();
+    let requests = t.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].query, ops::comment_create::QUERY);
+    assert_eq!(
+        requests[0].variables,
+        json!({"input": {"id": comment_id, "issueId": id, "body": "Looks good"}})
+    );
+}
+
+/// Each Linear op reaches its mutation through `ops::send` and confirms with what Linear
+/// recorded answering it. (Moved from the hand-written success answers in src/ops/send.rs.)
+#[tokio::test]
+async fn recorded_edits_confirm_each_linear_op() {
+    let moved = recorded_issue("IssueUpdate__1", &["issueUpdate", "issue"]);
+    let reordered = recorded_issue("IssueUpdate__16", &["issueUpdate", "issue"]);
+    let archived = recorded_issue("IssueArchive__1", &["issueArchive", "entity"]);
+    let unarchived = recorded_issue("IssueUnarchive__1", &["issueUnarchive", "entity"]);
+    let created = recorded_issue("IssueCreate__1", &["issueCreate", "issue"]);
+    let added = recorded_issue("IssueUpdate__17", &["issueUpdate", "issue"]);
+    let comment = recorded_edit("CommentCreate__1");
+    let comment_id = comment["data"]["commentCreate"]["comment"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let project_id = chosen(&added, ids::PROJECT)
+        .expect("added to the project")
+        .to_string();
+    let board = ProjectId::new(format!("linear:project:{project_id}"));
+    let (t, l) = answering(&[
+        ("IssueUpdate", "IssueUpdate__1"),
+        ("IssueUpdate", "IssueUpdate__16"),
+        ("CommentCreate", "CommentCreate__1"),
+        ("IssueArchive", "IssueArchive__1"),
+        ("IssueUnarchive", "IssueUnarchive__1"),
+        ("IssueCreate", "IssueCreate__1"),
+        ("IssueUpdate", "IssueUpdate__17"),
+    ]);
+    let backend = Backend::Linear(l);
+
+    let item = moved.id.clone();
+    let content = moved.content_id().expect("an issue's content id");
+    let state = moved.value(&fid(ids::STATUS)).cloned().expect("a status");
+    let state_id = chosen(&moved, ids::STATUS).unwrap().to_string();
+    let sort_order = reordered.content_fields.sort_order.expect("a sortOrder");
+    let created_state = created.value(&fid(ids::STATUS)).cloned().expect("a status");
+    let created_state_id = chosen(&created, ids::STATUS).unwrap().to_string();
+    let tba = TeamMeta {
+        id: TBA_ID.into(),
+        key: "TBA".into(),
+    };
+    let cases = [
+        (
+            Op::SetField {
+                item: item.clone(),
+                field: fid(ids::STATUS),
+                value: state,
+            },
+            Confirmed::Item(moved.clone()),
+        ),
+        (
+            Op::Reorder {
+                item: item.clone(),
+                after: None,
+                sort_order: Some(sort_order),
+            },
+            Confirmed::Item(reordered.clone()),
+        ),
+        (
+            Op::Comment {
+                item: item.clone(),
+                content,
+                body: "Looks good".into(),
+                client_id: Some(comment_id.clone()),
+            },
+            Confirmed::Applied,
+        ),
+        (
+            Op::Archive { item: item.clone() },
+            Confirmed::Item(archived),
+        ),
+        (
+            Op::Unarchive { item: item.clone() },
+            Confirmed::Item(unarchived.clone()),
+        ),
+        (
+            Op::Create {
+                temp: ItemId::new("local:1"),
+                new: NewItem::LinearIssue {
+                    id: created.id.as_str().to_string(),
+                    team: tba,
+                    title: created.title().to_string(),
+                    body: String::new(),
+                },
+                presets: vec![(fid(ids::STATUS), created_state)],
+            },
+            Confirmed::Created {
+                temp: ItemId::new("local:1"),
+                item: created.clone(),
+                refused: vec![],
+            },
+        ),
+        (
+            Op::Create {
+                temp: ItemId::new("local:2"),
+                new: NewItem::LinearExisting {
+                    issue: Box::new(unarchived),
+                },
+                presets: vec![],
+            },
+            Confirmed::Created {
+                temp: ItemId::new("local:2"),
+                item: added,
+                refused: vec![],
+            },
+        ),
+    ];
+    for (op, confirmed) in cases {
+        assert_eq!(
+            send(&backend, &board, &op).await,
+            Ok(confirmed),
+            "{}",
+            op.name()
+        );
+    }
+    let requests = t.requests();
+    let operations: Vec<&str> = requests.iter().map(|r| r.operation_name.as_str()).collect();
+    assert_eq!(
+        operations,
+        [
+            "IssueUpdate",
+            "IssueUpdate",
+            "CommentCreate",
+            "IssueArchive",
+            "IssueUnarchive",
+            "IssueCreate",
+            "IssueUpdate"
+        ]
+    );
+    let vars: Vec<&Value> = requests.iter().map(|r| &r.variables).collect();
+    let id = item.as_str();
+    assert_eq!(vars[0], &json!({"id": id, "input": {"stateId": state_id}}));
+    assert_eq!(
+        vars[1],
+        &json!({"id": id, "input": {"sortOrder": sort_order}})
+    );
+    assert_eq!(
+        vars[2],
+        &json!({"input": {"id": comment_id, "issueId": id, "body": "Looks good"}})
+    );
+    assert_eq!(vars[3], &json!({"id": id}));
+    assert_eq!(vars[4], &json!({"id": id}));
+    assert_eq!(
+        vars[5],
+        &json!({"input": {
+            "id": created.id.as_str(), "teamId": TBA_ID, "title": created.title(),
+            "description": "", "projectId": project_id, "stateId": created_state_id,
+        }})
+    );
+    assert_eq!(
+        vars[6],
+        &json!({"id": id, "input": {"projectId": project_id}})
+    );
 }

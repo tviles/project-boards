@@ -86,6 +86,10 @@ pub enum SyncJob {
     Projects(Option<RepoSlug>),
     /// Lookups for the editors; they never touch the poll scheduler.
     Candidates(RepoSlug),
+    /// A Linear team's members and labels, by team id.
+    TeamCandidates(String),
+    /// A Linear issue by its key (`TBA-12`), for "add existing".
+    IssueByKey(String),
     Repos,
     LookupRepo(RepoSlug),
     Search {
@@ -112,6 +116,8 @@ impl SyncJob {
             Self::RepoProjects(_) => "RepoProjects",
             Self::Projects(_) => "Projects",
             Self::Candidates(_) => "Candidates",
+            Self::TeamCandidates(_) => "TeamCandidates",
+            Self::IssueByKey(_) => "IssueByKey",
             Self::Repos => "Repos",
             Self::LookupRepo(_) => "LookupRepo",
             Self::Search { .. } => "Search",
@@ -282,11 +288,13 @@ impl Controller {
             Ok(providers) => providers,
             Err(errors) => {
                 self.app.setup = Some(setup_message_for_all(&errors));
+                self.app.setup_offers_boards = false;
                 self.app.mode = Mode::Setup;
                 return Vec::new();
             }
         };
         self.app.setup = None;
+        self.app.setup_offers_boards = false;
         if self.app.mode == Mode::Setup {
             self.app.mode = Mode::Normal;
         }
@@ -372,7 +380,6 @@ impl Controller {
         self.queue.set_limit(profile.max_in_flight);
         self.app.store =
             Box::new(MemoryStore::new(cached.clone()).with_window(profile.recent_window));
-
         self.app.status.stale = cached.is_some();
         if let Some(view) = state.last_view(&board) {
             self.app.select_view(&view);
@@ -826,6 +833,10 @@ impl Controller {
                 Command::LoadCandidates(repo) => {
                     effects.push(self.spawn(SyncJob::Candidates(repo)))
                 }
+                Command::LoadTeamCandidates(team) => {
+                    effects.push(self.spawn(SyncJob::TeamCandidates(team)))
+                }
+                Command::LookupIssue(key) => effects.push(self.spawn(SyncJob::IssueByKey(key))),
                 Command::LoadRepos => effects.push(self.spawn(SyncJob::Repos)),
                 Command::LookupRepo(slug) => effects.push(self.spawn(SyncJob::LookupRepo(slug))),
                 Command::Search { query, scope } => {
@@ -2207,6 +2218,42 @@ mod tests {
     }
 
     #[test]
+    fn team_candidates_are_a_lookup_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        let polling = c.scheduler.in_flight();
+        let effects = c.commands(vec![Command::LoadTeamCandidates("team-a".into())], t0);
+        let jobs: Vec<&SyncJob> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Spawn { job, .. } => Some(job),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(jobs, [&SyncJob::TeamCandidates("team-a".into())]);
+        assert_eq!(jobs[0].kind(), "TeamCandidates");
+        assert_eq!(c.scheduler.in_flight(), polling, "lookups are not polls");
+    }
+
+    #[test]
+    fn issue_lookups_are_a_lookup_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, t0) = opened(dir.path());
+        let polling = c.scheduler.in_flight();
+        let effects = c.commands(vec![Command::LookupIssue("TBA-12".into())], t0);
+        let jobs: Vec<&SyncJob> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Spawn { job, .. } => Some(job),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(jobs, [&SyncJob::IssueByKey("TBA-12".into())]);
+        assert_eq!(jobs[0].kind(), "IssueByKey");
+        assert_eq!(c.scheduler.in_flight(), polling, "lookups are not polls");
+    }
+
+    #[test]
     fn a_stale_lookup_answer_is_dropped() {
         let dir = tempfile::tempdir().unwrap();
         let (mut c, t0) = opened(dir.path());
@@ -2628,6 +2675,160 @@ mod tests {
     }
 
     const LINEAR_TEAM: &str = "linear:team:1b4e28ba-2fa1-4d3b-a3f5-ef19b5a7633b";
+
+    /// The Linear key was removed after the board was opened: its resolve fails, and the
+    /// setup screen offers the GitHub boards the user can still open.
+    #[test]
+    fn a_board_whose_key_is_gone_can_switch_from_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some(LINEAR_TEAM));
+        let linear: BoardKey = LINEAR_TEAM.parse().unwrap();
+        assert_eq!(
+            c.start(Ok(vec![Provider::Github]), t0),
+            vec![sp(&c, SyncJob::Resolve(linear))]
+        );
+        let error = BackendError::NoCredentials {
+            provider: Provider::Linear,
+        };
+        let no_key = at(
+            &c,
+            SyncEvent::Failed {
+                task: SyncTask::Resolve,
+                error: error.clone(),
+            },
+        );
+        c.handle(no_key, t0);
+        assert_eq!(c.app.mode, Mode::Setup);
+        assert_eq!(
+            c.app.setup,
+            Some(format!(
+                "{}\nOr press B to open another board.",
+                setup_message(&error).unwrap()
+            ))
+        );
+        let effects = c.handle(Input::Key(key('B')), t0);
+        assert_eq!(c.app.mode, Mode::Picker);
+        assert_eq!(
+            effects,
+            vec![sp(
+                &c,
+                SyncJob::Projects(Some("tviles/app".parse().unwrap()))
+            )]
+        );
+        let list = at(
+            &c,
+            SyncEvent::Projects {
+                boards: vec![summary("tviles/4")],
+                notes: vec![],
+            },
+        );
+        c.handle(list, t0);
+        let effects = c.handle(Input::Key(code(crossterm::event::KeyCode::Enter)), t0);
+        let other: BoardKey = "tviles/4".parse().unwrap();
+        assert_eq!(effects, vec![sp(&c, SyncJob::Resolve(other.clone()))]);
+        assert_eq!(c.board(), Some(&other));
+        assert_eq!(c.app.mode, Mode::Normal, "the chosen board opens as usual");
+        assert_eq!(c.app.setup, None);
+    }
+
+    /// The dead board is still polled; its next failure must not close the picker the user
+    /// opened from the setup screen, only refresh the message Esc goes back to.
+    #[test]
+    fn a_failed_poll_of_the_dead_board_leaves_the_picker_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some(LINEAR_TEAM));
+        c.start(Ok(vec![Provider::Github]), t0);
+        let no_key = || SyncEvent::Failed {
+            task: SyncTask::Resolve,
+            error: BackendError::NoCredentials {
+                provider: Provider::Linear,
+            },
+        };
+        let e = at(&c, no_key());
+        c.handle(e, t0);
+        let message = c.app.setup.clone().unwrap();
+        c.handle(Input::Key(key('B')), t0);
+        let list = at(
+            &c,
+            SyncEvent::Projects {
+                boards: vec![summary("tviles/4")],
+                notes: vec![],
+            },
+        );
+        c.handle(list, t0);
+        assert_eq!(c.app.mode, Mode::Picker);
+        let picker = c.app.picker.clone();
+        let linear: BoardKey = LINEAR_TEAM.parse().unwrap();
+        assert!(
+            c.handle(Input::Tick, t0 + Duration::from_secs(31))
+                .contains(&sp(&c, SyncJob::Resolve(linear))),
+            "the dead board is polled again"
+        );
+        let e = at(&c, no_key());
+        c.handle(e, t0 + Duration::from_secs(31));
+        assert_eq!(c.app.mode, Mode::Picker, "the picker stays open");
+        assert_eq!(c.app.picker, picker);
+        c.handle(Input::Key(code(crossterm::event::KeyCode::Esc)), t0);
+        assert_eq!(c.app.mode, Mode::Setup);
+        assert_eq!(c.app.setup, Some(message));
+    }
+
+    #[test]
+    fn a_rejected_github_token_can_switch_from_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        c.start(Ok(vec![Provider::Github, Provider::Linear]), t0);
+        let rejected = at(
+            &c,
+            SyncEvent::Failed {
+                task: SyncTask::Resolve,
+                error: BackendError::Unauthorized {
+                    provider: Provider::Github,
+                },
+            },
+        );
+        c.handle(rejected, t0);
+        assert_eq!(c.app.mode, Mode::Setup);
+        let text = c.app.setup.clone().unwrap();
+        assert!(
+            text.ends_with("then press r.\nOr press B to open another board."),
+            "{text}"
+        );
+        let effects = c.handle(Input::Key(key('B')), t0);
+        assert_eq!(c.app.mode, Mode::Picker);
+        assert!(!c.app.picker.as_ref().unwrap().required, "Esc can go back");
+        assert_eq!(
+            effects,
+            vec![sp(
+                &c,
+                SyncJob::Projects(Some("tviles/app".parse().unwrap()))
+            )]
+        );
+        c.handle(Input::Key(code(crossterm::event::KeyCode::Esc)), t0);
+        assert_eq!(c.app.mode, Mode::Setup);
+        assert_eq!(c.app.setup, Some(text));
+    }
+
+    /// With no provider's credentials there is no other board to open: no line, and `B` does
+    /// nothing.
+    #[test]
+    fn the_start_setup_screen_offers_no_other_board() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some("tviles/3"));
+        let none = vec![
+            BackendError::NoCredentials {
+                provider: Provider::Github,
+            },
+            BackendError::NoCredentials {
+                provider: Provider::Linear,
+            },
+        ];
+        c.start(Err(none.clone()), t0);
+        assert_eq!(c.app.mode, Mode::Setup);
+        assert_eq!(c.app.setup, Some(setup_message_for_all(&none)));
+        assert!(c.handle(Input::Key(key('B')), t0).is_empty());
+        assert_eq!(c.app.mode, Mode::Setup);
+    }
 
     /// A controller with no fixed incremental mode, as the runtime builds it, on `board`
     /// with a cached snapshot whose load finished at noon.

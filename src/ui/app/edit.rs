@@ -2,13 +2,14 @@
 //! settles when GitHub answers. Failed edits go to the error log.
 
 use super::*;
+use crate::model::teams::{StateGoal, TeamRefusal, issue_team, state_for, unknown_team};
 use crate::model::{
     CloseReason, ContentId, Denial, EditContext, ItemContent, OpKind, check, check_new,
 };
 use crate::ops::{Confirmed, NewItem, Op, OpId};
 use crate::store::BoardSnapshot;
 use crate::ui::app::popups::{
-    GONE, assignee_options, fill_checklist, label_options, milestone_choices,
+    CandidateSource, GONE, assignee_options, fill_checklist, label_options, milestone_choices,
 };
 use crate::ui::editor::{Edited, title_and_body, trim_blank_lines};
 use crate::ui::marks::ItemMarks;
@@ -51,8 +52,22 @@ pub struct Confirm {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfirmAction {
     Quit,
-    Submit { kind: OpKind, op: Op },
+    Submit {
+        kind: OpKind,
+        op: Op,
+    },
+    /// A new item (`submit_new`): an existing Linear issue that moves here from another
+    /// project (T5). `note` names the presets left out of it, said once it is sent
+    /// (Decision 9).
+    SubmitNew {
+        op: Op,
+        note: Option<String>,
+    },
 }
+
+/// "Add existing" on a Linear board, for text that is neither a key nor an issue link.
+pub(crate) const NOT_AN_ISSUE_REF: &str =
+    "Type an issue key like TBA-12, or paste a linear.app issue link";
 
 /// The byte range of the `is:archived` word in `text`, if it is there as a word of its own.
 pub(crate) fn archived_token(text: &str) -> Option<(usize, usize)> {
@@ -182,6 +197,65 @@ fn refill(form: &mut TextForm, edited: Edited) {
     form.set_message(message);
 }
 
+/// The heading of a new Linear issue's form, naming its team: `New issue in TBA`.
+pub(super) fn new_issue_heading(team: &TeamMeta) -> String {
+    format!("New issue in {}", team.key)
+}
+
+/// `presets` for a new issue of `team` (spec section 6), or the first that team cannot
+/// take. A preset whose field has left the board goes as it is.
+fn presets_for_team(
+    project: &Project,
+    team: &TeamMeta,
+    presets: &[(FieldId, FieldValue)],
+) -> Result<Vec<(FieldId, FieldValue)>, TeamRefusal> {
+    presets
+        .iter()
+        .map(|(id, value)| match project.field(id) {
+            Some(field) => crate::model::teams::for_team(project, team, field, value.clone())
+                .map(|v| (id.clone(), v)),
+            None => Ok((id.clone(), value.clone())),
+        })
+        .collect()
+}
+
+/// `presets` for adding the existing Linear `issue` (spec section 9, D9): each resolved for
+/// the issue's own team (`for_issue`), and the reasons for those it cannot take, which are
+/// left out. A preset whose field has left the board goes as it is.
+fn presets_for_issue(
+    project: &Project,
+    issue: &Item,
+    presets: &[(FieldId, FieldValue)],
+) -> (Vec<(FieldId, FieldValue)>, Vec<TeamRefusal>) {
+    let (mut kept, mut refused) = (Vec::new(), Vec::new());
+    for (id, value) in presets {
+        match project.field(id) {
+            Some(field) => {
+                match crate::model::teams::for_issue(project, issue, field, value.clone()) {
+                    Ok(v) => kept.push((id.clone(), v)),
+                    Err(r) => refused.push(r),
+                }
+            }
+            None => kept.push((id.clone(), value.clone())),
+        }
+    }
+    (kept, refused)
+}
+
+/// What the status line says when presets were left out of adding `key` (Decision 9):
+/// `TBA has no "In Review" state; adding TBA-12 without it`.
+fn left_out_note(refused: &[TeamRefusal], key: &str) -> Option<String> {
+    if refused.is_empty() {
+        return None;
+    }
+    let reasons: Vec<String> = refused.iter().map(TeamRefusal::message).collect();
+    let them = if refused.len() == 1 { "it" } else { "them" };
+    Some(format!(
+        "{}; adding {key} without {them}",
+        reasons.join("; ")
+    ))
+}
+
 /// `text` with CRLF line endings as LF.
 fn lf(text: &str) -> String {
     text.replace("\r\n", "\n")
@@ -204,12 +278,29 @@ pub fn ago(elapsed: std::time::Duration) -> String {
     }
 }
 
-/// The provider's own words for a failure; other errors as their message.
+/// The provider's own words for a failed edit; other errors as their message.
 pub fn error_message(error: &BackendError, provider: Provider) -> String {
     crate::ui::text::sanitize(&raw_error_message(error, provider))
 }
 
+/// As `error_message`, for a failed lookup (a read): a Linear refusal keeps its read text.
+fn lookup_error_message(error: &BackendError, provider: Provider) -> String {
+    crate::ui::text::sanitize(&provider_message(error, provider))
+}
+
 fn raw_error_message(error: &BackendError, provider: Provider) -> String {
+    match error {
+        // `FORBIDDEN` on an edit: the key can see the board the user is looking at, but Linear
+        // permissions are per team (spec section 10).
+        BackendError::MissingPermission {
+            provider: Provider::Linear,
+            ..
+        } => "Linear refused this edit: the API key may not change this team's issues".into(),
+        other => provider_message(other, provider),
+    }
+}
+
+fn provider_message(error: &BackendError, provider: Provider) -> String {
     match error {
         BackendError::Api(entries) => {
             let messages: Vec<&str> = entries
@@ -303,6 +394,20 @@ impl App {
         vec![Command::LoadCandidates(repo.clone())]
     }
 
+    /// Asks for the Linear team `team`'s candidates unless they are loaded or loading; after
+    /// a failure, again.
+    pub(crate) fn need_team_candidates(&mut self, team: &str) -> Vec<Command> {
+        if matches!(
+            self.team_candidates.get(team),
+            Some(Lookup::Ready(_) | Lookup::Loading)
+        ) {
+            return Vec::new();
+        }
+        self.team_candidates
+            .insert(team.to_string(), Lookup::Loading);
+        vec![Command::LoadTeamCandidates(team.to_string())]
+    }
+
     pub(crate) fn need_repos(&mut self) -> Vec<Command> {
         if matches!(self.repos, Some(Lookup::Ready(_) | Lookup::Loading)) {
             return Vec::new();
@@ -356,6 +461,7 @@ impl App {
     /// ruling E23). The "add existing" search stays while its popover is open.
     pub(crate) fn clear_lookups(&mut self) {
         self.candidates.clear();
+        self.team_candidates.clear();
         self.repos = None;
         self.repo_lookups.clear();
         if !matches!(self.popup, Some(Popup::Search { .. })) {
@@ -384,12 +490,31 @@ impl App {
         let message = format!(
             "{}: {}",
             task_words(task),
-            error_message(error, self.board_provider())
+            lookup_error_message(error, self.board_provider())
         );
         match task {
             SyncTask::Candidates(repo) => {
                 self.candidates
                     .insert(repo.clone(), Lookup::Failed(message));
+            }
+            SyncTask::TeamCandidates(team) => {
+                self.team_candidates
+                    .insert(team.clone(), Lookup::Failed(message));
+            }
+            // An answer for a key the popup no longer waits on is dropped.
+            SyncTask::IssueByKey(key) => {
+                if let Some(Popup::IssueKey {
+                    input,
+                    loading,
+                    error,
+                    ..
+                }) = &mut self.popup
+                    && *loading
+                    && crate::model::parse_linear_issue_ref(input).as_deref() == Some(key)
+                {
+                    *loading = false;
+                    *error = Some(message);
+                }
             }
             SyncTask::Repos => self.repos = Some(Lookup::Failed(message)),
             SyncTask::RepoLookup(slug) => {
@@ -435,23 +560,49 @@ impl App {
                 _ => {}
             },
             Popup::Assignees {
-                item, repo, select, ..
-            } if select.loading => fill_checklist(
+                item,
+                source,
                 select,
-                self.candidates.get(repo),
-                self.item(item),
-                assignee_options,
-                |u: &UserRef| u.login.clone(),
-            ),
+                ..
+            } if select.loading => {
+                let (it, name) = (self.item(item), |u: &UserRef| u.login.clone());
+                match source {
+                    CandidateSource::Repo(repo) => fill_checklist(
+                        select,
+                        self.candidates.get(repo),
+                        it,
+                        assignee_options,
+                        name,
+                    ),
+                    CandidateSource::Team(team) => fill_checklist(
+                        select,
+                        self.team_candidates.get(team),
+                        it,
+                        assignee_options,
+                        name,
+                    ),
+                }
+            }
             Popup::Labels {
-                item, repo, select, ..
-            } if select.loading => fill_checklist(
+                item,
+                source,
                 select,
-                self.candidates.get(repo),
-                self.item(item),
-                label_options,
-                |l: &LabelRef| l.name.clone(),
-            ),
+                ..
+            } if select.loading => {
+                let (it, name) = (self.item(item), |l: &LabelRef| l.name.clone());
+                match source {
+                    CandidateSource::Repo(repo) => {
+                        fill_checklist(select, self.candidates.get(repo), it, label_options, name)
+                    }
+                    CandidateSource::Team(team) => fill_checklist(
+                        select,
+                        self.team_candidates.get(team),
+                        it,
+                        label_options,
+                        name,
+                    ),
+                }
+            }
             Popup::Milestone {
                 item, repo, picker, ..
             } if picker.loading => match self.candidates.get(repo) {
@@ -722,6 +873,87 @@ impl App {
         vec![Command::Send(id)]
     }
 
+    /// `submit_new`, then `note` on the status line once the add is sent.
+    fn submit_new_noting(&mut self, op: Op, note: Option<String>) -> Vec<Command> {
+        let cmds = self.submit_new(op, false);
+        if !cmds.is_empty()
+            && let Some(note) = note
+        {
+            self.status.flash = Some(note);
+        }
+        cmds
+    }
+
+    /// The answer to "add existing" on a Linear board: the issue `key` names, or `None`. An
+    /// answer the open popup does not wait on is dropped. No issue says so in the popup; one
+    /// on the board is selected; one in another project asks first (T5); any other is added
+    /// at once, with the presets its team can take (spec section 9).
+    pub(crate) fn issue_found(&mut self, key: &str, item: Option<Item>) -> Vec<Command> {
+        let Some(Popup::IssueKey {
+            presets,
+            input,
+            loading: true,
+            error,
+        }) = &mut self.popup
+        else {
+            return Vec::new();
+        };
+        if crate::model::parse_linear_issue_ref(input).as_deref() != Some(key) {
+            return Vec::new();
+        }
+        let Some(issue) = item else {
+            *error = Some(format!("No issue {key}"));
+            if let Some(Popup::IssueKey { loading, .. }) = &mut self.popup {
+                *loading = false;
+            }
+            return Vec::new();
+        };
+        let presets = std::mem::take(presets);
+        self.close_popup();
+        let label = issue.ref_label();
+        if self.item(&issue.id).is_some() {
+            self.status.flash = Some(format!("{label} is already on the board"));
+            self.selected_id = Some(issue.id);
+            self.restore_selection();
+            return Vec::new();
+        }
+        let Some(project) = self.project() else {
+            return Vec::new();
+        };
+        let (presets, refused) = presets_for_issue(project, &issue, &presets);
+        let note = left_out_note(&refused, &label);
+        // An issue has at most one project, so adding it here moves it from its own.
+        let elsewhere = match (
+            &project.board,
+            issue.value(&FieldId::new(crate::linear::ids::PROJECT)),
+        ) {
+            (
+                BoardKey::LinearProject { id },
+                Some(FieldValue::SingleSelect { option_id, name }),
+            ) if option_id.as_str() != id => Some(name.clone()),
+            _ => None,
+        };
+        let temp = self.next_temp();
+        let op = Op::Create {
+            temp,
+            new: NewItem::LinearExisting {
+                issue: Box::new(issue),
+            },
+            presets,
+        };
+        match elsewhere {
+            Some(other) => {
+                self.confirm = Some(Confirm {
+                    question: format!("{label} is in \"{other}\"; move it here? (y/n)"),
+                    action: ConfirmAction::SubmitNew { op, note },
+                });
+                self.mode = Mode::Confirm;
+                Vec::new()
+            }
+            None => self.submit_new_noting(op, note),
+        }
+    }
+
     /// A placeholder became a real item: follow it, in the detail too (the caller loads the
     /// real item's detail).
     pub(crate) fn renamed(&mut self, temp: &ItemId, real: &ItemId) {
@@ -933,6 +1165,83 @@ impl App {
         self.open_text_form(EditPurpose::NewIssue { repo, presets }, form)
     }
 
+    /// `n`, "New issue", on a Linear board (spec section 9, T2): the form for a new issue of
+    /// the board's team, of the selected column's team, or of the team its Team line
+    /// chooses (prefilled with the last team chosen, else the first). Only teams for which
+    /// every preset resolves are offered; with none, the first refusal shows and nothing
+    /// opens.
+    pub(crate) fn new_linear_issue_form(
+        &mut self,
+        presets: Vec<(FieldId, FieldValue)>,
+    ) -> Vec<Command> {
+        let Some(project) = self.project() else {
+            return Vec::new();
+        };
+        let all = project
+            .linear
+            .as_ref()
+            .map_or(&[][..], |m| m.teams.as_slice());
+        // A board cached by 0.4 does not know its teams: refresh rather than guess.
+        if all.is_empty() {
+            return self.say(&TeamRefusal::NeedsRefresh.message());
+        }
+        let fixed = if self.edit_context().team_board {
+            all.first().cloned()
+        } else {
+            self.column_team()
+        };
+        let candidates = match &fixed {
+            Some(team) => vec![team.clone()],
+            None => all.to_vec(),
+        };
+        let mut refused = None;
+        let offered: Vec<TeamMeta> = candidates
+            .into_iter()
+            .filter(|team| match presets_for_team(project, team, &presets) {
+                Ok(_) => true,
+                Err(r) => {
+                    refused.get_or_insert(r);
+                    false
+                }
+            })
+            .collect();
+        if offered.is_empty() {
+            let reason = refused.unwrap_or(TeamRefusal::NeedsRefresh);
+            return self.say(&reason.message());
+        }
+        let (team, form) = match fixed {
+            Some(team) => {
+                let form = TextForm::new(FormKind::NewItem, new_issue_heading(&team), "", "");
+                (Some(team), form)
+            }
+            None => {
+                let chosen = self
+                    .last_team
+                    .as_ref()
+                    .and_then(|last| offered.iter().position(|t| t.id == last.id))
+                    .unwrap_or(0);
+                let heading = new_issue_heading(&offered[chosen]);
+                let form =
+                    TextForm::new(FormKind::NewItem, heading, "", "").with_team(offered, chosen);
+                (None, form)
+            }
+        };
+        self.open_text_form(EditPurpose::NewLinearIssue { team, presets }, form)
+    }
+
+    /// The one team owning the selected board column, on a board layout (`column_team`).
+    fn column_team(&self) -> Option<TeamMeta> {
+        if self.layout().0 != Layout::Board {
+            return None;
+        }
+        let (project, field) = (self.project()?, self.column_field()?);
+        let column = self
+            .board_columns()
+            .into_iter()
+            .nth(self.board_sel.column)?;
+        crate::model::teams::column_team(project, field, &column.bucket).cloned()
+    }
+
     /// The body the open detail has loaded for `item`.
     fn loaded_body(&self, item: &ItemId) -> Option<String> {
         let d = self.detail.as_ref().filter(|d| &d.item == item)?;
@@ -1019,11 +1328,23 @@ impl App {
                 if body.is_empty() {
                     return self.say(unchanged("Empty comment; nothing was sent"));
                 }
+                // A Linear comment is made with an id of ours, so a resend names the same
+                // comment (GitHub has no such id).
+                let client_id = if self.board_provider() == Provider::Linear {
+                    match crate::uuid::new_v4() {
+                        Ok(id) => Some(id),
+                        Err(e) => {
+                            return self.say(&format!("Could not make an id for the comment: {e}"));
+                        }
+                    }
+                } else {
+                    None
+                };
                 self.submit_content(OpKind::Comment, id, |item, content| Op::Comment {
                     item,
                     content,
                     body,
-                    client_id: None,
+                    client_id,
                 })
             }
             EditPurpose::NewDraft { presets } => match title_and_body(&text) {
@@ -1054,7 +1375,50 @@ impl App {
                     )
                 }
             },
+            EditPurpose::NewLinearIssue { team, presets } => match title_and_body(&text) {
+                None => self.say(unchanged("Empty title; nothing was created")),
+                Some((title, body)) => self.submit_linear_issue(team, presets, title, body),
+            },
         }
+    }
+
+    /// Creates a new Linear issue in `team` with `presets` resolved for it, under a client
+    /// id made now, so a resend names the same issue (spec section 9). The team is the next
+    /// form's prefill.
+    fn submit_linear_issue(
+        &mut self,
+        team: Option<TeamMeta>,
+        presets: Vec<(FieldId, FieldValue)>,
+        title: String,
+        body: String,
+    ) -> Vec<Command> {
+        let Some(team) = team else {
+            return self.say("Choose a team for the new issue");
+        };
+        // The board may have changed since the form opened.
+        let presets = match self.project() {
+            Some(project) => match presets_for_team(project, &team, &presets) {
+                Ok(presets) => presets,
+                Err(reason) => return self.say(&reason.message()),
+            },
+            None => presets,
+        };
+        let id = match crate::uuid::new_v4() {
+            Ok(id) => id,
+            Err(e) => return self.say(&format!("Could not make an id for the issue: {e}")),
+        };
+        let temp = self.next_temp();
+        let new = NewItem::LinearIssue {
+            id,
+            team: team.clone(),
+            title,
+            body,
+        };
+        let cmds = self.submit_new(Op::Create { temp, new, presets }, false);
+        if !cmds.is_empty() {
+            self.last_team = Some(team);
+        }
+        cmds
     }
 
     /// Submits an edit of the item's issue, pull request or draft, which needs the item still
@@ -1075,7 +1439,7 @@ impl App {
     }
 
     /// Shows `message` on the status line; nothing to do.
-    fn say(&mut self, message: &str) -> Vec<Command> {
+    pub(super) fn say(&mut self, message: &str) -> Vec<Command> {
         self.status.flash = Some(message.to_string());
         Vec::new()
     }
@@ -1163,15 +1527,83 @@ impl App {
             self.status.flash = Some(format!("Can't move to that {} column", field.name));
             return Vec::new();
         };
+        // A merged column's canonical option may be another team's: send the issue's own.
+        let op = self
+            .team_value(&item, &field, value)
+            .and_then(|value| self.field_op(&item, &field, Some(value)));
+        let op = match op {
+            Ok(op) => op,
+            Err(reason) => return self.say(&reason),
+        };
         self.selected_id = Some(item.id.clone());
-        self.submit(
-            OpKind::Move,
-            Op::SetField {
-                item: item.id.clone(),
-                field: field.id.clone(),
+        self.submit(OpKind::Move, op)
+    }
+
+    /// `value` for `item` in `field`: on a Linear board the issue's own team's value (spec
+    /// section 6), else the reason it has none; on GitHub `value` itself.
+    pub(crate) fn team_value(
+        &self,
+        item: &Item,
+        field: &Field,
+        value: FieldValue,
+    ) -> Result<FieldValue, String> {
+        match self.project() {
+            Some(project) => {
+                crate::model::teams::for_issue(project, item, field, value).map_err(|r| r.message())
+            }
+            None => Ok(value),
+        }
+    }
+
+    /// The op that sets (`Some`) or clears (`None`) `field` of `item`. A Linear label group
+    /// is `Op::GroupLabel`, naming the label it replaces (the item's current one in the
+    /// group); every other field is `SetField` or `ClearField`. A clear the board does not
+    /// allow (a Linear issue's status) is refused with its reason.
+    pub(crate) fn field_op(
+        &self,
+        item: &Item,
+        field: &Field,
+        value: Option<FieldValue>,
+    ) -> Result<Op, String> {
+        let project = self.project();
+        if value.is_none()
+            && let Some(project) = project
+        {
+            crate::model::teams::may_clear(project, field).map_err(|r| r.message())?;
+        }
+        let (id, field_id) = (item.id.clone(), field.id.clone());
+        let group = field
+            .id
+            .as_str()
+            .starts_with(crate::model::teams::GROUP_FIELD_PREFIX);
+        if self.is_linear() && group {
+            // The label the group holds now: a group value's option id is its label's id
+            // (`linear::convert`, and `Op::apply` for an edit still sending). Not looked up
+            // by name, which a plain label of the same name would confuse.
+            let replaces = match item.value(&field.id) {
+                Some(FieldValue::SingleSelect { option_id, .. }) => {
+                    Some(option_id.as_str().to_string())
+                }
+                _ => None,
+            };
+            return Ok(Op::GroupLabel {
+                item: id,
+                field: field_id,
+                value,
+                replaces,
+            });
+        }
+        Ok(match value {
+            Some(value) => Op::SetField {
+                item: id,
+                field: field_id,
                 value,
             },
-        )
+            None => Op::ClearField {
+                item: id,
+                field: field_id,
+            },
+        })
     }
 
     /// Moves the item one place up or down among its neighbours: `K` puts it after its upper
@@ -1208,6 +1640,15 @@ impl App {
             );
             return Vec::new();
         };
+        if self.board_provider() == Provider::Linear {
+            // The card lands between the neighbour and the item beyond it.
+            let beyond = if down {
+                scope.get(pos + 2)
+            } else {
+                pos.checked_sub(2).and_then(|p| scope.get(p))
+            };
+            return self.reorder_linear(&item.id, down, &neighbour, beyond.cloned());
+        }
         let after = if down {
             Some(neighbour)
         } else {
@@ -1226,6 +1667,53 @@ impl App {
                 item: item.id,
                 after,
                 sort_order: None,
+            },
+        )
+    }
+
+    /// Linear's reorder: the new `sortOrder` is the midpoint of the two issues the card lands
+    /// between, `neighbour` (the one it passes) and `beyond` (the next one that way, if any).
+    /// Equal or missing values refuse, and nothing is sent.
+    fn reorder_linear(
+        &mut self,
+        id: &ItemId,
+        down: bool,
+        neighbour: &ItemId,
+        beyond: Option<ItemId>,
+    ) -> Vec<Command> {
+        let order_of = |a: &Self, id: &ItemId| -> Option<f64> {
+            a.snapshot()?.items.get(id)?.content_fields.sort_order
+        };
+        let sort_order = order_of(self, neighbour).and_then(|near| match &beyond {
+            // The card lands at the end of the list: one past the neighbour.
+            None if down => sort_order_between(Some(near), None),
+            None => sort_order_between(None, Some(near)),
+            Some(b) => {
+                let far = order_of(self, b)?;
+                if down {
+                    sort_order_between(Some(near), Some(far))
+                } else {
+                    sort_order_between(Some(far), Some(near))
+                }
+            }
+        });
+        // Going down the card lands after the neighbour, going up after the one beyond it.
+        let after = if down {
+            Some(neighbour.clone())
+        } else {
+            beyond
+        };
+        let Some(sort_order) = sort_order else {
+            self.status.flash = Some("Can't place this card here; refresh with r".into());
+            return Vec::new();
+        };
+        self.selected_id = Some(id.clone());
+        self.submit(
+            OpKind::Reorder,
+            Op::Reorder {
+                item: id.clone(),
+                after,
+                sort_order: Some(sort_order),
             },
         )
     }
@@ -1616,6 +2104,7 @@ impl App {
                 vec![Command::Quit]
             }
             ConfirmAction::Submit { kind, op } => self.submit(kind, op),
+            ConfirmAction::SubmitNew { op, note } => self.submit_new_noting(op, note),
         }
     }
 
@@ -1641,6 +2130,9 @@ impl App {
         };
         let title = crate::ui::text::truncate_to_width(item.title(), 40);
         let question = match (&item.content, item.reference().and_then(ContentRef::label)) {
+            (_, Some(label)) if self.board_provider() == Provider::Linear => {
+                format!("Remove {label} '{title}' from the project? It stays in its team. (y/n)")
+            }
             (ItemContent::Draft { .. }, _) => {
                 format!("Remove the draft '{title}' from the project? The draft is deleted. (y/n)")
             }
@@ -1697,6 +2189,79 @@ impl App {
         self.set_extra_filter(&next)
     }
 
+    /// The Status value that moves `item` to `goal` (closed as completed or canceled, or
+    /// reopened), as a `SetField` on `linear:status`: the state of its team's, or the refusal
+    /// to flash.
+    pub(crate) fn linear_close_op(&self, item: &Item, goal: StateGoal) -> Result<Op, String> {
+        let refused = |r: TeamRefusal| r.message();
+        let project = self
+            .project()
+            .ok_or_else(|| refused(TeamRefusal::NeedsRefresh))?;
+        let team = issue_team(project, item).ok_or_else(|| refused(unknown_team(project, item)))?;
+        let value = state_for(project, team, goal).map_err(refused)?;
+        Ok(Op::SetField {
+            item: item.id.clone(),
+            field: FieldId::new(crate::model::teams::STATUS_FIELD),
+            value,
+        })
+    }
+
+    /// `close_or_reopen` on a Linear board: both are moves to a state of the issue's team.
+    fn linear_close_or_reopen(
+        &mut self,
+        kind: OpKind,
+        item: &Item,
+        reference: &str,
+    ) -> Vec<Command> {
+        if kind == OpKind::Reopen {
+            return match self.linear_close_op(item, StateGoal::Reopen) {
+                Ok(op) => self.submit(kind, op),
+                Err(reason) => {
+                    self.status.flash = Some(reason);
+                    Vec::new()
+                }
+            };
+        }
+        // The names the two choices lead to; a missing target reads `none` and says why
+        // when chosen.
+        let target = |a: &Self, goal| match a.linear_close_op(item, goal) {
+            Ok(Op::SetField { value, .. }) => Ok(value.display()),
+            Ok(_) => Err(String::new()),
+            Err(reason) => Err(reason),
+        };
+        let (completed, canceled) = (
+            target(self, StateGoal::Completed),
+            target(self, StateGoal::Canceled),
+        );
+        // An issue whose team is not known has no states to name: say so, open nothing.
+        let unknown = match self.project() {
+            Some(p) => issue_team(p, item).is_none().then(|| unknown_team(p, item)),
+            None => Some(TeamRefusal::NeedsRefresh),
+        };
+        if let Some(reason) = unknown {
+            self.status.flash = Some(reason.message());
+            return Vec::new();
+        }
+        let label = |what: &str, name: Result<String, String>| {
+            format!(
+                "Close as {what} ({})",
+                name.unwrap_or_else(|_| "none".into())
+            )
+        };
+        let picker = ListPicker::new(
+            format!("Close {reference}?"),
+            vec![
+                Choice::new(label("completed", completed), CloseReason::Completed),
+                Choice::new(label("canceled", canceled), CloseReason::NotPlanned),
+            ],
+        );
+        self.open_popup(Popup::CloseReason {
+            item: item.id.clone(),
+            picker,
+        });
+        Vec::new()
+    }
+
     /// `X`: reopen a closed item at once; close an open one after asking (a reason for an
     /// issue, yes or no for a pull request).
     pub(crate) fn close_or_reopen(&mut self) -> Vec<Command> {
@@ -1731,6 +2296,9 @@ impl App {
             Some(label) => format!("{label} '{title}'"),
             None => format!("'{title}'"),
         };
+        if self.is_linear() {
+            return self.linear_close_or_reopen(kind, &item, &reference);
+        }
         match (kind, &content) {
             (OpKind::Reopen, _) => self.submit(
                 kind,
@@ -1773,7 +2341,7 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::github::GraphqlErrorEntry;
     use crate::model::{FieldId, FieldValue, OptionId};
@@ -2328,6 +2896,19 @@ mod tests {
         assert_eq!(
             error_message(&none, Provider::Linear),
             "Linear returned an error"
+        );
+    }
+
+    #[test]
+    fn a_refused_linear_lookup_keeps_the_read_text() {
+        // Only an edit's refusal says the key may not change the team's issues.
+        let denial = BackendError::MissingPermission {
+            provider: Provider::Linear,
+            needed: vec![],
+        };
+        assert_eq!(
+            lookup_error_message(&denial, Provider::Linear),
+            "Linear refused the request: the API key cannot see this board"
         );
     }
 
@@ -4965,5 +5546,1863 @@ mod tests {
                 .any(|i| i.id.as_str() == "local:1"),
             "a draft has no label:bug, yet it stays"
         );
+    }
+
+    // Linear boards (plan 3, PR C).
+
+    const TBA_ID: &str = "team-a";
+    const TBB_ID: &str = "team-b";
+    const TYPE_GROUP: &str = "lg-type";
+
+    fn linear_option(
+        id: &str,
+        name: &str,
+        kind: crate::model::OptionKind,
+    ) -> crate::model::SelectOption {
+        crate::model::SelectOption {
+            id: OptionId::new(id),
+            name: name.into(),
+            color: crate::model::OptionColor::Gray,
+            kind: Some(kind),
+        }
+    }
+
+    /// A Linear project board of teams TBA and TBB, as in Task 6. Status options in rank,
+    /// then position, order: `Todo` is both teams' (the merged column's canonical option is
+    /// TBB's), `In Progress` only TBA's, `In Review` only TBB's, and `Done` both teams' (its
+    /// canonical option is TBA's). Each team has its own cycle; the label group Type
+    /// (Bug, Feature) is TBA's.
+    pub(crate) fn linear_project() -> crate::model::Project {
+        use crate::model::OptionKind::{Canceled, Completed, Started, Unstarted};
+        use crate::model::{Field, FieldKind, Iteration, IterationId};
+        let field = |id: &str, name: &str, kind: FieldKind| Field {
+            id: FieldId::new(id),
+            name: name.into(),
+            kind,
+        };
+        let plain = |id: &str, name: &str| crate::model::SelectOption {
+            id: OptionId::new(id),
+            name: name.into(),
+            color: crate::model::OptionColor::Gray,
+            kind: None,
+        };
+        let cycle = |id: &str, title: &str| Iteration {
+            id: IterationId::new(id),
+            title: title.into(),
+            start_date: "2026-10-12".into(),
+            duration_days: 14,
+        };
+        let fields = vec![
+            field(crate::linear::ids::TITLE, "Title", FieldKind::Title),
+            field(
+                crate::linear::ids::STATUS,
+                "Status",
+                FieldKind::SingleSelect {
+                    options: vec![
+                        linear_option("s-a-todo", "Todo", Unstarted),
+                        linear_option("s-b-todo", "Todo", Unstarted),
+                        linear_option("s-a-prog", "In Progress", Started),
+                        linear_option("s-b-review", "In Review", Started),
+                        linear_option("s-b-done", "Done", Completed),
+                        linear_option("s-a-done", "Done", Completed),
+                        // TBA only: TBB has no canceled state.
+                        linear_option("s-a-canceled", "Canceled", Canceled),
+                    ],
+                },
+            ),
+            field(
+                crate::linear::ids::PRIORITY,
+                "Priority",
+                FieldKind::SingleSelect {
+                    options: [(1, "Urgent"), (2, "High"), (3, "Medium"), (4, "Low")]
+                        .into_iter()
+                        .map(|(n, name)| crate::model::SelectOption {
+                            id: crate::linear::ids::priority_option(n),
+                            ..plain("", name)
+                        })
+                        .collect(),
+                },
+            ),
+            field(
+                crate::linear::ids::ASSIGNEES,
+                "Assignees",
+                FieldKind::Assignees,
+            ),
+            field(crate::linear::ids::LABELS, "Labels", FieldKind::Labels),
+            Field {
+                id: crate::linear::ids::group(TYPE_GROUP),
+                name: "Type".into(),
+                kind: FieldKind::SingleSelect {
+                    options: vec![plain("l-bug", "Bug"), plain("l-feature", "Feature")],
+                },
+            },
+            field(
+                crate::linear::ids::CYCLE,
+                "Cycle",
+                FieldKind::Iteration {
+                    iterations: vec![cycle("c-a", "TBA Sprint"), cycle("c-b", "TBB Sprint")],
+                    completed: vec![],
+                },
+            ),
+            field(crate::linear::ids::ESTIMATE, "Estimate", FieldKind::Number),
+            field(crate::linear::ids::DUE, "Due date", FieldKind::Date),
+        ];
+        let owners = [
+            ("s-a-todo", TBA_ID),
+            ("s-a-prog", TBA_ID),
+            ("s-a-done", TBA_ID),
+            ("s-a-canceled", TBA_ID),
+            ("s-b-todo", TBB_ID),
+            ("s-b-review", TBB_ID),
+            ("s-b-done", TBB_ID),
+            ("c-a", TBA_ID),
+            ("c-b", TBB_ID),
+            (TYPE_GROUP, TBA_ID),
+        ]
+        .into_iter()
+        .map(|(id, team)| (id.to_string(), team.to_string()))
+        .collect();
+        let team = |id: &str, key: &str| crate::model::TeamMeta {
+            id: id.into(),
+            key: key.into(),
+        };
+        let mut board = crate::ui::fixtures::project().views[1].clone();
+        board.id = crate::model::ViewId::new("V_board");
+        board.name = "Board".into();
+        board.filter = crate::model::ViewFilter::Linear(serde_json::json!({}));
+        board.visible_fields = vec![
+            FieldId::new(crate::linear::ids::TITLE),
+            FieldId::new(crate::linear::ids::STATUS),
+        ];
+        board.vertical_group_by = vec![FieldId::new(crate::linear::ids::STATUS)];
+        board.group_by = vec![];
+        let mut all = crate::ui::fixtures::project().views[0].clone();
+        all.id = crate::model::ViewId::new("V_all");
+        all.name = "All issues".into();
+        all.filter = crate::model::ViewFilter::Linear(serde_json::json!({}));
+        all.visible_fields = board.visible_fields.clone();
+        all.sort_by = vec![];
+        let id = "linear:project:6f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f";
+        crate::model::Project {
+            id: crate::model::ProjectId::new(id),
+            board: id.parse().unwrap(),
+            owner_kind: crate::model::OwnerKind::Organization,
+            title: "Launch".into(),
+            url: "https://linear.app/acme/project/launch".into(),
+            viewer_can_update: true,
+            fields,
+            views: vec![board, all],
+            linked_repos: vec![],
+            issue_repos: vec![],
+            linear: Some(crate::model::LinearMeta {
+                url_key: "acme".into(),
+                viewer_id: "u-1".into(),
+                team_keys: vec!["TBA".into(), "TBB".into()],
+                teams: vec![team(TBA_ID, "TBA"), team(TBB_ID, "TBB")],
+                owners,
+            }),
+        }
+    }
+
+    /// The Linear issue `<team>-<number>` (item id `i-<team>-<number>`) with its Status.
+    fn linear_issue(team: &str, number: u32, state: (&str, &str)) -> crate::model::Item {
+        let id = format!("i-{}-{number}", team.to_lowercase());
+        let key = format!("{team}-{number}");
+        crate::model::Item {
+            id: ItemId::new(&id),
+            content: crate::model::ItemContent::Issue {
+                reference: crate::model::ContentRef {
+                    container: team.into(),
+                    number,
+                    key: Some(key.clone()),
+                    url: format!("https://linear.app/acme/issue/{key}"),
+                },
+                title: format!("Issue {key}"),
+                state: crate::model::ContentState::Open,
+            },
+            archived: false,
+            updated_at: "2026-10-01T00:00:00Z".into(),
+            values: [(
+                FieldId::new(crate::linear::ids::STATUS),
+                select_value(state.0, state.1),
+            )]
+            .into(),
+            content_fields: crate::model::ContentFields {
+                content_id: Some(id),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// `linear_project`'s board with `TBA-1` Todo (labelled Bug, in Type), `TBA-2` In
+    /// Progress, `TBB-1` Todo and `TBB-2` In Review.
+    pub(crate) fn linear_snapshot() -> crate::store::BoardSnapshot {
+        let mut tba1 = linear_issue("TBA", 1, ("s-a-todo", "Todo"));
+        tba1.values.insert(
+            crate::linear::ids::group(TYPE_GROUP),
+            select_value("l-bug", "Bug"),
+        );
+        tba1.content_fields.label_ids = [("Bug".to_string(), "l-bug".to_string())].into();
+        let mut snap = crate::store::BoardSnapshot::new(linear_project());
+        snap.upsert_items(vec![
+            tba1,
+            linear_issue("TBA", 2, ("s-a-prog", "In Progress")),
+            linear_issue("TBB", 1, ("s-b-todo", "Todo")),
+            linear_issue("TBB", 2, ("s-b-review", "In Review")),
+        ]);
+        snap
+    }
+
+    /// The Linear test board for every PR C UI test: `linear_snapshot` on its Board tab (a
+    /// board by Status); the All issues tab is a manually ordered table.
+    pub(crate) fn linear_app() -> App {
+        app_with(linear_snapshot())
+    }
+
+    /// Selects the card of the Linear issue `key` (`TBA-2`) on the board.
+    pub(crate) fn pick(a: &mut App, key: &str) {
+        let columns = a.board_columns();
+        let (column, index) = columns
+            .iter()
+            .enumerate()
+            .find_map(|(c, col)| {
+                col.items()
+                    .iter()
+                    .position(|i| i.ref_label() == key)
+                    .map(|i| (c, i))
+            })
+            .unwrap_or_else(|| panic!("{key} is not on the board"));
+        a.board_sel = crate::ui::board::BoardSelection { column, index };
+        a.sync_selected_id();
+        assert_eq!(
+            a.selected_item().map(|i| i.ref_label()),
+            Some(key.to_string())
+        );
+    }
+
+    fn linear_status(a: &App, key: &str) -> String {
+        let item = a
+            .snapshot()
+            .unwrap()
+            .all_items()
+            .into_iter()
+            .find(|i| i.ref_label() == key)
+            .unwrap()
+            .clone();
+        item.value(&FieldId::new(crate::linear::ids::STATUS))
+            .map(|v| v.display())
+            .unwrap_or_default()
+    }
+
+    fn set_linear(item: &str, field: &str, value: FieldValue) -> Op {
+        Op::SetField {
+            item: ItemId::new(item),
+            field: FieldId::new(field),
+            value,
+        }
+    }
+
+    fn pending_ops(a: &App) -> Vec<Op> {
+        a.store.pending().iter().map(|p| p.op.clone()).collect()
+    }
+
+    #[test]
+    fn the_linear_test_board_shows_merged_columns_by_status() {
+        let a = linear_app();
+        assert_eq!(a.layout().0, Layout::Board);
+        assert_eq!(
+            column_titles(&a),
+            [
+                "Todo",
+                "In Progress",
+                "In Review",
+                "Done",
+                "Canceled",
+                "No Status"
+            ]
+        );
+        let ids = |a: &App| -> Vec<Vec<String>> {
+            a.board_columns()
+                .iter()
+                .map(|c| c.items().iter().map(|i| i.ref_label()).collect())
+                .collect()
+        };
+        assert_eq!(
+            ids(&a),
+            [
+                vec!["TBA-1".to_string(), "TBB-1".to_string()],
+                vec!["TBA-2".to_string()],
+                vec!["TBB-2".to_string()],
+                vec![],
+                vec![],
+                vec![],
+            ]
+        );
+    }
+
+    #[test]
+    fn linear_moves_take_the_issues_team_state() {
+        let mut a = linear_app();
+        // `<` on TBA-2 into the merged Todo column, whose canonical option is TBB's.
+        pick(&mut a, "TBA-2");
+        assert_eq!(a.handle_key(key('<')), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [set_linear(
+                "i-tba-2",
+                crate::linear::ids::STATUS,
+                select_value("s-a-todo", "Todo")
+            )]
+        );
+        assert_eq!(linear_status(&a, "TBA-2"), "Todo");
+        // TBB-1 from Todo into In Review, the next column once In Progress is filtered out.
+        let board = crate::model::ViewId::new("V_board");
+        a.extra_filter
+            .insert(board, "-status:\"In Progress\"".into());
+        assert_eq!(column_titles(&a)[..2], ["Todo", "In Review"]);
+        pick(&mut a, "TBB-1");
+        assert_eq!(a.handle_key(key('>')), vec![Command::Send(2)]);
+        assert_eq!(
+            pending_ops(&a)[1],
+            set_linear(
+                "i-tbb-1",
+                crate::linear::ids::STATUS,
+                select_value("s-b-review", "In Review")
+            )
+        );
+        assert_eq!(linear_status(&a, "TBB-1"), "In Review");
+    }
+
+    #[test]
+    fn a_move_into_a_column_the_team_lacks_is_refused() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-2");
+        assert!(a.handle_key(key('>')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("TBA has no \"In Review\" state")
+        );
+        assert!(a.store.pending().is_empty());
+        assert_eq!(linear_status(&a, "TBA-2"), "In Progress");
+        pick(&mut a, "TBB-1");
+        assert!(a.handle_key(key('>')).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("TBB has no \"In Progress\" state")
+        );
+        assert!(a.store.pending().is_empty());
+    }
+
+    /// Plan Decision 5.
+    #[test]
+    fn a_move_into_done_shows_the_card_closed_at_once() {
+        let mut a = linear_app();
+        pick(&mut a, "TBB-2");
+        assert_eq!(a.handle_key(key('>')), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [set_linear(
+                "i-tbb-2",
+                crate::linear::ids::STATUS,
+                select_value("s-b-done", "Done")
+            )],
+            "TBB's Done, not the column's canonical (TBA's) option"
+        );
+        let item = &a.snapshot().unwrap().items[&ItemId::new("i-tbb-2")];
+        assert!(matches!(
+            item.content,
+            crate::model::ItemContent::Issue {
+                state: crate::model::ContentState::Closed,
+                ..
+            }
+        ));
+        assert_eq!(
+            a.store.confirmed().unwrap().items[&ItemId::new("i-tbb-2")].content,
+            linear_snapshot().items[&ItemId::new("i-tbb-2")].content,
+            "open until Linear answers"
+        );
+    }
+
+    fn open_field(a: &mut App, field: &str) {
+        assert!(a.handle_key(key('e')).is_empty());
+        type_in(a, field);
+        a.handle_key(code(KeyCode::Enter));
+    }
+
+    fn value_labels(a: &App) -> Vec<String> {
+        match &a.popup {
+            Some(crate::ui::app::Popup::Value { picker, .. }) => {
+                picker.choices.iter().map(|c| c.label.clone()).collect()
+            }
+            other => panic!("expected a value picker, got {other:?}"),
+        }
+    }
+
+    fn backspaces(a: &mut App, n: usize) {
+        for _ in 0..n {
+            a.handle_key(code(KeyCode::Backspace));
+        }
+    }
+
+    #[test]
+    fn e_sets_priority_estimate_due_and_cycle_on_linear() {
+        use crate::linear::ids;
+        let mut a = linear_app();
+        pick(&mut a, "TBB-1");
+        open_field(&mut a, "priority");
+        type_in(&mut a, "high");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        open_field(&mut a, "estimate");
+        type_in(&mut a, "3");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(2)]);
+        open_field(&mut a, "due");
+        type_in(&mut a, "2026-11-02");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(3)]);
+        // The cycle picker offers only TBB's cycles.
+        open_field(&mut a, "cycle");
+        assert_eq!(value_labels(&a), ["TBB Sprint"]);
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(4)]);
+        let item = "i-tbb-1";
+        assert_eq!(
+            pending_ops(&a),
+            [
+                set_linear(
+                    item,
+                    ids::PRIORITY,
+                    select_value("linear:priority:2", "High")
+                ),
+                set_linear(item, ids::ESTIMATE, FieldValue::Number(3.0)),
+                set_linear(item, ids::DUE, FieldValue::Date("2026-11-02".into())),
+                set_linear(
+                    item,
+                    ids::CYCLE,
+                    FieldValue::Iteration {
+                        iteration_id: crate::model::IterationId::new("c-b"),
+                        title: "TBB Sprint".into(),
+                        start_date: "2026-10-12".into(),
+                    }
+                ),
+            ]
+        );
+        // And TBA's issues see only TBA's.
+        pick(&mut a, "TBA-1");
+        open_field(&mut a, "cycle");
+        assert_eq!(value_labels(&a), ["TBA Sprint"]);
+    }
+
+    #[test]
+    fn a_fractional_estimate_is_refused() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        open_field(&mut a, "estimate");
+        type_in(&mut a, "2.5");
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        let Some(crate::ui::app::Popup::Line { error, .. }) = &a.popup else {
+            panic!("the estimate input stays open")
+        };
+        assert_eq!(error.as_deref(), Some("Linear estimates are whole numbers"));
+        assert!(a.store.pending().is_empty());
+        backspaces(&mut a, 3);
+        type_in(&mut a, "2");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+    }
+
+    #[test]
+    fn clearing_the_status_is_refused() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        open_field(&mut a, "status");
+        assert!(
+            !value_labels(&a).iter().any(|l| l.starts_with("Clear")),
+            "{:?}",
+            value_labels(&a)
+        );
+        a.handle_key(code(KeyCode::Esc));
+        a.handle_key(code(KeyCode::Esc));
+        let field = FieldId::new(crate::linear::ids::STATUS);
+        assert!(
+            a.submit_value(ItemId::new("i-tba-1"), field, None)
+                .is_empty()
+        );
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("Every Linear issue has a status")
+        );
+        assert!(a.store.pending().is_empty());
+        assert_eq!(linear_status(&a, "TBA-1"), "Todo");
+    }
+
+    #[test]
+    fn a_group_field_swaps_its_label() {
+        // A plain label named like the group's (a name map holds one of them): the label
+        // replaced is still the group's own.
+        let mut snap = linear_snapshot();
+        snap.items
+            .get_mut(&ItemId::new("i-tba-1"))
+            .unwrap()
+            .content_fields
+            .label_ids
+            .insert("Bug".into(), "l-plain-bug".into());
+        let mut a = app_with(snap);
+        pick(&mut a, "TBA-1");
+        open_field(&mut a, "type");
+        type_in(&mut a, "feature");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [Op::GroupLabel {
+                item: ItemId::new("i-tba-1"),
+                field: crate::linear::ids::group(TYPE_GROUP),
+                value: Some(select_value("l-feature", "Feature")),
+                replaces: Some("l-bug".into()),
+            }]
+        );
+        // Clearing it removes the label.
+        open_field(&mut a, "type");
+        type_in(&mut a, "clear");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(2)]);
+        assert!(matches!(
+            &pending_ops(&a)[1],
+            Op::GroupLabel { value: None, replaces: Some(old), .. } if old == "l-feature"
+        ));
+        // On another team's issue the group is refused.
+        pick(&mut a, "TBB-1");
+        open_field(&mut a, "type");
+        type_in(&mut a, "bug");
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("\"Type\" belongs to team TBA")
+        );
+        assert_eq!(a.store.pending().len(), 2);
+    }
+
+    /// Review Focus 1.
+    #[test]
+    fn a_cached_04_board_refuses_team_owned_edits_until_resolved() {
+        // 0.4 cached every Linear board read-only, and knew no teams.
+        let mut snap = linear_snapshot();
+        snap.project.viewer_can_update = false;
+        let meta = snap.project.linear.as_mut().unwrap();
+        meta.teams.clear();
+        meta.owners.clear();
+        let mut a = app_with(snap);
+        let read_only = a.denial_text(crate::model::caps::Denial::ReadOnly);
+        pick(&mut a, "TBA-2");
+        assert!(a.handle_key(key('<')).is_empty());
+        assert_eq!(a.status.flash.as_deref(), Some(read_only.as_str()));
+        // A field no team owns, too.
+        a.status.flash = None;
+        assert!(a.handle_key(key('e')).is_empty());
+        assert_eq!(a.popup, None);
+        assert_eq!(a.status.flash.as_deref(), Some(read_only.as_str()));
+        assert!(a.store.pending().is_empty());
+        // The board resolves: it is editable, and the teams are known now.
+        let resolved = linear_project();
+        assert!(resolved.viewer_can_update);
+        a.on_sync(SyncEvent::Project(resolved));
+        pick(&mut a, "TBA-2");
+        assert_eq!(a.handle_key(key('<')), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a)[0],
+            set_linear(
+                "i-tba-2",
+                crate::linear::ids::STATUS,
+                select_value("s-a-todo", "Todo")
+            )
+        );
+        open_field(&mut a, "priority");
+        type_in(&mut a, "urgent");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(2)]);
+    }
+
+    #[test]
+    fn an_issue_of_a_team_not_on_the_board_says_so() {
+        let mut snap = linear_snapshot();
+        snap.upsert_items(vec![linear_issue("TBC", 1, ("s-a-todo", "Todo"))]);
+        let mut a = app_with(snap);
+        let said = Some("TBC is not one of this board's teams");
+        pick(&mut a, "TBC-1");
+        // A move,
+        assert!(a.handle_key(key('>')).is_empty());
+        assert_eq!(a.status.flash.as_deref(), said);
+        // closing it,
+        a.status.flash = None;
+        assert!(a.handle_key(key('X')).is_empty());
+        assert_eq!(a.popup, None);
+        assert_eq!(a.status.flash.as_deref(), said);
+        // and assigning people: none of them name a refresh.
+        a.status.flash = None;
+        assert!(a.handle_key(key('a')).is_empty());
+        assert_eq!(a.popup, None);
+        assert_eq!(a.status.flash.as_deref(), said);
+        assert!(a.store.pending().is_empty());
+    }
+
+    /// Review Focus 5.
+    #[test]
+    fn a_forbidden_edit_is_undone_and_later_edits_still_go() {
+        let mut a = linear_app();
+        // Both moves are queued before Linear answers the first (spec section 10).
+        pick(&mut a, "TBB-2");
+        assert_eq!(a.handle_key(key('>')), vec![Command::Send(1)]);
+        pick(&mut a, "TBA-2");
+        assert_eq!(a.handle_key(key('<')), vec![Command::Send(2)]);
+        let denial = BackendError::MissingPermission {
+            provider: Provider::Linear,
+            needed: vec![],
+        };
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Err(denial.clone()),
+        });
+        assert_eq!(linear_status(&a, "TBB-2"), "In Review", "the card returns");
+        assert_eq!(a.errors.len(), 1);
+        // The user is looking at the board: the key can see it, but may not edit this team.
+        let refused = "Linear refused this edit: the API key may not change this team's issues";
+        assert_eq!(a.errors[0].message, refused);
+        assert_eq!(error_message(&denial, Provider::Linear), refused);
+        assert!(
+            a.status
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains(refused)),
+            "{:?}",
+            a.status.error
+        );
+        assert!(a.refused_scopes.is_empty(), "Linear refuses no scope");
+        // The TBA move is still on its way, and still shows.
+        assert_eq!(
+            pending_ops(&a),
+            [set_linear(
+                "i-tba-2",
+                crate::linear::ids::STATUS,
+                select_value("s-a-todo", "Todo")
+            )]
+        );
+        assert_eq!(a.store.pending()[0].id, 2);
+        assert_eq!(linear_status(&a, "TBA-2"), "Todo");
+        // A later move is still allowed.
+        a.extra_filter.insert(
+            crate::model::ViewId::new("V_board"),
+            "-status:\"In Progress\"".into(),
+        );
+        pick(&mut a, "TBB-1");
+        assert_eq!(a.handle_key(key('>')), vec![Command::Send(3)]);
+    }
+
+    /// `snap` with the Linear issue `key` closed in `status`.
+    fn close_in_snapshot(a: &mut App, key: &str, status: (&str, &str)) {
+        let mut snap = a.snapshot().unwrap().clone();
+        let item = snap
+            .items
+            .values_mut()
+            .find(|i| i.ref_label() == key)
+            .unwrap();
+        if let crate::model::ItemContent::Issue { state, .. } = &mut item.content {
+            *state = crate::model::ContentState::Closed;
+        }
+        item.values.insert(
+            FieldId::new(crate::linear::ids::STATUS),
+            select_value(status.0, status.1),
+        );
+        a.store.apply(StoreUpdate::Replace(snap));
+    }
+
+    fn close_picker(a: &App) -> (String, Vec<String>) {
+        let Some(crate::ui::app::Popup::CloseReason { picker, .. }) = &a.popup else {
+            panic!("reason picker")
+        };
+        (
+            picker.title.clone(),
+            picker.choices.iter().map(|c| c.label.clone()).collect(),
+        )
+    }
+
+    #[test]
+    fn linear_close_offers_completed_and_canceled_states() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-2");
+        assert!(a.handle_key(key('X')).is_empty());
+        assert_eq!(
+            close_picker(&a),
+            (
+                "Close TBA-2 'Issue TBA-2'?".to_string(),
+                vec![
+                    "Close as completed (Done)".to_string(),
+                    "Close as canceled (Canceled)".to_string()
+                ]
+            )
+        );
+        // Choosing "completed" moves to the team's Done state.
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [set_linear(
+                "i-tba-2",
+                crate::linear::ids::STATUS,
+                select_value("s-a-done", "Done")
+            )]
+        );
+        assert_eq!(linear_status(&a, "TBA-2"), "Done");
+    }
+
+    #[test]
+    fn closing_as_canceled_moves_to_the_canceled_state() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        a.handle_key(key('X'));
+        a.handle_key(code(KeyCode::Down));
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [set_linear(
+                "i-tba-1",
+                crate::linear::ids::STATUS,
+                select_value("s-a-canceled", "Canceled")
+            )]
+        );
+        assert!(a.popup.is_none());
+        assert_eq!(linear_status(&a, "TBA-1"), "Canceled");
+    }
+
+    #[test]
+    fn reopen_moves_to_the_first_unstarted_state() {
+        let mut a = linear_app();
+        close_in_snapshot(&mut a, "TBB-2", ("s-b-done", "Done"));
+        pick(&mut a, "TBB-2");
+        assert_eq!(a.handle_key(key('X')), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [set_linear(
+                "i-tbb-2",
+                crate::linear::ids::STATUS,
+                select_value("s-b-todo", "Todo")
+            )]
+        );
+        assert!(a.popup.is_none());
+        assert_eq!(linear_status(&a, "TBB-2"), "Todo");
+    }
+
+    #[test]
+    fn a_team_without_canceled_says_so() {
+        let mut a = linear_app();
+        pick(&mut a, "TBB-1");
+        a.handle_key(key('X'));
+        assert_eq!(
+            close_picker(&a).1,
+            [
+                "Close as completed (Done)".to_string(),
+                "Close as canceled (none)".to_string()
+            ]
+        );
+        a.handle_key(code(KeyCode::Down));
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        assert_eq!(a.status.flash.as_deref(), Some("TBB has no canceled state"));
+        assert_eq!(a.pending_count(), 0);
+        assert_eq!(linear_status(&a, "TBB-1"), "Todo");
+        // The completed target of the same team still works.
+        a.handle_key(key('X'));
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(linear_status(&a, "TBB-1"), "Done");
+    }
+
+    #[test]
+    fn linear_close_menu() {
+        let mut a = linear_app();
+        pick(&mut a, "TBB-1");
+        a.handle_key(key('X'));
+        let screen =
+            crate::ui::fixtures::render_to_string(100, 20, |f| crate::ui::chrome::draw(f, &mut a));
+        assert!(screen.contains("Close as canceled (none)"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn linear_title_and_body_edits_send() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        a.edit_title();
+        let (purpose, _) = text_form(&a);
+        assert_eq!(purpose, &EditPurpose::Title(ItemId::new("i-tba-1")));
+        a.on_text(
+            EditPurpose::Title(ItemId::new("i-tba-1")),
+            "A better title".into(),
+            false,
+        );
+        let body = "Steps\n1. run\n".to_string();
+        a.on_text(
+            EditPurpose::Body(ItemId::new("i-tba-1")),
+            body.clone(),
+            false,
+        );
+        assert_eq!(
+            pending_ops(&a),
+            [
+                Op::Title {
+                    item: ItemId::new("i-tba-1"),
+                    content: crate::model::ContentId::Issue("i-tba-1".into()),
+                    title: "A better title".into(),
+                },
+                Op::Body {
+                    item: ItemId::new("i-tba-1"),
+                    content: crate::model::ContentId::Issue("i-tba-1".into()),
+                    body: "Steps\n1. run".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_linear_comment_carries_a_client_id_and_r_resends_it() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        assert!(a.handle_key(key('c')).is_empty());
+        type_in(&mut a, "looks good");
+        assert_eq!(a.handle_key(alt_enter()), vec![Command::Send(1)]);
+        let first = match &pending_ops(&a)[0] {
+            Op::Comment {
+                client_id, body, ..
+            } => {
+                assert_eq!(body, "looks good");
+                client_id.clone().expect("a Linear comment has a client id")
+            }
+            other => panic!("expected a comment, got {other:?}"),
+        };
+        assert_eq!(first.len(), 36, "{first}");
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Err(BackendError::Network("reset".into())),
+        });
+        assert_eq!(a.errors.len(), 1);
+        assert!(!a.errors[0].may_exist, "safe to resend");
+        assert!(!a.errors[0].message.contains(MAYBE_POSTED));
+        a.handle_key(key('E'));
+        assert_eq!(a.handle_key(key('R')), vec![Command::Send(2)]);
+        match &pending_ops(&a)[0] {
+            Op::Comment { client_id, .. } => assert_eq!(client_id.as_deref(), Some(first.as_str())),
+            other => panic!("expected a comment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn archive_and_unarchive_on_linear() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        assert_eq!(a.handle_key(key('A')), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [Op::Archive {
+                item: ItemId::new("i-tba-1")
+            }]
+        );
+        // The archived card waits on the board; `A` on it unarchives.
+        assert!(a.selected_item().unwrap().archived);
+        assert_eq!(a.handle_key(key('A')), vec![Command::Send(2)]);
+        assert_eq!(
+            pending_ops(&a)[1],
+            Op::Unarchive {
+                item: ItemId::new("i-tba-1")
+            }
+        );
+    }
+
+    #[test]
+    fn remove_asks_and_clears_the_project() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        assert!(a.confirm_remove().is_empty());
+        assert_eq!(
+            a.confirm.as_ref().unwrap().question,
+            "Remove TBA-1 'Issue TBA-1' from the project? It stays in its team. (y/n)"
+        );
+        assert_eq!(a.handle_key(key('y')), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [Op::Remove {
+                item: ItemId::new("i-tba-1")
+            }]
+        );
+    }
+
+    /// The Linear table (All issues, manual) with `sortOrder`s 1, 2, 4, 8 for TBA-1, TBA-2,
+    /// TBB-1, TBB-2, on its first row.
+    fn linear_table(orders: [Option<f64>; 4]) -> App {
+        let mut snap = linear_snapshot();
+        for (id, order) in ["i-tba-1", "i-tba-2", "i-tbb-1", "i-tbb-2"]
+            .iter()
+            .zip(orders)
+        {
+            snap.items
+                .get_mut(&ItemId::new(*id))
+                .unwrap()
+                .content_fields
+                .sort_order = order;
+        }
+        let mut a = app_with(snap);
+        a.select_view(&crate::model::ViewId::new("V_all"));
+        a
+    }
+
+    fn reorder_op(item: &str, after: Option<&str>, sort_order: f64) -> Op {
+        Op::Reorder {
+            item: ItemId::new(item),
+            after: after.map(ItemId::new),
+            sort_order: Some(sort_order),
+        }
+    }
+
+    #[test]
+    fn j_and_k_on_linear_send_the_midpoint() {
+        let mut a = linear_table([Some(1.0), Some(2.0), Some(4.0), Some(8.0)]);
+        assert_eq!(a.layout().0, Layout::Table);
+        // J on TBA-1 lands between TBA-2 (2) and TBB-1 (4).
+        assert_eq!(a.handle_key(key('J')), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [reorder_op("i-tba-1", Some("i-tba-2"), 3.0)]
+        );
+        // K on the last row, TBB-2, lands between TBA-2 (2) and TBB-1 (4).
+        let mut b = linear_table([Some(1.0), Some(2.0), Some(4.0), Some(8.0)]);
+        for _ in 0..3 {
+            b.handle_key(key('j'));
+        }
+        b.handle_key(key('K'));
+        assert_eq!(
+            pending_ops(&b),
+            [reorder_op("i-tbb-2", Some("i-tba-2"), 3.0)]
+        );
+        // K on the second row goes to the top: the first issue's value minus 1.
+        let mut c = linear_table([Some(1.0), Some(2.0), Some(4.0), Some(8.0)]);
+        c.handle_key(key('j'));
+        c.handle_key(key('K'));
+        assert_eq!(pending_ops(&c), [reorder_op("i-tba-2", None, 0.0)]);
+        // J on the second to last goes to the bottom: the last value plus 1.
+        let mut d = linear_table([Some(1.0), Some(2.0), Some(4.0), Some(8.0)]);
+        d.handle_key(key('j'));
+        d.handle_key(key('j'));
+        d.handle_key(key('J'));
+        assert_eq!(
+            pending_ops(&d),
+            [reorder_op("i-tbb-1", Some("i-tbb-2"), 9.0)]
+        );
+        // The card moves at once.
+        let order: Vec<String> = a
+            .table_rows()
+            .iter()
+            .filter_map(|r| match r {
+                Row::Item(i) => Some(i.ref_label()),
+                Row::Group { .. } => None,
+            })
+            .collect();
+        assert_eq!(order, ["TBA-2", "TBA-1", "TBB-1", "TBB-2"]);
+        // The edges still say so.
+        let mut e = linear_table([Some(1.0), Some(2.0), Some(4.0), Some(8.0)]);
+        assert!(e.handle_key(key('K')).is_empty());
+        assert_eq!(e.status.flash.as_deref(), Some("Already first here"));
+    }
+
+    #[test]
+    fn reorder_between_equal_neighbours_is_refused_and_sends_nothing() {
+        let cant = Some("Can't place this card here; refresh with r");
+        // Equal neighbours below TBA-1.
+        let mut a = linear_table([Some(1.0), Some(5.0), Some(5.0), Some(8.0)]);
+        assert!(a.handle_key(key('J')).is_empty());
+        assert_eq!(a.status.flash.as_deref(), cant);
+        assert!(a.store.pending().is_empty());
+        // A neighbour without a sortOrder (those sort last): TBB-2 below TBB-1.
+        let mut b = linear_table([Some(1.0), Some(2.0), Some(4.0), None]);
+        b.handle_key(key('j'));
+        b.handle_key(key('j'));
+        assert!(b.handle_key(key('J')).is_empty());
+        assert_eq!(b.status.flash.as_deref(), cant);
+        assert!(b.store.pending().is_empty());
+        // The item beyond the neighbour has none: TBA-2 passing TBB-1 would land before it.
+        let mut d = linear_table([Some(1.0), Some(2.0), Some(4.0), None]);
+        d.handle_key(key('j'));
+        assert!(d.handle_key(key('J')).is_empty());
+        assert_eq!(d.status.flash.as_deref(), cant);
+        assert!(d.store.pending().is_empty());
+        // Neighbours with nothing between them in f64.
+        let near = 1.0_f64.next_up();
+        let mut c = linear_table([Some(0.0), Some(1.0), Some(near), Some(8.0)]);
+        assert!(c.handle_key(key('J')).is_empty());
+        assert_eq!(c.status.flash.as_deref(), cant);
+        assert!(c.store.pending().is_empty());
+    }
+
+    #[test]
+    fn a_priority_sorted_linear_view_refuses_reorder() {
+        let mut a = linear_table([Some(1.0), Some(2.0), Some(4.0), Some(8.0)]);
+        let mut snap = linear_snapshot();
+        snap.project.views[1].sort_by = vec![crate::model::SortSpec {
+            field: FieldId::new(crate::linear::ids::PRIORITY),
+            direction: crate::model::SortDirection::Desc,
+        }];
+        a.store = Box::new(crate::store::MemoryStore::new(Some(snap)));
+        a.select_view(&crate::model::ViewId::new("V_all"));
+        assert!(a.handle_key(key('J')).is_empty());
+        let flash = a.status.flash.clone().unwrap_or_default();
+        assert!(
+            flash.starts_with("This view is sorted by ")
+                && flash.ends_with("; reordering needs an unsorted view"),
+            "{flash}"
+        );
+        assert!(a.store.pending().is_empty());
+    }
+
+    fn team_candidates(team: &str) -> crate::model::TeamCandidates {
+        let user = |id: &str, name: &str| crate::model::UserRef {
+            id: id.into(),
+            login: name.into(),
+        };
+        let label = |id: &str, name: &str| crate::model::LabelRef {
+            id: id.into(),
+            name: name.into(),
+            color: "5e6ad2".into(),
+        };
+        crate::model::TeamCandidates {
+            team: team.into(),
+            users: vec![user("u-1", "Ada Lovelace"), user("u-2", "Grace Hopper")],
+            labels: vec![label("l-docs", "Docs"), label("l-ux", "UX")],
+            truncated: false,
+        }
+    }
+
+    /// `linear_app` with TBA-1 assigned to Ada Lovelace and labelled Docs (besides Bug, in
+    /// the Type group).
+    fn linear_app_assigned() -> App {
+        let mut snap = linear_snapshot();
+        let tba1 = snap.items.get_mut(&ItemId::new("i-tba-1")).unwrap();
+        tba1.values.insert(
+            FieldId::new(crate::linear::ids::ASSIGNEES),
+            FieldValue::Users(vec!["Ada Lovelace".into()]),
+        );
+        tba1.content_fields
+            .assignee_ids
+            .insert("Ada Lovelace".into(), "u-1".into());
+        tba1.values.insert(
+            FieldId::new(crate::linear::ids::LABELS),
+            FieldValue::Labels(vec![crate::model::Label {
+                name: "Docs".into(),
+                color: "5e6ad2".into(),
+            }]),
+        );
+        tba1.content_fields
+            .label_ids
+            .insert("Docs".into(), "l-docs".into());
+        app_with(snap)
+    }
+
+    fn team_loaded(a: &mut App, team: &str) {
+        a.on_sync(SyncEvent::TeamCandidates {
+            team: team.into(),
+            candidates: team_candidates(team),
+        });
+    }
+
+    fn assignee_select(a: &App) -> &crate::ui::multiselect::MultiSelect<crate::model::UserRef> {
+        match &a.popup {
+            Some(Popup::Assignees { select, .. }) => select,
+            other => panic!("expected the assignee popover, got {other:?}"),
+        }
+    }
+
+    fn checked_labels<T: Clone>(m: &crate::ui::multiselect::MultiSelect<T>) -> Vec<(String, bool)> {
+        m.options
+            .iter()
+            .zip(&m.checked)
+            .map(|(o, c)| (o.label.clone(), *c))
+            .collect()
+    }
+
+    fn user(id: &str, name: &str) -> crate::model::UserRef {
+        crate::model::UserRef {
+            id: id.into(),
+            login: name.into(),
+        }
+    }
+
+    #[test]
+    fn linear_assignee_popup_ticks_one_and_sends_assignee_id() {
+        let mut a = linear_app_assigned();
+        pick(&mut a, "TBA-2");
+        assert_eq!(
+            a.handle_key(key('a')),
+            vec![Command::LoadTeamCandidates(TBA_ID.into())]
+        );
+        assert!(matches!(
+            &a.popup,
+            Some(Popup::Assignees { source: CandidateSource::Team(t), select, .. })
+                if t == TBA_ID && select.loading
+        ));
+        assert_eq!(assignee_select(&a).title, "Assignee · TBA-2");
+        team_loaded(&mut a, TBA_ID);
+        a.handle_key(key(' '));
+        a.handle_key(code(KeyCode::Down));
+        a.handle_key(key(' '));
+        assert_eq!(
+            checked_labels(assignee_select(&a)),
+            [
+                ("Ada Lovelace".to_string(), false),
+                ("Grace Hopper".to_string(), true)
+            ],
+            "ticking Grace unticks Ada"
+        );
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [Op::Assignees {
+                item: ItemId::new("i-tba-2"),
+                content: crate::model::ContentId::Issue("i-tba-2".into()),
+                add: vec![user("u-2", "Grace Hopper")],
+                remove: vec![],
+                all: vec![user("u-2", "Grace Hopper")],
+            }]
+        );
+        // Switching TBA-1 from Ada to Grace adds one and removes the other.
+        pick(&mut a, "TBA-1");
+        assert!(
+            a.handle_key(key('a')).is_empty(),
+            "TBA's members are loaded"
+        );
+        assert_eq!(
+            checked_labels(assignee_select(&a)),
+            [
+                ("Ada Lovelace".to_string(), true),
+                ("Grace Hopper".to_string(), false)
+            ]
+        );
+        a.handle_key(code(KeyCode::Down));
+        a.handle_key(key(' '));
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(2)]);
+        assert_eq!(
+            pending_ops(&a)[1],
+            Op::Assignees {
+                item: ItemId::new("i-tba-1"),
+                content: crate::model::ContentId::Issue("i-tba-1".into()),
+                add: vec![user("u-2", "Grace Hopper")],
+                remove: vec![user("u-1", "Ada Lovelace")],
+                all: vec![user("u-2", "Grace Hopper")],
+            }
+        );
+    }
+
+    #[test]
+    fn unassigning_sends_none() {
+        let mut a = linear_app_assigned();
+        team_loaded(&mut a, TBA_ID);
+        pick(&mut a, "TBA-1");
+        assert!(a.handle_key(key('a')).is_empty());
+        a.handle_key(key(' '));
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [Op::Assignees {
+                item: ItemId::new("i-tba-1"),
+                content: crate::model::ContentId::Issue("i-tba-1".into()),
+                add: vec![],
+                remove: vec![user("u-1", "Ada Lovelace")],
+                all: vec![],
+            }]
+        );
+    }
+
+    #[test]
+    fn team_candidates_load_once_per_team_and_r_forgets_them() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        assert_eq!(
+            a.handle_key(key('a')),
+            vec![Command::LoadTeamCandidates(TBA_ID.into())]
+        );
+        a.handle_key(code(KeyCode::Esc));
+        pick(&mut a, "TBA-2");
+        assert!(a.handle_key(key('t')).is_empty(), "TBA's are loading");
+        team_loaded(&mut a, TBA_ID);
+        assert!(matches!(&a.popup, Some(Popup::Labels { select, .. }) if !select.loading));
+        a.handle_key(code(KeyCode::Esc));
+        pick(&mut a, "TBB-1");
+        assert_eq!(
+            a.handle_key(key('a')),
+            vec![Command::LoadTeamCandidates(TBB_ID.into())],
+            "another team, another list"
+        );
+        a.handle_key(code(KeyCode::Esc));
+        a.handle_key(key('r'));
+        pick(&mut a, "TBA-1");
+        assert_eq!(
+            a.handle_key(key('a')),
+            vec![Command::LoadTeamCandidates(TBA_ID.into())],
+            "r forgot them"
+        );
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::TeamCandidates(TBA_ID.into()),
+            error: BackendError::Network("offline".into()),
+        });
+        let select = assignee_select(&a);
+        assert!(!select.loading);
+        let error = select.error.clone().unwrap_or_default();
+        assert!(
+            error.starts_with("could not load the team's members and labels")
+                && error.contains("offline"),
+            "{error}"
+        );
+        assert!(a.candidates.is_empty(), "no repository was asked");
+    }
+
+    #[test]
+    fn linear_labels_leave_out_group_labels() {
+        let mut a = linear_app_assigned();
+        team_loaded(&mut a, TBA_ID);
+        pick(&mut a, "TBA-1");
+        assert!(a.handle_key(key('t')).is_empty());
+        let Some(Popup::Labels { select, .. }) = &a.popup else {
+            panic!("labels")
+        };
+        assert_eq!(
+            checked_labels(select),
+            [("Docs".to_string(), true), ("UX".to_string(), false)],
+            "Bug is the Type field's, not a label to tick"
+        );
+        assert_eq!(select.options[0].color.as_deref(), Some("5e6ad2"));
+        assert_eq!(select.page, 250, "a cut list says Linear's page size");
+        a.handle_key(code(KeyCode::Down));
+        a.handle_key(key(' '));
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
+        assert_eq!(
+            pending_ops(&a),
+            [Op::Labels {
+                item: ItemId::new("i-tba-1"),
+                content: crate::model::ContentId::Issue("i-tba-1".into()),
+                add: vec![crate::model::LabelRef {
+                    id: "l-ux".into(),
+                    name: "UX".into(),
+                    color: "5e6ad2".into(),
+                }],
+                remove: vec![],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_linear_issue_of_an_unknown_team_needs_a_refresh() {
+        let mut snap = linear_snapshot();
+        snap.project.linear.as_mut().unwrap().teams.clear();
+        let mut a = app_with(snap);
+        pick(&mut a, "TBA-1");
+        assert!(a.handle_key(key('a')).is_empty());
+        assert_eq!(a.popup, None);
+        assert_eq!(
+            a.status.flash,
+            Some(a.denial_text(crate::model::caps::Denial::NeedsRefresh))
+        );
+    }
+
+    #[test]
+    fn linear_assignee_popover() {
+        let mut a = linear_app_assigned();
+        team_loaded(&mut a, TBA_ID);
+        pick(&mut a, "TBA-1");
+        a.handle_key(key('a'));
+        let screen =
+            crate::ui::fixtures::render_to_string(100, 20, |f| crate::ui::chrome::draw(f, &mut a));
+        assert!(screen.contains("[x] Ada Lovelace"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    // New Linear issues (Task 14, spec section 9, T2).
+
+    fn tba() -> crate::model::TeamMeta {
+        crate::model::TeamMeta {
+            id: TBA_ID.into(),
+            key: "TBA".into(),
+        }
+    }
+
+    fn tbb() -> crate::model::TeamMeta {
+        crate::model::TeamMeta {
+            id: TBB_ID.into(),
+            key: "TBB".into(),
+        }
+    }
+
+    fn new_kind_labels(a: &App) -> Vec<String> {
+        match &a.popup {
+            Some(Popup::NewKind { picker, .. }) => {
+                picker.choices.iter().map(|c| c.label.clone()).collect()
+            }
+            other => panic!("expected the new-item menu, got {other:?}"),
+        }
+    }
+
+    /// `n`, then "New issue" (the first entry).
+    fn new_linear_issue(a: &mut App) -> Vec<Command> {
+        assert!(a.handle_key(key('n')).is_empty());
+        assert_eq!(new_kind_labels(a)[0], "New issue");
+        a.handle_key(code(KeyCode::Enter))
+    }
+
+    /// `linear_snapshot` as the team board of TBA.
+    fn linear_team_app() -> App {
+        let mut snap = linear_snapshot();
+        snap.project.board = format!("linear:team:{TBA_ID}").parse().unwrap();
+        let meta = snap.project.linear.as_mut().unwrap();
+        meta.teams = vec![tba()];
+        meta.team_keys = vec!["TBA".into()];
+        snap.items.retain(|_, i| i.ref_label().starts_with("TBA"));
+        snap.order.retain(|id| id.as_str().starts_with("i-tba"));
+        app_with(snap)
+    }
+
+    #[test]
+    fn n_on_linear_offers_new_and_on_project_boards_add_existing() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        a.handle_key(key('n'));
+        assert_eq!(
+            new_kind_labels(&a),
+            ["New issue", "Add existing issue (key or URL)"]
+        );
+        let mut t = linear_team_app();
+        pick(&mut t, "TBA-1");
+        t.handle_key(key('n'));
+        assert_eq!(new_kind_labels(&t), ["New issue"], "never a draft");
+        // A team board's issue is its team's, with no team line.
+        assert!(t.handle_key(code(KeyCode::Enter)).is_empty());
+        let (purpose, form) = text_form(&t);
+        assert!(
+            matches!(purpose, EditPurpose::NewLinearIssue { team: Some(team), .. } if *team == tba()),
+            "{purpose:?}"
+        );
+        assert_eq!(form.heading(), "New issue in TBA");
+        assert_eq!(form.team(), None, "no team line");
+    }
+
+    #[test]
+    fn a_single_team_column_needs_no_team_line() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-2");
+        assert!(new_linear_issue(&mut a).is_empty());
+        let (purpose, form) = text_form(&a);
+        assert_eq!(
+            purpose,
+            &EditPurpose::NewLinearIssue {
+                team: Some(tba()),
+                presets: vec![(
+                    FieldId::new(crate::linear::ids::STATUS),
+                    select_value("s-a-prog", "In Progress")
+                )],
+            }
+        );
+        assert_eq!(form.heading(), "New issue in TBA");
+        assert_eq!(form.team(), None);
+        // In Review is TBB's.
+        a.handle_key(code(KeyCode::Esc));
+        pick(&mut a, "TBB-2");
+        new_linear_issue(&mut a);
+        assert_eq!(text_form(&a).1.heading(), "New issue in TBB");
+    }
+
+    #[test]
+    fn a_merged_column_asks_for_the_team_prefilled_with_the_last() {
+        let mut a = linear_app();
+        pick(&mut a, "TBB-1");
+        new_linear_issue(&mut a);
+        let (purpose, form) = text_form(&a);
+        assert!(
+            matches!(purpose, EditPurpose::NewLinearIssue { team: None, .. }),
+            "{purpose:?}"
+        );
+        assert_eq!(form.teams(), [tba(), tbb()]);
+        assert_eq!(
+            form.team(),
+            Some(&tba()),
+            "the first team, before any choice"
+        );
+        assert_eq!(form.heading(), "New issue in TBA");
+        // Shift+Tab reaches the team line; Enter opens the picker of the teams.
+        a.handle_key(code(KeyCode::BackTab));
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        let Some(Popup::TeamPick { picker, .. }) = &a.popup else {
+            panic!("expected the team picker, got {:?}", a.popup)
+        };
+        let keys: Vec<&str> = picker.choices.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(keys, ["TBA", "TBB"]);
+        // Esc goes back to the form unchanged.
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!(text_form(&a).1.team(), Some(&tba()));
+        a.handle_key(code(KeyCode::Enter));
+        a.handle_key(code(KeyCode::Down));
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        let form = text_form(&a).1;
+        assert_eq!(form.team(), Some(&tbb()));
+        assert_eq!(
+            form.heading(),
+            "New issue in TBB",
+            "the heading follows the team"
+        );
+        a.handle_key(code(KeyCode::Tab));
+        type_in(&mut a, "Write the docs");
+        assert_eq!(a.handle_key(alt_enter()), vec![Command::Send(1)]);
+        assert_eq!(a.last_team, Some(tbb()));
+        // The next new issue in a merged column starts with TBB.
+        pick(&mut a, "TBA-1");
+        new_linear_issue(&mut a);
+        let form = text_form(&a).1;
+        assert_eq!(form.team(), Some(&tbb()));
+        assert_eq!(form.heading(), "New issue in TBB");
+    }
+
+    #[test]
+    fn teams_without_the_columns_state_are_not_offered() {
+        // TBC has no states at all, so no Todo.
+        let mut snap = linear_snapshot();
+        let meta = snap.project.linear.as_mut().unwrap();
+        meta.teams.push(crate::model::TeamMeta {
+            id: "team-c".into(),
+            key: "TBC".into(),
+        });
+        // Swimlanes by Type, TBA's label group; TBB-2 carries Bug too.
+        let board = crate::model::ViewId::new("V_board");
+        let view = snap
+            .project
+            .views
+            .iter_mut()
+            .find(|v| v.id == board)
+            .unwrap();
+        view.group_by = vec![crate::linear::ids::group(TYPE_GROUP)];
+        snap.items
+            .get_mut(&ItemId::new("i-tbb-2"))
+            .unwrap()
+            .values
+            .insert(
+                crate::linear::ids::group(TYPE_GROUP),
+                select_value("l-bug", "Bug"),
+            );
+        let mut a = app_with(snap.clone());
+        pick(&mut a, "TBB-1");
+        new_linear_issue(&mut a);
+        assert_eq!(text_form(&a).1.teams(), [tba(), tbb()], "not TBC");
+        a.handle_key(code(KeyCode::Esc));
+        // Todo in the Bug lane: only TBA owns the Type group.
+        pick(&mut a, "TBA-1");
+        new_linear_issue(&mut a);
+        assert_eq!(text_form(&a).1.teams(), [tba()]);
+        a.handle_key(code(KeyCode::Esc));
+        // In Review is TBB's, and TBB cannot take Bug: nothing opens.
+        pick(&mut a, "TBB-2");
+        assert!(new_linear_issue(&mut a).is_empty());
+        assert_eq!(a.popup, None);
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("\"Type\" belongs to team TBA")
+        );
+        // A board cached by 0.4 knows no teams: refresh rather than guess.
+        let mut old = snap;
+        old.project.linear.as_mut().unwrap().teams.clear();
+        let mut a = app_with(old);
+        pick(&mut a, "TBA-2");
+        assert!(new_linear_issue(&mut a).is_empty());
+        assert_eq!(a.popup, None);
+        assert_eq!(
+            a.status.flash,
+            Some(a.denial_text(crate::model::caps::Denial::NeedsRefresh))
+        );
+    }
+
+    #[test]
+    fn a_new_linear_issue_carries_an_id_team_and_resolved_presets() {
+        let mut a = linear_app();
+        // Todo is merged; its canonical option is TBB's, and TBA is the prefilled team.
+        pick(&mut a, "TBB-1");
+        new_linear_issue(&mut a);
+        type_in(&mut a, "Write the docs");
+        a.handle_key(code(KeyCode::Enter));
+        type_in(&mut a, "Steps");
+        assert_eq!(a.handle_key(alt_enter()), vec![Command::Send(1)]);
+        assert_eq!(a.popup, None);
+        let ops = pending_ops(&a);
+        let Op::Create {
+            temp,
+            new:
+                NewItem::LinearIssue {
+                    id,
+                    team,
+                    title,
+                    body,
+                },
+            presets,
+        } = &ops[0]
+        else {
+            panic!("expected a new Linear issue, got {ops:?}")
+        };
+        assert_eq!(temp, &ItemId::new("local:1"));
+        assert_eq!(team, &tba());
+        assert_eq!((title.as_str(), body.as_str()), ("Write the docs", "Steps"));
+        assert_eq!(
+            presets,
+            &[(
+                FieldId::new(crate::linear::ids::STATUS),
+                select_value("s-a-todo", "Todo")
+            )],
+            "TBA's Todo, not the column's canonical (TBB's) option"
+        );
+        // A UUID v4.
+        assert_eq!(id.len(), 36, "{id}");
+        assert_eq!(id.chars().nth(14), Some('4'), "{id}");
+        assert_eq!(a.last_team, Some(tba()));
+        // The placeholder shows at once, selected, in Todo.
+        let placeholder = a.selected_item().unwrap();
+        assert_eq!(placeholder.id, ItemId::new("local:1"));
+        assert_eq!(linear_status(&a, &placeholder.ref_label()), "Todo");
+        // Each new issue has an id of its own.
+        pick(&mut a, "TBA-2");
+        new_linear_issue(&mut a);
+        type_in(&mut a, "Another");
+        assert_eq!(a.handle_key(alt_enter()), vec![Command::Send(2)]);
+        let ids: Vec<String> = pending_ops(&a)
+            .iter()
+            .filter_map(|op| match op {
+                Op::Create {
+                    new: NewItem::LinearIssue { id, .. },
+                    ..
+                } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    /// Review Focus 2: a Linear create whose answer was lost is safe to resend, and `R`
+    /// resends it with the same id, so Linear makes it at most once.
+    #[test]
+    fn r_resends_a_lost_linear_create() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-2");
+        new_linear_issue(&mut a);
+        type_in(&mut a, "Write the docs");
+        assert_eq!(a.handle_key(alt_enter()), vec![Command::Send(1)]);
+        let first = pending_ops(&a)[0].clone();
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Err(BackendError::Network("reset".into())),
+        });
+        assert_eq!(a.errors.len(), 1);
+        assert!(!a.errors[0].may_exist, "safe to resend");
+        assert!(!a.errors[0].message.contains(MAYBE_CREATED));
+        a.handle_key(key('E'));
+        assert_eq!(a.handle_key(key('R')), vec![Command::Send(2)]);
+        assert_eq!(pending_ops(&a), [first], "the same op, the same id");
+        assert!(a.errors.is_empty());
+    }
+
+    #[test]
+    fn linear_new_issue_form_with_team() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        new_linear_issue(&mut a);
+        type_in(&mut a, "Write the docs");
+        let screen =
+            crate::ui::fixtures::render_to_string(100, 24, |f| crate::ui::chrome::draw(f, &mut a));
+        assert!(screen.contains("New issue in TBA"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    // Task 15: adding an existing Linear issue by key or URL.
+
+    /// `linear_project`'s Linear project id.
+    const BOARD_PROJECT: &str = "6f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f";
+
+    /// The issue `TBA-12`, Todo, not on the board, in the project `project` (id, name).
+    fn found_issue(project: Option<(&str, &str)>) -> crate::model::Item {
+        let mut issue = linear_issue("TBA", 12, ("s-a-todo", "Todo"));
+        if let Some((id, name)) = project {
+            issue.values.insert(
+                FieldId::new(crate::linear::ids::PROJECT),
+                select_value(id, name),
+            );
+        }
+        issue
+    }
+
+    /// `n`, "Add existing issue (key or URL)", then `text` and Enter.
+    fn add_existing_linear(a: &mut App, text: &str) -> Vec<Command> {
+        assert!(a.handle_key(key('n')).is_empty());
+        assert_eq!(new_kind_labels(a)[1], "Add existing issue (key or URL)");
+        a.handle_key(code(KeyCode::Down));
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        assert!(
+            matches!(&a.popup, Some(Popup::IssueKey { input, loading: false, error: None, .. }) if input.is_empty()),
+            "{:?}",
+            a.popup
+        );
+        assert!(type_in(a, text).is_empty());
+        a.handle_key(code(KeyCode::Enter))
+    }
+
+    fn issue_key_error(a: &App) -> Option<String> {
+        match &a.popup {
+            Some(Popup::IssueKey { error, .. }) => error.clone(),
+            other => panic!("expected the issue key popup, got {other:?}"),
+        }
+    }
+
+    fn issue_key_loading(a: &App) -> bool {
+        matches!(&a.popup, Some(Popup::IssueKey { loading: true, .. }))
+    }
+
+    #[test]
+    fn an_unknown_key_says_so() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        // Nothing to look up in text that is no key or link.
+        assert!(add_existing_linear(&mut a, "crash on start").is_empty());
+        assert_eq!(issue_key_error(&a).as_deref(), Some(NOT_AN_ISSUE_REF));
+        assert!(!issue_key_loading(&a));
+        // Typing clears the error.
+        for _ in 0.."crash on start".len() {
+            a.handle_key(code(KeyCode::Backspace));
+        }
+        assert_eq!(issue_key_error(&a), None);
+        type_in(&mut a, "tba-99");
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::LookupIssue("TBA-99".into())]
+        );
+        assert!(issue_key_loading(&a));
+        // Enter again while it looks up asks nothing more.
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        let screen =
+            crate::ui::fixtures::render_to_string(100, 24, |f| crate::ui::chrome::draw(f, &mut a));
+        assert!(screen.contains("Add existing issue"), "{screen}");
+        assert!(screen.contains("Looking up…"), "{screen}");
+        // An answer for another key is not this popup's.
+        assert!(
+            a.on_sync(SyncEvent::IssueFound {
+                key: "TBA-98".into(),
+                item: None,
+            })
+            .is_empty()
+        );
+        assert!(issue_key_loading(&a));
+        assert!(
+            a.on_sync(SyncEvent::IssueFound {
+                key: "TBA-99".into(),
+                item: None,
+            })
+            .is_empty()
+        );
+        assert_eq!(issue_key_error(&a).as_deref(), Some("No issue TBA-99"));
+        assert!(!issue_key_loading(&a));
+        assert!(pending_ops(&a).is_empty());
+        let screen =
+            crate::ui::fixtures::render_to_string(100, 24, |f| crate::ui::chrome::draw(f, &mut a));
+        assert!(screen.contains("No issue TBA-99"), "{screen}");
+        assert!(screen.contains("TBA-12 or a linear.app link"), "{screen}");
+        // A lookup that fails says why, in the popup.
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::LookupIssue("TBA-99".into())]
+        );
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::IssueByKey("TBA-99".into()),
+            error: BackendError::Network("offline".into()),
+        });
+        let error = issue_key_error(&a).unwrap();
+        assert!(
+            error.starts_with("could not look up the issue: "),
+            "{error}"
+        );
+        assert_eq!(
+            a.status.error, None,
+            "said in the popup, not the status line"
+        );
+        // Esc goes back to the new-item menu, with the same presets.
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!(
+            new_kind_labels(&a),
+            ["New issue", "Add existing issue (key or URL)"]
+        );
+    }
+
+    #[test]
+    fn an_issue_on_the_board_is_selected_not_added() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        assert_eq!(
+            add_existing_linear(&mut a, "https://linear.app/acme/issue/TBB-2/review-it"),
+            vec![Command::LookupIssue("TBB-2".into())]
+        );
+        let on_board = a.item(&ItemId::new("i-tbb-2")).unwrap().clone();
+        assert!(
+            a.on_sync(SyncEvent::IssueFound {
+                key: "TBB-2".into(),
+                item: Some(on_board),
+            })
+            .is_empty()
+        );
+        assert_eq!(a.popup, None);
+        assert_eq!(a.mode, Mode::Normal);
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("TBB-2 is already on the board")
+        );
+        assert_eq!(
+            a.selected_item().map(|i| i.ref_label()),
+            Some("TBB-2".to_string())
+        );
+        assert!(pending_ops(&a).is_empty());
+    }
+
+    #[test]
+    fn an_issue_in_another_project_asks_first() {
+        let mut a = linear_app();
+        // Todo: the merged column, whose canonical option is TBB's.
+        pick(&mut a, "TBB-1");
+        add_existing_linear(&mut a, "TBA-12");
+        let found = found_issue(Some(("p-billing", "Billing")));
+        assert!(
+            a.on_sync(SyncEvent::IssueFound {
+                key: "TBA-12".into(),
+                item: Some(found.clone()),
+            })
+            .is_empty()
+        );
+        assert_eq!(a.popup, None);
+        assert_eq!(a.mode, Mode::Confirm);
+        assert_eq!(
+            a.confirm.as_ref().map(|c| c.question.as_str()),
+            Some("TBA-12 is in \"Billing\"; move it here? (y/n)")
+        );
+        assert!(pending_ops(&a).is_empty(), "nothing is sent before a yes");
+        // `n` sends nothing.
+        assert!(a.handle_key(key('n')).is_empty());
+        assert_eq!(a.mode, Mode::Normal);
+        assert!(pending_ops(&a).is_empty());
+        // `y` adds it, with the column's status for TBA.
+        let mut a = linear_app();
+        pick(&mut a, "TBB-1");
+        add_existing_linear(&mut a, "TBA-12");
+        a.on_sync(SyncEvent::IssueFound {
+            key: "TBA-12".into(),
+            item: Some(found.clone()),
+        });
+        assert_eq!(a.handle_key(key('y')), vec![Command::Send(1)]);
+        assert_eq!(a.mode, Mode::Normal);
+        assert_eq!(
+            pending_ops(&a),
+            [Op::Create {
+                temp: ItemId::new("local:1"),
+                new: NewItem::LinearExisting {
+                    issue: Box::new(found)
+                },
+                presets: vec![(
+                    FieldId::new(crate::linear::ids::STATUS),
+                    select_value("s-a-todo", "Todo")
+                )],
+            }]
+        );
+        // The placeholder shows at once, selected.
+        assert_eq!(
+            a.selected_item().map(|i| i.id.clone()),
+            Some(ItemId::new("local:1"))
+        );
+        // An issue in this board's project, or in none, is added without a question.
+        for project in [Some((BOARD_PROJECT, "Launch")), None] {
+            let mut a = linear_app();
+            pick(&mut a, "TBA-2");
+            add_existing_linear(&mut a, "TBA-12");
+            assert_eq!(
+                a.on_sync(SyncEvent::IssueFound {
+                    key: "TBA-12".into(),
+                    item: Some(found_issue(project)),
+                }),
+                vec![Command::Send(1)],
+                "{project:?}"
+            );
+            assert_eq!(a.mode, Mode::Normal);
+            assert_eq!(a.popup, None);
+            assert_eq!(a.status.flash, None, "no preset was left out");
+        }
+    }
+
+    #[test]
+    fn presets_the_team_lacks_are_left_out_and_named() {
+        let mut a = linear_app();
+        // In Review is TBB's only.
+        pick(&mut a, "TBB-2");
+        add_existing_linear(&mut a, "TBA-12");
+        let found = found_issue(None);
+        assert_eq!(
+            a.on_sync(SyncEvent::IssueFound {
+                key: "TBA-12".into(),
+                item: Some(found.clone()),
+            }),
+            vec![Command::Send(1)],
+            "the add still happens"
+        );
+        assert_eq!(
+            pending_ops(&a),
+            [Op::Create {
+                temp: ItemId::new("local:1"),
+                new: NewItem::LinearExisting {
+                    issue: Box::new(found.clone())
+                },
+                presets: vec![],
+            }]
+        );
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("TBA has no \"In Review\" state; adding TBA-12 without it")
+        );
+        // After a yes, too.
+        let mut a = linear_app();
+        pick(&mut a, "TBB-2");
+        add_existing_linear(&mut a, "TBA-12");
+        a.on_sync(SyncEvent::IssueFound {
+            key: "TBA-12".into(),
+            item: Some(found_issue(Some(("p-billing", "Billing")))),
+        });
+        assert_eq!(a.mode, Mode::Confirm);
+        assert_eq!(a.handle_key(key('y')), vec![Command::Send(1)]);
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("TBA has no \"In Review\" state; adding TBA-12 without it")
+        );
+        // An issue of a team the board does not list takes none of its states.
+        let mut a = linear_app();
+        pick(&mut a, "TBA-2");
+        add_existing_linear(&mut a, "TBC-12");
+        let tbc = linear_issue("TBC", 12, ("s-c-todo", "Todo"));
+        assert_eq!(
+            a.on_sync(SyncEvent::IssueFound {
+                key: "TBC-12".into(),
+                item: Some(tbc),
+            }),
+            vec![Command::Send(1)]
+        );
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("TBC is not one of this board's teams; adding TBC-12 without it")
+        );
+    }
+
+    #[test]
+    fn team_boards_have_no_add_existing() {
+        let mut t = linear_team_app();
+        pick(&mut t, "TBA-1");
+        t.handle_key(key('n'));
+        assert_eq!(new_kind_labels(&t), ["New issue"]);
+        assert!(
+            !new_kind_labels(&t).iter().any(|l| l.contains("existing")),
+            "a team board holds every issue of its team already"
+        );
+        // A project board offers it.
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        a.handle_key(key('n'));
+        assert!(new_kind_labels(&a).contains(&"Add existing issue (key or URL)".to_string()));
     }
 }

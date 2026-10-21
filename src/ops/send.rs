@@ -842,10 +842,8 @@ mod tests {
         use crate::model::{
             CloseReason, ContentHit, ContentId, Item, MilestoneRef, OptionId, RepoRef, TeamMeta,
         };
-        use serde_json::Value;
 
         const ISSUE_UUID: &str = "0f8e7d6c-5b4a-4938-8271-605f4e3d2c1b";
-        const COMMENT_UUID: &str = "7a6b5c4d-3e2f-4a1b-9c8d-7e6f5a4b3c2d";
 
         fn board() -> ProjectId {
             ProjectId::new("linear:project:p-1")
@@ -869,10 +867,6 @@ mod tests {
 
         fn content() -> ContentId {
             ContentId::Issue("i-7".into())
-        }
-
-        fn updated() -> Value {
-            json!({"issueUpdate": {"success": true, "issue": issue_json()}})
         }
 
         fn new_issue() -> Op {
@@ -905,121 +899,43 @@ mod tests {
             }
         }
 
-        // Hand-written, in the shape `execute_linear` hands the client, until Task 16
-        // records a real one.
-        fn input_error(message: &str) -> BackendError {
+        /// Hand-written, in the shape `execute_linear` hands the client: Linear's answer to
+        /// a create whose client id is taken, HTTP 200 with `INPUT_ERROR` and "conflict on
+        /// insert of Issue". Measured by probe L11 on 2026-10-21.
+        fn conflict_on_insert_of_issue() -> BackendError {
             BackendError::Api(vec![GraphqlErrorEntry {
-                message: message.into(),
+                message: "conflict on insert of Issue".into(),
                 kind: Some("INPUT_ERROR".into()),
             }])
         }
 
+        /// Hand-written: archive and unarchive payloads without their entity confirm as
+        /// applied (Decision 7). Each op's recorded answer, and what it confirms, is replayed
+        /// in tests/linear_fixtures.rs (`recorded_edits_confirm_each_linear_op`).
         #[tokio::test]
-        async fn linear_ops_reach_the_linear_client() {
+        async fn an_answer_without_its_issue_confirms_as_applied() {
             let t = Arc::new(FixtureTransport::new());
-            t.push("IssueUpdate", updated());
-            t.push("IssueUpdate", updated());
-            t.push(
-                "CommentCreate",
-                json!({"commentCreate": {"success": true, "comment": {"id": COMMENT_UUID}}}),
-            );
             t.push(
                 "IssueArchive",
-                json!({"issueArchive": {"success": true, "entity": issue_json()}}),
+                json!({"issueArchive": {"success": true, "entity": null}}),
             );
             t.push(
                 "IssueUnarchive",
                 json!({"issueUnarchive": {"success": true, "entity": null}}),
             );
-            t.push(
-                "IssueCreate",
-                json!({"issueCreate": {"success": true, "issue": issue_json()}}),
-            );
-            t.push("IssueUpdate", updated());
             let b = backend(&t);
-            let cases = [
-                (
-                    Op::SetField {
-                        item: issue(),
-                        field: FieldId::new(ids::STATUS),
-                        value: FieldValue::SingleSelect {
-                            option_id: OptionId::new("s-a-done"),
-                            name: "Done".into(),
-                        },
-                    },
-                    Confirmed::Item(the_issue()),
-                ),
-                (
-                    Op::Reorder {
-                        item: issue(),
-                        after: None,
-                        sort_order: Some(-20.0),
-                    },
-                    Confirmed::Item(the_issue()),
-                ),
-                (
-                    Op::Comment {
-                        item: issue(),
-                        content: content(),
-                        body: "Looks good".into(),
-                        client_id: Some(COMMENT_UUID.into()),
-                    },
-                    Confirmed::Applied,
-                ),
-                (Op::Archive { item: issue() }, Confirmed::Item(the_issue())),
-                // Decision 7: no entity in the answer is still a success.
-                (Op::Unarchive { item: issue() }, Confirmed::Applied),
-                (new_issue(), created("local:1")),
-                (
-                    Op::Create {
-                        temp: ItemId::new("local:2"),
-                        new: NewItem::LinearExisting {
-                            issue: Box::new(the_issue()),
-                        },
-                        presets: vec![],
-                    },
-                    created("local:2"),
-                ),
-            ];
-            for (op, confirmed) in cases {
+            for op in [
+                Op::Archive { item: issue() },
+                Op::Unarchive { item: issue() },
+            ] {
                 assert_eq!(
                     send(&b, &board(), &op).await,
-                    Ok(confirmed),
+                    Ok(Confirmed::Applied),
                     "{}",
                     op.name()
                 );
             }
-            assert_eq!(
-                operations(&t),
-                [
-                    "IssueUpdate",
-                    "IssueUpdate",
-                    "CommentCreate",
-                    "IssueArchive",
-                    "IssueUnarchive",
-                    "IssueCreate",
-                    "IssueUpdate"
-                ]
-            );
-            let vars: Vec<Value> = t.requests().into_iter().map(|r| r.variables).collect();
-            assert_eq!(
-                vars[0],
-                json!({"id": "i-7", "input": {"stateId": "s-a-done"}})
-            );
-            assert_eq!(vars[1], json!({"id": "i-7", "input": {"sortOrder": -20.0}}));
-            assert_eq!(
-                vars[2],
-                json!({"input": {"id": COMMENT_UUID, "issueId": "i-7", "body": "Looks good"}})
-            );
-            assert_eq!(vars[3], json!({"id": "i-7"}));
-            assert_eq!(
-                vars[5],
-                json!({"input": {
-                    "id": ISSUE_UUID, "teamId": "team-a", "title": "Write the docs",
-                    "description": "", "projectId": "p-1", "stateId": "s-a-todo",
-                }})
-            );
-            assert_eq!(vars[6], json!({"id": "i-7", "input": {"projectId": "p-1"}}));
+            assert_eq!(operations(&t), ["IssueArchive", "IssueUnarchive"]);
         }
 
         /// Review Focus 2: the queue resends a rate-limited create as the same op, so the
@@ -1032,7 +948,8 @@ mod tests {
             };
             t.push_error("IssueCreate", limited.clone());
             t.push_error("IssueByKey", limited.clone());
-            t.push_error("IssueCreate", input_error("Argument Validation Error"));
+            t.push_error("IssueCreate", conflict_on_insert_of_issue());
+            // Hand-written: the lookup finds the issue.
             t.push("IssueByKey", json!({"issue": issue_json()}));
             let b = backend(&t);
             let op = new_issue();

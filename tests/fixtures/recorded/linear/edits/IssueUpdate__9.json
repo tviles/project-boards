@@ -1,0 +1,48 @@
+{
+  "data": {
+    "issueUpdate": {
+      "issue": {
+        "archivedAt": null,
+        "assignee": null,
+        "canceledAt": null,
+        "completedAt": null,
+        "createdAt": "2026-10-21T14:55:28.857Z",
+        "cycle": {
+          "endsAt": "2026-10-23T05:00:00.000Z",
+          "id": "09084337-f645-4010-b191-f411ab732ec1",
+          "name": null,
+          "number": 1,
+          "startsAt": "2026-10-16T00:00:00.000Z"
+        },
+        "dueDate": "2026-12-01",
+        "estimate": 3,
+        "id": "5dc4d6e7-a851-472b-ae9a-d3dce1a18529",
+        "identifier": "TBA-38",
+        "labels": {
+          "nodes": []
+        },
+        "number": 38,
+        "parent": null,
+        "priority": 0,
+        "project": null,
+        "sortOrder": -1867,
+        "state": {
+          "color": "#f2c94c",
+          "id": "5b9808ef-f21a-4c9c-9dc5-48dee8411a8c",
+          "name": "In Progress",
+          "position": 2,
+          "type": "started"
+        },
+        "team": {
+          "id": "152b24bd-5efb-4bf0-8d81-021700a5a8f0",
+          "key": "TBA"
+        },
+        "title": "pb-live throwaway 5ebf-18e09339f19e5d60",
+        "trashed": null,
+        "updatedAt": "2026-10-21T14:55:30.988Z",
+        "url": "https://linear.app/testbed-workspace/issue/TBA-38/pb-live-throwaway-5ebf-18e09339f19e5d60"
+      },
+      "success": true
+    }
+  }
+}

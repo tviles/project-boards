@@ -44,12 +44,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_tabs(frame, tabs, app);
     if app.mode == Mode::Setup {
         let text = app.setup.clone().unwrap_or_default();
+        let title = if app.setup_offers_boards {
+            " setup · r retry · B boards · q quit "
+        } else {
+            " setup · r retry · q quit "
+        };
         frame.render_widget(
-            Paragraph::new(text).wrap(Wrap { trim: false }).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" setup · r retry · q quit "),
-            ),
+            Paragraph::new(text)
+                .wrap(Wrap { trim: false })
+                .block(Block::default().borders(Borders::ALL).title(title)),
             body,
         );
     } else if app.detail.is_some() {
@@ -75,10 +78,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         render_picker(frame, area, p, &app.theme);
     }
     if app.mode == Mode::Popup {
-        if let Some(Popup::Text { form, .. }) = &mut app.popup {
-            crate::ui::textform::draw(frame, body, form, &app.theme);
-        } else {
-            draw_popup(frame, body, app);
+        match &mut app.popup {
+            Some(Popup::Text { form, .. }) => {
+                crate::ui::textform::draw(frame, body, form, &app.theme);
+            }
+            // The team picker over the form it chooses for.
+            Some(Popup::TeamPick { form, picker }) => {
+                crate::ui::textform::draw(frame, body, &mut form.1, &app.theme);
+                render_list_picker(frame, body, picker, &app.theme);
+            }
+            _ => draw_popup(frame, body, app),
         }
     }
     if app.mode == Mode::ErrorLog {
@@ -201,8 +210,29 @@ fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
             };
             render_line_popup(frame, area, title, input, hint, error.as_deref(), theme)
         }
+        Popup::IssueKey {
+            input,
+            loading,
+            error,
+            ..
+        } => {
+            let hint = if *loading {
+                "Looking up…"
+            } else {
+                "TBA-12 or a linear.app link"
+            };
+            render_line_popup(
+                frame,
+                area,
+                "Add existing issue",
+                input,
+                hint,
+                error.as_deref(),
+                theme,
+            )
+        }
         // Drawn by `draw`, which has the form mutably.
-        Popup::Text { .. } => {}
+        Popup::Text { .. } | Popup::TeamPick { .. } => {}
     }
 }
 
@@ -843,6 +873,22 @@ mod tests {
     }
 
     #[test]
+    fn the_setup_title_offers_boards_only_for_a_failing_board() {
+        let mut a = app();
+        a.mode = Mode::Setup;
+        a.setup = Some("Run gh auth login first.".into());
+        let screen = render_to_string(80, 12, |f| draw(f, &mut a));
+        assert!(screen.contains(" setup · r retry · q quit "), "{screen}");
+        assert!(!screen.contains("B boards"), "{screen}");
+        a.setup_offers_boards = true;
+        let screen = render_to_string(80, 12, |f| draw(f, &mut a));
+        assert!(
+            screen.contains(" setup · r retry · B boards · q quit "),
+            "{screen}"
+        );
+    }
+
+    #[test]
     fn a_flash_replaces_the_status_line_until_the_next_key() {
         let mut a = app();
         a.status.error = Some("refresh failed: down".into());
@@ -1232,22 +1278,25 @@ mod tests {
     }
 
     #[test]
-    fn a_linear_board_without_operations_reads_read_only() {
+    fn a_linear_board_reads_read_only_only_when_the_viewer_cannot_edit() {
         let now = std::time::Instant::now();
-        let mut snap = snapshot();
-        snap.project.board = "linear:team:t1".parse().unwrap();
-        snap.project.viewer_can_update = true;
-        let a = App::new(
-            Box::new(MemoryStore::new(Some(snap))),
-            Keymap::defaults(),
-            Theme::plain(),
-        );
+        let board = |can_update: bool| {
+            let mut snap = snapshot();
+            snap.project.board = "linear:team:t1".parse().unwrap();
+            snap.project.viewer_can_update = can_update;
+            App::new(
+                Box::new(MemoryStore::new(Some(snap))),
+                Keymap::defaults(),
+                Theme::plain(),
+            )
+        };
         assert!(
-            crate::model::caps::provider_caps(crate::model::Provider::Linear)
+            !crate::model::caps::provider_caps(crate::model::Provider::Linear)
                 .ops
                 .is_empty()
         );
-        assert_eq!(write_flags(&a, now), ["read-only"]);
+        assert!(write_flags(&board(true), now).is_empty());
+        assert_eq!(write_flags(&board(false), now), ["read-only"]);
     }
 
     #[test]

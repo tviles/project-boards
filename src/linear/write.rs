@@ -81,8 +81,8 @@ impl Linear {
     /// A create that fails in any way is followed by `issue_by_key(<that id>)`: if the issue
     /// exists (an earlier send of this create reached Linear), it is returned as created;
     /// otherwise, or if the lookup itself fails, the create's own error is returned. This is
-    /// the spec's L11 fallback (section 12); probe L11's findings may later narrow it to the
-    /// answer Linear gives for an id that already exists.
+    /// the spec's L11 fallback (section 12). Probe L11 (2026-10-21) measured the answer to an
+    /// id that already exists: HTTP 200 with `INPUT_ERROR`, "conflict on insert of Issue".
     pub async fn create_issue(&self, input: Value) -> Result<Item, BackendError> {
         let id = input["id"].as_str().map(String::from);
         let request = GraphqlRequest::raw(
@@ -138,8 +138,9 @@ impl Linear {
     ///
     /// A comment that fails in any way is followed by `CommentById(id)`: a hit means an
     /// earlier send reached Linear, and is success; a miss, or a lookup that fails itself,
-    /// returns the comment's own error. This is the spec's L11 fallback (section 12); probe
-    /// L11's findings may later narrow it.
+    /// returns the comment's own error. This is the spec's L11 fallback (section 12). Probe
+    /// L11 (2026-10-21) measured the answer to an id that already exists: HTTP 200 with
+    /// `INPUT_ERROR`, "conflict on insert of Comment".
     pub async fn create_comment(
         &self,
         id: &str,
@@ -280,13 +281,20 @@ mod tests {
         item_from_wire(&issue_json()).unwrap()
     }
 
-    // Hand-written error answers, in the shape `execute_linear` hands the client, until
-    // Task 16 records real ones.
+    // The success answers are recorded from the testbed and replayed in
+    // tests/linear_fixtures.rs (`edits/`). What stays here is hand-written: error answers,
+    // in the shape `execute_linear` hands the client, and payloads without their issue.
     fn input_error(message: &str) -> BackendError {
         BackendError::Api(vec![GraphqlErrorEntry {
             message: message.into(),
             kind: Some("INPUT_ERROR".into()),
         }])
+    }
+
+    /// Linear's answer to a create whose client id is taken: HTTP 200 with `INPUT_ERROR`,
+    /// "conflict on insert of Issue" (or "of Comment"). Measured by probe L11 on 2026-10-21.
+    fn conflict_on_insert(entity: &str) -> BackendError {
+        input_error(&format!("conflict on insert of {entity}"))
     }
 
     fn entity_not_found(what: &str) -> BackendError {
@@ -297,52 +305,25 @@ mod tests {
         json!({"id": ISSUE_ID, "teamId": TEAM, "title": "Write the docs"})
     }
 
+    /// Hand-written: an update whose payload has no issue.
     #[tokio::test]
-    async fn update_sends_the_id_and_input_and_returns_the_issue() {
+    async fn an_update_without_its_issue_is_a_decode_error() {
         let t = Arc::new(FixtureTransport::new());
-        t.push(
-            "IssueUpdate",
-            json!({"issueUpdate": {"success": true, "issue": issue_json()}}),
-        );
         t.push(
             "IssueUpdate",
             json!({"issueUpdate": {"success": false, "issue": null}}),
         );
-        let l = linear(&t);
-        let item = l.update_issue("i-7", json!({"priority": 2})).await.unwrap();
-        assert_eq!(item, the_issue());
-        let requests = t.requests();
-        assert_eq!(requests[0].operation_name, "IssueUpdate");
-        assert_eq!(requests[0].query, ops::issue_update::QUERY);
-        assert_eq!(
-            requests[0].variables,
-            json!({"id": "i-7", "input": {"priority": 2}})
-        );
         assert!(matches!(
-            l.update_issue("i-7", json!({"priority": 2})).await,
+            linear(&t).update_issue("i-7", json!({"priority": 2})).await,
             Err(BackendError::Decode(_))
         ));
     }
 
     #[tokio::test]
-    async fn create_sends_the_client_id_and_returns_the_issue() {
-        let t = Arc::new(FixtureTransport::new());
-        t.push(
-            "IssueCreate",
-            json!({"issueCreate": {"success": true, "issue": issue_json()}}),
-        );
-        let item = linear(&t).create_issue(create_input()).await.unwrap();
-        assert_eq!(item, the_issue());
-        assert_eq!(operations(&t), ["IssueCreate"]);
-        let req = &t.requests()[0];
-        assert_eq!(req.query, ops::issue_create::QUERY);
-        assert_eq!(req.variables, json!({"input": create_input()}));
-    }
-
-    #[tokio::test]
     async fn a_failed_create_whose_id_exists_returns_the_existing_issue() {
         let t = Arc::new(FixtureTransport::new());
-        t.push_error("IssueCreate", input_error("Argument Validation Error"));
+        t.push_error("IssueCreate", conflict_on_insert("Issue"));
+        // Hand-written: the lookup finds the issue.
         t.push("IssueByKey", json!({"issue": issue_json()}));
         let item = linear(&t).create_issue(create_input()).await.unwrap();
         assert_eq!(item, the_issue());
@@ -355,6 +336,7 @@ mod tests {
             "IssueCreate",
             json!({"issueCreate": {"success": true, "issue": null}}),
         );
+        // Hand-written: the lookup finds the issue.
         t.push("IssueByKey", json!({"issue": issue_json()}));
         let item = linear(&t).create_issue(create_input()).await.unwrap();
         assert_eq!(item, the_issue());
@@ -401,62 +383,29 @@ mod tests {
         assert_eq!(operations(&t), ["IssueCreate"]);
     }
 
+    /// Hand-written: archive and unarchive payloads without their entity (the recorded ones
+    /// have it).
     #[tokio::test]
-    async fn archive_returns_the_entity_or_none() {
+    async fn an_archive_without_its_entity_is_none() {
         let t = Arc::new(FixtureTransport::new());
-        t.push(
-            "IssueArchive",
-            json!({"issueArchive": {"success": true, "entity": issue_json()}}),
-        );
         t.push(
             "IssueArchive",
             json!({"issueArchive": {"success": true, "entity": null}}),
         );
         t.push(
             "IssueUnarchive",
-            json!({"issueUnarchive": {"success": true, "entity": issue_json()}}),
-        );
-        t.push(
-            "IssueUnarchive",
             json!({"issueUnarchive": {"success": true, "entity": null}}),
         );
         let l = linear(&t);
-        assert_eq!(l.archive("i-7").await.unwrap(), Some(the_issue()));
         assert_eq!(l.archive("i-7").await.unwrap(), None);
-        assert_eq!(l.unarchive("i-7").await.unwrap(), Some(the_issue()));
         assert_eq!(l.unarchive("i-7").await.unwrap(), None);
-        let requests = t.requests();
-        assert_eq!(requests[0].query, ops::issue_archive::QUERY);
-        assert_eq!(requests[2].query, ops::issue_unarchive::QUERY);
-        for r in &requests {
-            assert_eq!(r.variables, json!({"id": "i-7"}), "{}", r.operation_name);
-        }
-    }
-
-    #[tokio::test]
-    async fn a_comment_sends_its_client_id_issue_and_body() {
-        let t = Arc::new(FixtureTransport::new());
-        t.push(
-            "CommentCreate",
-            json!({"commentCreate": {"success": true, "comment": {"id": COMMENT_ID}}}),
-        );
-        linear(&t)
-            .create_comment(COMMENT_ID, "i-7", "Looks good")
-            .await
-            .unwrap();
-        assert_eq!(operations(&t), ["CommentCreate"]);
-        let req = &t.requests()[0];
-        assert_eq!(req.query, ops::comment_create::QUERY);
-        assert_eq!(
-            req.variables,
-            json!({"input": {"id": COMMENT_ID, "issueId": "i-7", "body": "Looks good"}})
-        );
     }
 
     #[tokio::test]
     async fn a_failed_comment_whose_id_exists_is_success() {
         let t = Arc::new(FixtureTransport::new());
-        t.push_error("CommentCreate", input_error("Argument Validation Error"));
+        t.push_error("CommentCreate", conflict_on_insert("Comment"));
+        // Hand-written: the lookup finds the comment.
         t.push("CommentById", json!({"comment": {"id": COMMENT_ID}}));
         linear(&t)
             .create_comment(COMMENT_ID, "i-7", "Looks good")
@@ -473,6 +422,7 @@ mod tests {
             "CommentCreate",
             json!({"commentCreate": {"success": false, "comment": null}}),
         );
+        // Hand-written: the lookup finds the comment.
         t.push("CommentById", json!({"comment": {"id": COMMENT_ID}}));
         linear(&t)
             .create_comment(COMMENT_ID, "i-7", "Looks good")
@@ -505,14 +455,13 @@ mod tests {
         assert_eq!(operations(&t), ["CommentCreate", "CommentById"]);
     }
 
+    /// Hand-written error answers; a key that names an issue is replayed from the recording.
     #[tokio::test]
     async fn an_unknown_key_is_none() {
         let t = Arc::new(FixtureTransport::new());
-        t.push("IssueByKey", json!({"issue": issue_json()}));
         t.push_error("IssueByKey", entity_not_found("Issue"));
         t.push_error("IssueByKey", input_error("Argument Validation Error"));
         let l = linear(&t);
-        assert_eq!(l.issue_by_key("TBA-7").await.unwrap(), Some(the_issue()));
         assert_eq!(l.issue_by_key("TBA-999").await.unwrap(), None);
         assert_eq!(
             l.issue_by_key("TBA-7").await.unwrap_err(),
@@ -520,8 +469,7 @@ mod tests {
         );
         let requests = t.requests();
         assert_eq!(requests[0].query, ops::issue_by_key::QUERY);
-        assert_eq!(requests[0].variables, json!({"id": "TBA-7"}));
-        assert_eq!(requests[1].variables, json!({"id": "TBA-999"}));
+        assert_eq!(requests[0].variables, json!({"id": "TBA-999"}));
     }
 
     #[tokio::test]
@@ -569,6 +517,8 @@ mod tests {
         })
     }
 
+    /// Hand-written: group shapes the testbed does not have (an untyped group, a multi-select
+    /// group's child). The recorded answer is replayed in tests/linear_fixtures.rs.
     #[tokio::test]
     async fn team_candidates_leave_out_single_select_groups() {
         let t = Arc::new(FixtureTransport::new());

@@ -2,9 +2,12 @@
 //! only from PB_LINEAR_TESTBED_KEY or the Keychain item `project-boards-linear-testbed`, and
 //! `guarded()` checks the workspace before any other request. Every test here is ignored, so
 //! the full check never reaches Linear. Run the suite with:
-//!   cargo test --features live --test live_linear -- --ignored --nocapture --skip record_board_fixtures
-//! and record the fixtures with:
-//!   PB_RECORD=1 cargo test --features live --test live_linear record_board_fixtures -- --ignored --nocapture
+//!   cargo test --features live --test live_linear -- --ignored --nocapture --skip record_
+//! and record the fixtures (the board scenarios and `edits/`) with:
+//!   PB_RECORD=1 cargo test --features live --test live_linear record_ -- --ignored --nocapture
+//! Tests that write, and the recordings, run one at a time (`serial()`), so no recording
+//! catches another test's throwaway issue. After a failed `record_edit_fixtures` run, delete
+//! tests/fixtures/recorded/linear/edits/ and record it again: a partial scenario is not one.
 #![cfg(feature = "live")]
 
 #[path = "common/linear_testbed.rs"]
@@ -13,13 +16,17 @@ mod linear_testbed;
 use futures::FutureExt;
 use graphql_client::GraphQLQuery;
 use linear_testbed::{Raw, check_workspace, resolve_key, testbed};
+use project_boards::backend::Backend;
 use project_boards::error::BackendError;
 use project_boards::linear::Linear;
 use project_boards::linear::client::MAX_PAGE;
 use project_boards::linear::convert::PolledIssue;
 use project_boards::linear::ids;
 use project_boards::linear::record::scrubbing_recorder;
+use project_boards::model::teams::{self, StateGoal, TeamRefusal};
 use project_boards::model::*;
+use project_boards::ops::send::send;
+use project_boards::ops::{Confirmed, NewItem, Op};
 use project_boards::transport::{HttpTransport, Transport};
 use project_boards_queries::linear as ops;
 use serde_json::{Value, json};
@@ -38,6 +45,14 @@ const FIXTURE_VIEWS: [&str; 4] = [
 
 static KEY: OnceLock<String> = OnceLock::new();
 static GUARDED: AtomicBool = AtomicBool::new(false);
+/// Held by every test that writes to the testbed and by both recordings.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// One writer or recording at a time, whatever `--test-threads` says: a board recording
+/// must not catch a throwaway issue another test has just made.
+async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().await
+}
 
 /// A new transport over the testbed key, resolved once per run. Each call builds its own HTTP
 /// client: every `#[tokio::test]` has its own runtime, and a connection pooled on a runtime
@@ -307,6 +322,7 @@ async fn record_view_ids(linear: &Linear, project: &Project) {
 #[tokio::test]
 #[ignore = "records Linear fixtures from the testbed: PB_RECORD=1 ... -- --ignored --nocapture"]
 async fn record_board_fixtures() {
+    let _serial = serial().await;
     let app = guarded().await;
     let bed = testbed();
     let raw = linear_testbed::Linear::connect(&bed)
@@ -592,6 +608,15 @@ fn a_minute_ago() -> String {
         .expect("a formattable time")
 }
 
+/// A title with the throwaway prefix and a suffix no other run shares.
+fn throwaway_title() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after 1970")
+        .as_nanos();
+    format!("{THROWAWAY_PREFIX} {:x}-{nanos:x}", std::process::id())
+}
+
 /// Issues a test creates on one team, trashed afterwards by `cleaning_up`.
 struct Throwaways<'a> {
     raw: &'a linear_testbed::Linear,
@@ -611,16 +636,11 @@ impl<'a> Throwaways<'a> {
 
     /// A new issue titled with the throwaway prefix and a random suffix; returns its id.
     async fn create(&self) -> String {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("the clock is after 1970")
-            .as_nanos();
-        let title = format!("{THROWAWAY_PREFIX} {:x}-{nanos:x}", std::process::id());
         let created = raw_post(
             self.raw,
             &ops::ProbeCreateIssue::build_query(ops::probe_create_issue::Variables {
                 team_id: self.team_id.clone(),
-                title,
+                title: throwaway_title(),
             }),
             "ProbeCreateIssue",
         )
@@ -631,6 +651,16 @@ impl<'a> Throwaways<'a> {
             .to_string();
         self.pending.lock().unwrap().push(id.clone());
         id
+    }
+
+    /// Registers an issue the app itself creates (a new issue, a resent create) to be
+    /// trashed too. Called before the create is sent: its client id is known up front, so
+    /// an issue a failing test made is still trashed.
+    fn adopt(&self, id: &str) {
+        let mut pending = self.pending.lock().unwrap();
+        if !pending.iter().any(|p| p == id) {
+            pending.push(id.to_string());
+        }
     }
 
     /// Trashes one of these issues as part of the test.
@@ -764,6 +794,7 @@ async fn project_board_merges_both_teams() {
 #[tokio::test]
 #[ignore = "live: the Linear testbed; run with --ignored"]
 async fn a_poll_sees_an_edit_an_archive_and_a_trash() {
+    let _serial = serial().await;
     let app = guarded().await;
     let bed = testbed();
     let raw = raw_client().await;
@@ -910,4 +941,703 @@ async fn a_missing_board_is_not_found() {
         Ok(_) => panic!("{board} resolved"),
         Err(e) => assert!(e.is_not_found(), "{board}: {}", describe(&e)),
     }
+}
+
+// The editing suite (plan 3). Every edit goes through `ops::send` with the op built as the
+// UI builds it: values resolved for the issue's team by `model::teams`, a label group as
+// `GroupLabel` naming the label it replaces, a reorder as a `sortOrder` midpoint, comments
+// and new issues with client UUIDs. Each change is read back with `issue_by_key` (or the
+// detail, for a description and a comment) through an unrecorded client.
+
+/// What the edits set; tests/linear_fixtures.rs (`edit_fixtures_decode`) reads them back from
+/// the recording.
+const EDIT_DUE_DATE: &str = "2026-12-01";
+const EDIT_ESTIMATE: f64 = 3.0;
+const EDIT_PRIORITY: u8 = 2;
+/// No list: Linear normalises list markers on write (`- ` becomes `* `, observed 2026-10-21),
+/// so a list would not read back byte for byte. A paragraph and bold text are kept as sent.
+const EDIT_BODY: &str = "Edited by the **live suite**.\n\nSecond paragraph.";
+/// The testbed's workspace-level single-select label group (no team owns it).
+const TYPE_GROUP_NAME: &str = "Type";
+
+/// A fresh client UUID, as the UI makes one for a new issue or a comment.
+fn new_uuid() -> String {
+    project_boards::uuid::new_v4().unwrap_or_else(|e| panic!("a UUID from /dev/urandom: {e}"))
+}
+
+/// The testbed project's board, found by name and resolved.
+async fn testbed_project(app: &Linear) -> Project {
+    let bed = testbed();
+    let boards = must(app.list_boards().await, "ListBoards");
+    let summary = boards
+        .iter()
+        .find(|b| b.title == bed.project && matches!(b.board, BoardKey::LinearProject { .. }))
+        .unwrap_or_else(|| panic!("project `{}` not in ListBoards", bed.project));
+    must(app.resolve(&summary.board).await, "resolve project")
+}
+
+/// The board's team with `key`.
+fn team_meta(project: &Project, key: &str) -> TeamMeta {
+    project
+        .linear
+        .as_ref()
+        .and_then(|m| m.teams.iter().find(|t| t.key == key))
+        .cloned()
+        .unwrap_or_else(|| panic!("team {key} is not one of the board's teams"))
+}
+
+/// The team id owning a state, cycle or label group, by its id.
+fn owner<'a>(project: &'a Project, id: &str) -> Option<&'a str> {
+    project.linear.as_ref()?.owners.get(id).map(String::as_str)
+}
+
+fn field_of<'a>(project: &'a Project, id: &str) -> &'a Field {
+    project
+        .field(&FieldId::new(id))
+        .unwrap_or_else(|| panic!("the board has no field {id}"))
+}
+
+fn options_of(field: &Field) -> &[SelectOption] {
+    match &field.kind {
+        FieldKind::SingleSelect { options } => options,
+        _ => panic!("{} is not a single-select field", field.name),
+    }
+}
+
+/// The testbed's Type label group, a single-select field on every Linear board.
+fn type_group(project: &Project) -> &Field {
+    project
+        .fields
+        .iter()
+        .find(|f| f.name == TYPE_GROUP_NAME && f.id.as_str().starts_with(teams::GROUP_FIELD_PREFIX))
+        .unwrap_or_else(|| panic!("the board has no {TYPE_GROUP_NAME} label group"))
+}
+
+fn select(option: &SelectOption) -> FieldValue {
+    FieldValue::SingleSelect {
+        option_id: option.id.clone(),
+        name: option.name.clone(),
+    }
+}
+
+/// The option or cycle id `item` has in `field`.
+fn chosen<'a>(item: &'a Item, field: &str) -> Option<&'a str> {
+    match item.values.get(&FieldId::new(field))? {
+        FieldValue::SingleSelect { option_id, .. } => Some(option_id.as_str()),
+        FieldValue::Iteration { iteration_id, .. } => Some(iteration_id.as_str()),
+        _ => None,
+    }
+}
+
+/// The variant a send confirmed with; never the item, which may name a person.
+fn variant(c: &Confirmed) -> &'static str {
+    match c {
+        Confirmed::Applied => "Applied",
+        Confirmed::Item(_) => "Item",
+        Confirmed::Created { .. } => "Created",
+        Confirmed::NotAdded { .. } => "NotAdded",
+    }
+}
+
+/// The issue `id` as Linear has it now, archived or not.
+async fn read_back(app: &Linear, id: &str) -> Item {
+    must(app.issue_by_key(id).await, "IssueByKey").unwrap_or_else(|| panic!("no issue {id}"))
+}
+
+/// The op that sets (`Some`) or clears (`None`) `field` of `item`, built as the UI builds it
+/// (`App::field_op`, after `App::resolved`): the value resolved for the issue's team, a clear
+/// checked with `teams::may_clear`, and a label group as `GroupLabel` naming the label the
+/// issue has in it now.
+fn field_op(project: &Project, item: &Item, field: &Field, value: Option<FieldValue>) -> Op {
+    let value = value.map(|v| {
+        teams::for_issue(project, item, field, v)
+            .unwrap_or_else(|r| panic!("{}: {}", field.name, r.message()))
+    });
+    if value.is_none() {
+        teams::may_clear(project, field)
+            .unwrap_or_else(|r| panic!("{}: {}", field.name, r.message()));
+    }
+    let (id, field_id) = (item.id.clone(), field.id.clone());
+    if field.id.as_str().starts_with(teams::GROUP_FIELD_PREFIX) {
+        let replaces = match item.value(&field.id) {
+            Some(FieldValue::SingleSelect { option_id, .. }) => Some(option_id.as_str().into()),
+            _ => None,
+        };
+        return Op::GroupLabel {
+            item: id,
+            field: field_id,
+            value,
+            replaces,
+        };
+    }
+    match value {
+        Some(value) => Op::SetField {
+            item: id,
+            field: field_id,
+            value,
+        },
+        None => Op::ClearField {
+            item: id,
+            field: field_id,
+        },
+    }
+}
+
+/// Sends `op` on `project`'s board, then reads issue `id` back: `check` must hold for the
+/// issue the send confirmed with, when it returned one, and for the one read back, which is
+/// returned. A create must have set every preset.
+async fn edit(
+    app: &Linear,
+    backend: &Backend,
+    project: &Project,
+    id: &str,
+    op: Op,
+    what: &str,
+    check: impl Fn(&Item) -> bool,
+) -> Item {
+    let confirmed = must(send(backend, &project.id, &op).await, what);
+    match &confirmed {
+        Confirmed::Applied => {}
+        Confirmed::Item(item) => assert!(check(item), "{what}: the confirmed issue"),
+        Confirmed::Created { item, refused, .. } => {
+            assert!(
+                refused.is_empty(),
+                "{what}: {} presets refused",
+                refused.len()
+            );
+            assert_eq!(item.id.as_str(), id, "{what}: the created issue");
+            assert!(check(item), "{what}: the created issue");
+        }
+        other => panic!("{what}: confirmed with {}", variant(other)),
+    }
+    let back = read_back(app, id).await;
+    assert!(check(&back), "{what}: read back");
+    back
+}
+
+/// Every edit the app makes on a Linear issue, in this order (tests/linear_fixtures.rs,
+/// `EDIT_UPDATES`, names the `issueUpdate`s): on a throwaway TBA issue, a status move, a
+/// priority set and clear, an estimate, a due date, a cycle, the Type group set, swapped and
+/// cleared, a label added and removed, an assignee set and removed, a title, a description, a
+/// reorder, a comment, archive and unarchive; then a new issue with presets on the team
+/// board; then the throwaway added to the testbed project (with a status preset) and removed
+/// from it; then `issue_by_key` by its key. `team_candidates` is asked once, for the label
+/// and the assignee.
+///
+/// Everything is sent through `backend` (recorded, when it records); every read-back and the
+/// boards go through `app`, which is not.
+async fn every_edit(app: &Linear, backend: &Backend, made: &Throwaways<'_>) {
+    let Backend::Linear(sender) = backend else {
+        panic!("the edits go to Linear");
+    };
+    let bed = testbed();
+    let team = team_board(app, &bed.team_a).await;
+    let tba = team_meta(&team, &bed.team_a);
+
+    let id = made.create().await;
+    let mut issue = read_back(app, &id).await;
+    let item = issue.id.clone();
+    let content = issue.content_id().expect("an issue's content id");
+
+    // A status move into TBA's started state.
+    let status = field_of(&team, ids::STATUS);
+    let started = options_of(status)
+        .iter()
+        .find(|o| {
+            o.kind == Some(OptionKind::Started) && owner(&team, o.id.as_str()) == Some(&tba.id)
+        })
+        .expect("TBA has a started state");
+    assert_ne!(
+        chosen(&issue, ids::STATUS),
+        Some(started.id.as_str()),
+        "a new issue is not started"
+    );
+    let op = field_op(&team, &issue, status, Some(select(started)));
+    issue = edit(app, backend, &team, &id, op, "status", |i| {
+        chosen(i, ids::STATUS) == Some(started.id.as_str())
+    })
+    .await;
+
+    // Priority High, then no priority.
+    let priority = field_of(&team, ids::PRIORITY);
+    let high = ids::priority_option(EDIT_PRIORITY);
+    let high_option = options_of(priority)
+        .iter()
+        .find(|o| o.id == high)
+        .expect("a High priority option");
+    let op = field_op(&team, &issue, priority, Some(select(high_option)));
+    issue = edit(app, backend, &team, &id, op, "priority", |i| {
+        chosen(i, ids::PRIORITY) == Some(high.as_str())
+    })
+    .await;
+    let op = field_op(&team, &issue, priority, None);
+    issue = edit(app, backend, &team, &id, op, "priority cleared", |i| {
+        i.value(&FieldId::new(ids::PRIORITY)).is_none()
+    })
+    .await;
+
+    // An estimate and a due date.
+    let estimate = FieldValue::Number(EDIT_ESTIMATE);
+    let op = field_op(
+        &team,
+        &issue,
+        field_of(&team, ids::ESTIMATE),
+        Some(estimate.clone()),
+    );
+    issue = edit(app, backend, &team, &id, op, "estimate", |i| {
+        i.value(&FieldId::new(ids::ESTIMATE)) == Some(&estimate)
+    })
+    .await;
+    let due = FieldValue::Date(EDIT_DUE_DATE.into());
+    let op = field_op(&team, &issue, field_of(&team, ids::DUE), Some(due.clone()));
+    issue = edit(app, backend, &team, &id, op, "due", |i| {
+        i.value(&FieldId::new(ids::DUE)) == Some(&due)
+    })
+    .await;
+
+    // One of TBA's current or upcoming cycles.
+    let cycle_field = field_of(&team, ids::CYCLE);
+    let FieldKind::Iteration { iterations, .. } = &cycle_field.kind else {
+        panic!("Cycle is an iteration field");
+    };
+    let cycle = iterations
+        .iter()
+        .find(|c| owner(&team, c.id.as_str()) == Some(&tba.id))
+        .expect("TBA has a current or upcoming cycle");
+    let value = FieldValue::Iteration {
+        iteration_id: cycle.id.clone(),
+        title: cycle.title.clone(),
+        start_date: cycle.start_date.clone(),
+    };
+    let op = field_op(&team, &issue, cycle_field, Some(value));
+    issue = edit(app, backend, &team, &id, op, "cycle", |i| {
+        chosen(i, ids::CYCLE) == Some(cycle.id.as_str())
+    })
+    .await;
+
+    // The Type group set, swapped and cleared, never to Bug: the Bugs view test lists it.
+    let group = type_group(&team);
+    let kinds: Vec<&SelectOption> = options_of(group)
+        .iter()
+        .filter(|o| o.name != BUG_LABEL)
+        .collect();
+    let [first, second, ..] = kinds.as_slice() else {
+        panic!("the Type group has two labels besides {BUG_LABEL}");
+    };
+    let op = field_op(&team, &issue, group, Some(select(first)));
+    issue = edit(app, backend, &team, &id, op, "type set", |i| {
+        chosen(i, group.id.as_str()) == Some(first.id.as_str())
+    })
+    .await;
+    let op = field_op(&team, &issue, group, Some(select(second)));
+    assert!(
+        matches!(&op, Op::GroupLabel { replaces: Some(old), .. } if *old == first.id.as_str()),
+        "the swap names the label it replaces"
+    );
+    issue = edit(app, backend, &team, &id, op, "type swapped", |i| {
+        chosen(i, group.id.as_str()) == Some(second.id.as_str())
+    })
+    .await;
+    let op = field_op(&team, &issue, group, None);
+    issue = edit(app, backend, &team, &id, op, "type cleared", |i| {
+        i.value(&group.id).is_none()
+    })
+    .await;
+
+    // A label from the team's candidates, added and removed.
+    let candidates = must(sender.team_candidates(&tba.id).await, "TeamCandidates");
+    assert!(!candidates.users.is_empty(), "team TBA has members");
+    let has =
+        |i: &Item, label: &LabelRef| i.content_fields.label_ids.values().any(|l| *l == label.id);
+    let label = candidates
+        .labels
+        .iter()
+        .find(|l| !has(&issue, l))
+        .expect("a label the issue does not have")
+        .clone();
+    let op = Op::Labels {
+        item: item.clone(),
+        content: content.clone(),
+        add: vec![label.clone()],
+        remove: vec![],
+    };
+    edit(app, backend, &team, &id, op, "label added", |i| {
+        has(i, &label)
+    })
+    .await;
+    let op = Op::Labels {
+        item: item.clone(),
+        content: content.clone(),
+        add: vec![],
+        remove: vec![label.clone()],
+    };
+    edit(app, backend, &team, &id, op, "label removed", |i| {
+        !has(i, &label)
+    })
+    .await;
+
+    // One assignee, then none.
+    let user = candidates.users[0].clone();
+    let op = Op::Assignees {
+        item: item.clone(),
+        content: content.clone(),
+        add: vec![user.clone()],
+        remove: vec![],
+        all: vec![user.clone()],
+    };
+    let assigned = |i: &Item| {
+        i.content_fields
+            .assignee_ids
+            .values()
+            .any(|u| *u == user.id)
+    };
+    edit(app, backend, &team, &id, op, "assigned", assigned).await;
+    let op = Op::Assignees {
+        item: item.clone(),
+        content: content.clone(),
+        add: vec![],
+        remove: vec![user.clone()],
+        all: vec![],
+    };
+    let unassigned = |i: &Item| {
+        i.content_fields.assignee_ids.is_empty() && i.value(&FieldId::new(ids::ASSIGNEES)).is_none()
+    };
+    edit(app, backend, &team, &id, op, "unassigned", unassigned).await;
+
+    // A title (still a throwaway's) and a description, read back from the detail.
+    let title = throwaway_title();
+    let op = Op::Title {
+        item: item.clone(),
+        content: content.clone(),
+        title: title.clone(),
+    };
+    edit(app, backend, &team, &id, op, "title", |i| {
+        i.title() == title
+    })
+    .await;
+    let op = Op::Body {
+        item: item.clone(),
+        content: content.clone(),
+        body: EDIT_BODY.into(),
+    };
+    edit(app, backend, &team, &id, op, "description", |_| true).await;
+    let detail = must(app.detail(&item, None).await, "detail");
+    assert_eq!(detail.body, EDIT_BODY, "the description reads back");
+
+    // A reorder between two of the team's other issues, at their sortOrder midpoint.
+    let mut others: Vec<(ItemId, f64)> = all_issues(app, &team.board)
+        .await
+        .into_iter()
+        .filter(|i| i.id != item)
+        .filter_map(|i| Some((i.id, i.content_fields.sort_order?)))
+        .collect();
+    others.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let (after, sort_order) = others
+        .windows(2)
+        .find_map(|w| {
+            Some((
+                w[0].0.clone(),
+                sort_order_between(Some(w[0].1), Some(w[1].1))?,
+            ))
+        })
+        .expect("two of TBA's issues with room between them");
+    let op = Op::Reorder {
+        item: item.clone(),
+        after: Some(after),
+        sort_order: Some(sort_order),
+    };
+    edit(app, backend, &team, &id, op, "reorder", |i| {
+        i.content_fields
+            .sort_order
+            .is_some_and(|s| (s - sort_order).abs() < 1e-6)
+    })
+    .await;
+
+    // A comment with its client id, read back from the detail.
+    let client_id = new_uuid();
+    let body = format!("pb-live comment {client_id}");
+    let op = Op::Comment {
+        item: item.clone(),
+        content: content.clone(),
+        body: body.clone(),
+        client_id: Some(client_id),
+    };
+    let confirmed = must(send(backend, &team.id, &op).await, "comment");
+    assert_eq!(
+        variant(&confirmed),
+        "Applied",
+        "a comment confirms as applied"
+    );
+    let detail = must(app.detail(&item, None).await, "detail");
+    assert_eq!(
+        detail.comments.iter().filter(|c| c.body == body).count(),
+        1,
+        "the comment is on the issue once"
+    );
+
+    // Archive and unarchive.
+    let op = Op::Archive { item: item.clone() };
+    edit(app, backend, &team, &id, op, "archive", |i| i.archived).await;
+    let op = Op::Unarchive { item: item.clone() };
+    issue = edit(app, backend, &team, &id, op, "unarchive", |i| !i.archived).await;
+
+    // A new issue in TBA with the started state, High and the Type group's first label as
+    // presets, each resolved for TBA as the new-issue form does (`presets_for_team`).
+    let presets: Vec<(FieldId, FieldValue)> = [
+        (status, select(started)),
+        (priority, select(high_option)),
+        (group, select(first)),
+    ]
+    .into_iter()
+    .map(|(field, value)| {
+        let value = teams::for_team(&team, &tba, field, value)
+            .unwrap_or_else(|r| panic!("{}: {}", field.name, r.message()));
+        (field.id.clone(), value)
+    })
+    .collect();
+    let new_id = new_uuid();
+    made.adopt(&new_id);
+    let op = Op::Create {
+        temp: ItemId::new("local:1"),
+        new: NewItem::LinearIssue {
+            id: new_id.clone(),
+            team: tba.clone(),
+            title: throwaway_title(),
+            body: "Made by the live suite, with presets".into(),
+        },
+        presets,
+    };
+    edit(app, backend, &team, &new_id, op, "new issue", |i| {
+        chosen(i, ids::STATUS) == Some(started.id.as_str())
+            && chosen(i, ids::PRIORITY) == Some(high.as_str())
+            && chosen(i, group.id.as_str()) == Some(first.id.as_str())
+    })
+    .await;
+
+    // The throwaway added to the testbed project with a status preset (TBA's state for
+    // reopening, resolved for the issue as `presets_for_issue` does), then removed from it.
+    let project = testbed_project(app).await;
+    let BoardKey::LinearProject { id: project_id } = &project.board else {
+        panic!("the testbed project is a project board");
+    };
+    assert!(
+        issue.value(&FieldId::new(ids::PROJECT)).is_none(),
+        "the throwaway starts in no project"
+    );
+    let on_project = team_meta(&project, &bed.team_a);
+    let project_status = field_of(&project, ids::STATUS);
+    let reopen = teams::state_for(&project, &on_project, StateGoal::Reopen)
+        .unwrap_or_else(|r| panic!("{}", r.message()));
+    let reopen = teams::for_issue(&project, &issue, project_status, reopen)
+        .unwrap_or_else(|r| panic!("{}", r.message()));
+    let FieldValue::SingleSelect {
+        option_id: reopen_id,
+        ..
+    } = &reopen
+    else {
+        panic!("a state is a single-select value");
+    };
+    assert_ne!(chosen(&issue, ids::STATUS), Some(reopen_id.as_str()));
+    let in_project = |i: &Item| chosen(i, ids::PROJECT) == Some(project_id.as_str());
+    let op = Op::Create {
+        temp: ItemId::new("local:2"),
+        new: NewItem::LinearExisting {
+            issue: Box::new(issue.clone()),
+        },
+        presets: vec![(project_status.id.clone(), reopen.clone())],
+    };
+    edit(app, backend, &project, &id, op, "added to project", |i| {
+        in_project(i) && chosen(i, ids::STATUS) == Some(reopen_id.as_str())
+    })
+    .await;
+    let op = Op::Remove { item: item.clone() };
+    issue = edit(
+        app,
+        backend,
+        &project,
+        &id,
+        op,
+        "removed from project",
+        |i| i.value(&FieldId::new(ids::PROJECT)).is_none(),
+    )
+    .await;
+
+    // The issue by its key.
+    let key = issue_key(&issue);
+    let by_key = must(sender.issue_by_key(&key).await, "IssueByKey")
+        .unwrap_or_else(|| panic!("no issue {key}"));
+    assert_eq!(by_key.id, item, "{key} is the throwaway");
+}
+
+#[tokio::test]
+#[ignore = "records Linear fixtures from the testbed: PB_RECORD=1 ... -- --ignored --nocapture"]
+async fn record_edit_fixtures() {
+    let _serial = serial().await;
+    let app = guarded().await;
+    let raw = raw_client().await;
+    let team = team_board(&app, &testbed().team_a).await;
+    let BoardKey::LinearTeam { id: team_id } = &team.board else {
+        panic!("a team board resolves to a team key: {}", team.board);
+    };
+    let made = Throwaways::new(&raw, team_id);
+    let backend = Backend::Linear(recording_linear("edits", http()));
+    cleaning_up(&made, every_edit(&app, &backend, &made)).await;
+}
+
+#[tokio::test]
+#[ignore = "live: the Linear testbed; run with --ignored"]
+async fn every_linear_edit_round_trips() {
+    let _serial = serial().await;
+    let app = guarded().await;
+    let raw = raw_client().await;
+    let team = team_board(&app, &testbed().team_a).await;
+    let BoardKey::LinearTeam { id: team_id } = &team.board else {
+        panic!("a team board resolves to a team key: {}", team.board);
+    };
+    let made = Throwaways::new(&raw, team_id);
+    let backend = Backend::Linear(Linear::new(http()));
+    cleaning_up(&made, every_edit(&app, &backend, &made)).await;
+}
+
+#[tokio::test]
+#[ignore = "live: the Linear testbed; run with --ignored"]
+async fn a_resent_create_makes_one_issue() {
+    let _serial = serial().await;
+    let app = guarded().await;
+    let raw = raw_client().await;
+    let team = team_board(&app, &testbed().team_a).await;
+    let BoardKey::LinearTeam { id: team_id } = &team.board else {
+        panic!("a team board resolves to a team key: {}", team.board);
+    };
+    let tba = team_meta(&team, &testbed().team_a);
+    let made = Throwaways::new(&raw, team_id);
+    cleaning_up(&made, async {
+        let backend = Backend::Linear(Linear::new(http()));
+        let id = new_uuid();
+        let title = throwaway_title();
+        made.adopt(&id);
+        let op = Op::Create {
+            temp: ItemId::new("local:1"),
+            new: NewItem::LinearIssue {
+                id: id.clone(),
+                team: tba,
+                title: title.clone(),
+                body: String::new(),
+            },
+            presets: vec![],
+        };
+        // The second send is the queue's resend of the same op: the same client id.
+        for send_number in 1..=2 {
+            match must(send(&backend, &team.id, &op).await, "create") {
+                Confirmed::Created { item, refused, .. } => {
+                    assert_eq!(item.id.as_str(), id, "send {send_number} names the issue");
+                    assert!(refused.is_empty());
+                }
+                other => panic!("send {send_number}: confirmed with {}", variant(&other)),
+            }
+        }
+        let query = ListQuery {
+            filter: ViewFilter::Linear(json!({"title": {"eq": title}})),
+            include_archived: true,
+        };
+        let ids = all_view_ids(&app, &team.board, &query).await;
+        assert_eq!(
+            ids,
+            [ItemId::new(&id)],
+            "one issue has the title, the client id's"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "live: the Linear testbed; run with --ignored"]
+async fn a_resent_comment_posts_once() {
+    let _serial = serial().await;
+    let app = guarded().await;
+    let raw = raw_client().await;
+    let team = team_board(&app, &testbed().team_a).await;
+    let BoardKey::LinearTeam { id: team_id } = &team.board else {
+        panic!("a team board resolves to a team key: {}", team.board);
+    };
+    let made = Throwaways::new(&raw, team_id);
+    cleaning_up(&made, async {
+        let backend = Backend::Linear(Linear::new(http()));
+        let id = made.create().await;
+        let issue = read_back(&app, &id).await;
+        let client_id = new_uuid();
+        let body = format!("pb-live comment {client_id}");
+        let op = Op::Comment {
+            item: issue.id.clone(),
+            content: issue.content_id().expect("an issue's content id"),
+            body: body.clone(),
+            client_id: Some(client_id),
+        };
+        for send_number in 1..=2 {
+            let confirmed = must(send(&backend, &team.id, &op).await, "comment");
+            assert_eq!(variant(&confirmed), "Applied", "send {send_number}");
+        }
+        let detail = must(app.detail(&issue.id, None).await, "detail");
+        assert_eq!(
+            detail.comments.iter().filter(|c| c.body == body).count(),
+            1,
+            "the comment is posted once"
+        );
+    })
+    .await;
+}
+
+/// The live project board's data refuses a TBA issue a TBB-only state. That a refused move
+/// sends nothing is pinned offline by `a_move_into_a_column_the_team_lacks_is_refused`.
+#[tokio::test]
+#[ignore = "live: the Linear testbed; run with --ignored"]
+async fn a_cross_team_move_is_refused_by_the_live_boards_data() {
+    let app = guarded().await;
+    let bed = testbed();
+    let project = testbed_project(&app).await;
+    let (tba, tbb) = (
+        team_meta(&project, &bed.team_a),
+        team_meta(&project, &bed.team_b),
+    );
+    let status = field_of(&project, ids::STATUS);
+    let owned_by =
+        |o: &SelectOption, team: &TeamMeta| owner(&project, o.id.as_str()) == Some(&team.id);
+    let tba_names: BTreeSet<&str> = options_of(status)
+        .iter()
+        .filter(|o| owned_by(o, &tba))
+        .map(|o| o.name.as_str())
+        .collect();
+    let theirs = options_of(status)
+        .iter()
+        .find(|o| {
+            owned_by(o, &tbb)
+                && o.kind != Some(OptionKind::Duplicate)
+                && !tba_names.contains(o.name.as_str())
+        })
+        .expect("TBB has a state whose name TBA has not");
+    let items = all_issues(&app, &project.board).await;
+    let prefix = format!("{}-", bed.team_a);
+    let issue = items
+        .iter()
+        .find(|i| issue_key(i).starts_with(&prefix))
+        .expect("the project has a TBA issue");
+
+    // Ground truth: Linear lists no state of that name for TBA.
+    let raw = raw_client().await;
+    let states = states_of(&raw, vec![tba.id.clone()]).await;
+    assert!(!states.iter().any(|s| s.name == theirs.name));
+
+    // The UI resolves the move before building the op; the refusal is its message.
+    let refused = teams::for_issue(&project, issue, status, select(theirs));
+    assert_eq!(
+        refused,
+        Err(TeamRefusal::NoState {
+            team: tba.key.clone(),
+            state: theirs.name.clone(),
+        })
+    );
+    assert_eq!(
+        refused.unwrap_err().message(),
+        format!("{} has no \"{}\" state", tba.key, theirs.name)
+    );
 }

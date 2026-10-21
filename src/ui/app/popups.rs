@@ -1,7 +1,7 @@
 //! The popovers: what each one edits and what its keys do.
 
 use super::*;
-use crate::model::{ContentId, LabelRef, MilestoneRef, RepoCandidates, UserRef};
+use crate::model::{ContentId, LabelRef, MilestoneRef, RepoCandidates, TeamCandidates, UserRef};
 use crate::model::{
     FieldValue, Iteration, OptionId, format_iso_date, parse_date_input, parse_iso_date,
     parse_number_input,
@@ -54,6 +54,14 @@ pub enum NewKind {
     Existing,
 }
 
+/// Where an assignee or label checklist takes its choices from: a GitHub repository's
+/// candidates, or a Linear team's (by team id).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CandidateSource {
+    Repo(RepoSlug),
+    Team(String),
+}
+
 /// What a chosen repository is for.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RepoPurpose {
@@ -79,6 +87,15 @@ pub enum Popup {
         searched: Option<String>,
         hits: Vec<ContentHit>,
         selected: usize,
+        loading: bool,
+        error: Option<String>,
+    },
+    /// `n`, "add existing" on a Linear project board: an issue key (`TBA-12`) or a
+    /// `linear.app` issue link, looked up on Enter (spec section 9). `loading` while the key
+    /// the input names is being looked up; `error` is why nothing was added.
+    IssueKey {
+        presets: Vec<(FieldId, FieldValue)>,
+        input: String,
         loading: bool,
         error: Option<String>,
     },
@@ -111,18 +128,20 @@ pub enum Popup {
         field: FieldId,
         select: MultiSelect<OptionId>,
     },
-    /// `a`: the item's assignees, from its repository's assignable users.
+    /// `a`: the item's assignees, from its repository's assignable users or its Linear
+    /// team's members (one at most there).
     Assignees {
         item: ItemId,
-        repo: RepoSlug,
+        source: CandidateSource,
         /// Opened from the `e` menu, so Esc goes back to it.
         from_menu: bool,
         select: MultiSelect<UserRef>,
     },
-    /// `t`: the item's labels, from its repository's labels.
+    /// `t`: the item's labels, from its repository's labels or its Linear team's and the
+    /// workspace's.
     Labels {
         item: ItemId,
-        repo: RepoSlug,
+        source: CandidateSource,
         /// Opened from the `e` menu, so Esc goes back to it.
         from_menu: bool,
         select: MultiSelect<LabelRef>,
@@ -154,6 +173,12 @@ pub enum Popup {
     Text {
         purpose: EditPurpose,
         form: TextForm,
+    },
+    /// `Enter` on a new Linear issue's Team line: which team, of those the form offers. The
+    /// form waits here, and comes back with the choice (`Esc`: unchanged).
+    TeamPick {
+        form: Box<(EditPurpose, TextForm)>,
+        picker: ListPicker<crate::model::TeamMeta>,
     },
 }
 
@@ -221,6 +246,42 @@ pub(crate) fn iteration_choices(
     out
 }
 
+/// `field` with only the cycles of `item`'s team, on a Linear board's Cycle field (spec
+/// section 6); unchanged otherwise, and while the board does not know the issue's team.
+fn team_cycles(project: &Project, item: &Item, field: &Field) -> Field {
+    let (Some(meta), Some(team)) = (
+        project.linear.as_ref(),
+        crate::model::teams::issue_team(project, item),
+    ) else {
+        return field.clone();
+    };
+    let FieldKind::Iteration {
+        iterations,
+        completed,
+    } = &field.kind
+    else {
+        return field.clone();
+    };
+    if field.id.as_str() != crate::model::teams::CYCLE_FIELD {
+        return field.clone();
+    }
+    let owners = &meta.owners;
+    let own = |cycles: &[Iteration]| -> Vec<Iteration> {
+        cycles
+            .iter()
+            .filter(|c| owners.get(c.id.as_str()) == Some(&team.id))
+            .cloned()
+            .collect()
+    };
+    Field {
+        kind: FieldKind::Iteration {
+            iterations: own(iterations),
+            completed: own(completed),
+        },
+        ..field.clone()
+    }
+}
+
 /// The date at `offset` when it is `now`.
 fn local_date(now: time::OffsetDateTime, offset: time::UtcOffset) -> time::Date {
     now.to_offset(offset).date()
@@ -251,18 +312,26 @@ fn is_unchanged(field: &Field, current: Option<&FieldValue>, new: &FieldValue) -
     }
 }
 
-/// What a submitted line means for a field of `kind`: `Ok(None)` clears it.
+/// Why a Linear estimate with a fraction is not sent (spec section 13).
+const WHOLE_ESTIMATES: &str = "Linear estimates are whole numbers";
+
+/// What a submitted line means for a field of `kind`: `Ok(None)` clears it. A
+/// `linear_estimate` takes whole numbers only.
 fn line_value(
     kind: LineKind,
     input: &str,
     today: time::Date,
+    linear_estimate: bool,
 ) -> Result<Option<FieldValue>, String> {
     match kind {
         LineKind::Text => {
             let t = input.trim();
             Ok((!t.is_empty()).then(|| FieldValue::Text(t.to_string())))
         }
-        LineKind::Number => parse_number_input(input).map(|n| n.map(FieldValue::Number)),
+        LineKind::Number => match parse_number_input(input)? {
+            Some(n) if linear_estimate && n.fract() != 0.0 => Err(WHOLE_ESTIMATES.into()),
+            n => Ok(n.map(FieldValue::Number)),
+        },
         LineKind::Date => {
             parse_date_input(input, today).map(|d| d.map(|d| FieldValue::Date(format_iso_date(d))))
         }
@@ -281,22 +350,66 @@ fn submitted_text(form: &TextForm) -> String {
 
 /// How a popover's title names the item: its number, or "draft". The item's own title is
 /// already on screen (the highlighted card or the open detail), and repeating it read like a
-/// message ("Edit · Crash when …").
+/// message ("Edit · Crash when …"). A Linear key keeps its case (`TBA-1`).
 fn item_ref(item: &crate::model::Item) -> String {
-    item.ref_label().to_lowercase()
+    match item.reference().and_then(|r| r.key.as_ref()) {
+        Some(key) => key.clone(),
+        None => item.ref_label().to_lowercase(),
+    }
 }
 
 /// Shown in a popover whose item left the board while its candidates loaded.
 pub(super) const GONE: &str = "This item is no longer on the board";
 
-/// The users to offer: the repository's, plus current assignees it did not list (so they
-/// can be removed), and the logins assigned now.
-pub(super) fn assignee_options(
-    c: &RepoCandidates,
+/// The lists an assignee or label checklist is filled from: a repository's candidates or a
+/// Linear team's.
+pub(super) trait CandidateLists {
+    fn users(&self) -> &[UserRef];
+    fn labels(&self) -> &[LabelRef];
+    /// A list hit its page size, so it is partial.
+    fn truncated(&self) -> bool;
+    /// How many entries a page of each list holds.
+    fn page(&self) -> usize;
+}
+
+impl CandidateLists for RepoCandidates {
+    fn users(&self) -> &[UserRef] {
+        &self.users
+    }
+    fn labels(&self) -> &[LabelRef] {
+        &self.labels
+    }
+    fn truncated(&self) -> bool {
+        self.truncated
+    }
+    fn page(&self) -> usize {
+        100
+    }
+}
+
+impl CandidateLists for TeamCandidates {
+    fn users(&self) -> &[UserRef] {
+        &self.users
+    }
+    fn labels(&self) -> &[LabelRef] {
+        &self.labels
+    }
+    fn truncated(&self) -> bool {
+        self.truncated
+    }
+    fn page(&self) -> usize {
+        250
+    }
+}
+
+/// The users to offer: the repository's (or team's), plus current assignees it did not list
+/// (so they can be removed), and the logins assigned now.
+pub(super) fn assignee_options<C: CandidateLists>(
+    c: &C,
     item: &Item,
 ) -> (Vec<MultiOption<UserRef>>, Vec<String>) {
     let current: Vec<String> = item.assignees().iter().map(|s| s.to_string()).collect();
-    let mut users = c.users.clone();
+    let mut users = c.users().to_vec();
     for login in &current {
         if !users.iter().any(|u| &u.login == login)
             && let Some(id) = item.content_fields.assignee_ids.get(login)
@@ -318,13 +431,14 @@ pub(super) fn assignee_options(
     (options, current)
 }
 
-/// The labels to offer, current ones the repository did not list included.
-pub(super) fn label_options(
-    c: &RepoCandidates,
+/// The labels to offer, current ones the repository (or team) did not list included. A
+/// Linear issue's labels of single-select groups are its group fields' values, not labels.
+pub(super) fn label_options<C: CandidateLists>(
+    c: &C,
     item: &Item,
 ) -> (Vec<MultiOption<LabelRef>>, Vec<String>) {
     let current: Vec<String> = item.label_names().iter().map(|s| s.to_string()).collect();
-    let mut labels = c.labels.clone();
+    let mut labels = c.labels().to_vec();
     for l in item.labels() {
         if !labels.iter().any(|x| x.name == l.name)
             && let Some(id) = item.content_fields.label_ids.get(&l.name)
@@ -376,13 +490,14 @@ pub(super) fn milestone_choices(
     out
 }
 
-/// Fills a waiting assignee or label checklist once its repository's candidates have loaded
-/// (or failed). `options` lists the choices and the names checked now; `name` names a choice.
-pub(super) fn fill_checklist<T: Clone>(
+/// Fills a waiting assignee or label checklist once its repository's (or team's) candidates
+/// have loaded (or failed). `options` lists the choices and the names checked now; `name`
+/// names a choice.
+pub(super) fn fill_checklist<T: Clone, C: CandidateLists>(
     select: &mut MultiSelect<T>,
-    lookup: Option<&Lookup<RepoCandidates>>,
+    lookup: Option<&Lookup<C>>,
     item: Option<&Item>,
-    options: impl Fn(&RepoCandidates, &Item) -> (Vec<MultiOption<T>>, Vec<String>),
+    options: impl Fn(&C, &Item) -> (Vec<MultiOption<T>>, Vec<String>),
     name: impl Fn(&T) -> String,
 ) {
     match lookup {
@@ -394,7 +509,8 @@ pub(super) fn fill_checklist<T: Clone>(
             if let Some(it) = item {
                 let (choices, current) = options(c, it);
                 select.set_options(choices, |v| current.contains(&name(v)));
-                select.truncated = c.truncated;
+                select.truncated = c.truncated();
+                select.page = c.page();
             }
         }
         Some(Lookup::Failed(e)) => {
@@ -513,14 +629,24 @@ impl App {
     }
 
     fn open_new_kind(&mut self, presets: Vec<(FieldId, FieldValue)>) {
-        let picker = ListPicker::new(
-            "New item",
+        let choices = if self.is_linear() {
+            // Linear has no drafts, and a team board holds every issue of its team already.
+            let mut v = vec![Choice::new("New issue", NewKind::Issue)];
+            if !self.edit_context().team_board {
+                v.push(Choice::new(
+                    "Add existing issue (key or URL)",
+                    NewKind::Existing,
+                ));
+            }
+            v
+        } else {
             vec![
                 Choice::new("New issue", NewKind::Issue),
                 Choice::new("New draft", NewKind::Draft),
                 Choice::new("Add an existing issue or pull request", NewKind::Existing),
-            ],
-        );
+            ]
+        };
+        let picker = ListPicker::new("New item", choices);
         self.open_popup(Popup::NewKind { presets, picker });
     }
 
@@ -742,8 +868,8 @@ impl App {
         Vec::new()
     }
 
-    /// `a`, `t`, or the milestone entry: a popover over the item's repository candidates,
-    /// loaded on first need.
+    /// `a`, `t`, or the milestone entry: a popover over the item's repository candidates (on
+    /// Linear, its team's), loaded on first need.
     pub(crate) fn open_candidates(&mut self, kind: OpKind, from_menu: bool) -> Vec<Command> {
         let Some(item) = self.action_item().cloned() else {
             self.status.flash = Some("Select an item first".into());
@@ -753,41 +879,79 @@ impl App {
             self.status.flash = Some(reason);
             return Vec::new();
         }
-        let Some(repo) = self.candidate_repo(&item) else {
-            self.status.flash = Some(if item.reference().is_some() {
-                "Can't tell this item's repository; refresh with r".into()
-            } else {
-                "Open the board from a repository, or link one to the project, to assign drafts"
-                    .into()
-            });
-            return Vec::new();
+        let source = match self.candidate_source(&item) {
+            Ok(source) => source,
+            Err(why) => {
+                self.status.flash = Some(why);
+                return Vec::new();
+            }
         };
         let title = |what: &str| format!("{what} · {}", item_ref(&item));
-        let (id, r) = (item.id.clone(), repo.clone());
+        let id = item.id.clone();
         let popup = match kind {
-            OpKind::Assignees => Popup::Assignees {
-                item: id,
-                repo: r,
-                from_menu,
-                select: MultiSelect::loading(title("Assignees")),
-            },
+            OpKind::Assignees => {
+                let one = provider_caps(self.board_provider()).max_assignees == Some(1);
+                let select = if one {
+                    MultiSelect::loading(title("Assignee")).single()
+                } else {
+                    MultiSelect::loading(title("Assignees"))
+                };
+                Popup::Assignees {
+                    item: id,
+                    source: source.clone(),
+                    from_menu,
+                    select,
+                }
+            }
             OpKind::Labels => Popup::Labels {
                 item: id,
-                repo: r,
+                source: source.clone(),
                 from_menu,
                 select: MultiSelect::loading(title("Labels")),
             },
-            _ => Popup::Milestone {
-                item: id,
-                repo: r,
-                from_menu,
-                picker: ListPicker::loading(title("Milestone")),
-            },
+            _ => {
+                // Milestones are GitHub's: the check above refuses them on Linear.
+                let CandidateSource::Repo(repo) = &source else {
+                    return Vec::new();
+                };
+                Popup::Milestone {
+                    item: id,
+                    repo: repo.clone(),
+                    from_menu,
+                    picker: ListPicker::loading(title("Milestone")),
+                }
+            }
         };
         self.open_popup(popup);
-        let cmds = self.need_candidates(&repo);
+        let cmds = match &source {
+            CandidateSource::Repo(repo) => self.need_candidates(repo),
+            CandidateSource::Team(team) => self.need_team_candidates(team),
+        };
         self.refresh_popup();
         cmds
+    }
+
+    /// Where `item`'s candidates come from: its repository, or on a Linear board its team. A
+    /// Linear issue of a team the board does not know is refused (`teams::unknown_team`).
+    fn candidate_source(&self, item: &Item) -> Result<CandidateSource, String> {
+        if self.is_linear() {
+            let Some(project) = self.project() else {
+                return Err(self.denial_text(Denial::NeedsRefresh));
+            };
+            return crate::model::teams::issue_team(project, item)
+                .map(|team| CandidateSource::Team(team.id.clone()))
+                .ok_or_else(|| crate::model::teams::unknown_team(project, item).message());
+        }
+        match self.candidate_repo(item) {
+            Some(repo) => Ok(CandidateSource::Repo(repo)),
+            None if item.reference().is_some() => {
+                Err("Can't tell this item's repository; refresh with r".into())
+            }
+            None => Err(
+                "Open the board from a repository, or link one to the project, to assign drafts"
+                    .into(),
+            ),
+        }
     }
 
     /// Submits an op that needs the item's content node id; refuses (needs a refresh) without.
@@ -884,7 +1048,10 @@ impl App {
                         Some(Choice::new(b.title.clone(), Some(value)).with_detail(mark))
                     })
                     .collect();
-                if current.is_some() {
+                let may_clear = self
+                    .project()
+                    .is_none_or(|p| crate::model::teams::may_clear(p, &f).is_ok());
+                if current.is_some() && may_clear {
                     choices.push(Choice::new(format!("Clear {}", f.name), None));
                 }
                 Popup::Value {
@@ -894,7 +1061,10 @@ impl App {
                 }
             }
             FieldKind::Iteration { .. } => {
-                let choices = iteration_choices(&f, current.as_ref(), self.today());
+                let own = self
+                    .project()
+                    .map_or(f.clone(), |p| team_cycles(p, &it, &f));
+                let choices = iteration_choices(&own, current.as_ref(), self.today());
                 Popup::Value {
                     item,
                     field,
@@ -943,7 +1113,7 @@ impl App {
     }
 
     /// Sets or clears a field from a popover; nothing when clearing an empty field.
-    fn submit_value(
+    pub(super) fn submit_value(
         &mut self,
         item: ItemId,
         field: FieldId,
@@ -952,29 +1122,52 @@ impl App {
         self.close_popup();
         // Keep the cursor on this item when the edit re-sorts or regroups the view.
         self.selected_id = Some(item.clone());
-        let current = self
-            .snapshot()
-            .and_then(|s| s.items.get(&item))
-            .and_then(|i| i.value(&field))
-            .cloned();
+        let found = self
+            .item(&item)
+            .cloned()
+            .zip(self.project().and_then(|p| p.field(&field)).cloned());
+        let Some((item, field)) = found else {
+            if !self.is_linear() {
+                return self.submit_raw_value(item, field, value);
+            }
+            // A Linear value needs its item and field to find the issue's team's.
+            return self.say(if self.item(&item).is_none() {
+                crate::ui::app::edit::NO_LONGER_ON_BOARD
+            } else {
+                "That field is no longer on the board"
+            });
+        };
+        let current = item.value(&field.id);
+        let value = match value {
+            Some(value) if is_unchanged(&field, current, &value) => return Vec::new(),
+            // A team-owned value is the issue's own team's (spec section 6).
+            Some(value) => match self.team_value(&item, &field, value) {
+                Ok(value) => Some(value),
+                Err(reason) => return self.say(&reason),
+            },
+            None if current.is_none() => return Vec::new(),
+            None => None,
+        };
+        match self.field_op(&item, &field, value) {
+            Ok(op) => self.submit(OpKind::SetField, op),
+            Err(reason) => self.say(&reason),
+        }
+    }
+
+    /// `submit_value` on a GitHub board whose item or field has gone while the popover was
+    /// open (a reload), exactly as before Linear editing: a set is sent as it is (`submit`
+    /// says when the item has gone), and a clear only when the item still holds a value.
+    fn submit_raw_value(
+        &mut self,
+        item: ItemId,
+        field: FieldId,
+        value: Option<FieldValue>,
+    ) -> Vec<Command> {
+        let held = self.item(&item).is_some_and(|i| i.value(&field).is_some());
         match value {
-            Some(value) => {
-                let same = self
-                    .project()
-                    .and_then(|p| p.field(&field))
-                    .is_some_and(|f| is_unchanged(f, current.as_ref(), &value));
-                if same {
-                    return Vec::new();
-                }
-                self.submit(OpKind::SetField, Op::SetField { item, field, value })
-            }
-            None => {
-                if current.is_some() {
-                    self.submit(OpKind::SetField, Op::ClearField { item, field })
-                } else {
-                    Vec::new()
-                }
-            }
+            Some(value) => self.submit(OpKind::SetField, Op::SetField { item, field, value }),
+            None if held => self.submit(OpKind::SetField, Op::ClearField { item, field }),
+            None => Vec::new(),
         }
     }
 
@@ -990,6 +1183,16 @@ impl App {
                     let presets = presets.clone();
                     self.close_popup();
                     return match kind {
+                        NewKind::Issue if self.is_linear() => self.new_linear_issue_form(presets),
+                        NewKind::Existing if self.is_linear() => {
+                            self.open_popup(Popup::IssueKey {
+                                presets,
+                                input: String::new(),
+                                loading: false,
+                                error: None,
+                            });
+                            Vec::new()
+                        }
                         NewKind::Draft => self.new_draft_form(presets),
                         NewKind::Existing => {
                             self.open_popup(Popup::Search {
@@ -1110,6 +1313,39 @@ impl App {
                     *error = None;
                 }
             },
+            Popup::IssueKey {
+                presets,
+                input,
+                loading,
+                error,
+            } => {
+                let before = input.clone();
+                match edit_line(input, &key) {
+                    // Nothing typed, or this key is being looked up already.
+                    LineOutcome::Submit if input.trim().is_empty() || *loading => {}
+                    LineOutcome::Submit => match crate::model::parse_linear_issue_ref(input) {
+                        Some(issue) => {
+                            *loading = true;
+                            *error = None;
+                            self.popup = Some(popup);
+                            return vec![Command::LookupIssue(issue)];
+                        }
+                        None => *error = Some(edit::NOT_AN_ISSUE_REF.into()),
+                    },
+                    LineOutcome::Cancel => {
+                        // One level back: the kind picker, same presets.
+                        let presets = presets.clone();
+                        self.open_new_kind(presets);
+                        return Vec::new();
+                    }
+                    // A changed key drops the answer for the one before.
+                    LineOutcome::Typing if *input != before => {
+                        *loading = false;
+                        *error = None;
+                    }
+                    LineOutcome::Typing => {}
+                }
+            }
             Popup::Actions { picker, .. } => match picker.handle(&key) {
                 ListOutcome::Chosen(MenuEntry::Key(action)) => {
                     self.close_popup();
@@ -1297,6 +1533,30 @@ impl App {
                 ListOutcome::Chosen(reason) => {
                     let item = item.clone();
                     self.close_popup();
+                    if self.is_linear() {
+                        // A move to the team's state; a team without one says so.
+                        let goal = match reason {
+                            crate::model::CloseReason::Completed => {
+                                crate::model::teams::StateGoal::Completed
+                            }
+                            crate::model::CloseReason::NotPlanned => {
+                                crate::model::teams::StateGoal::Canceled
+                            }
+                        };
+                        let Some(found) = self.snapshot().and_then(|s| s.items.get(&item)).cloned()
+                        else {
+                            self.status.flash =
+                                Some(crate::ui::app::edit::NO_LONGER_ON_BOARD.into());
+                            return Vec::new();
+                        };
+                        return match self.linear_close_op(&found, goal) {
+                            Ok(op) => self.submit(OpKind::Close, op),
+                            Err(reason) => {
+                                self.status.flash = Some(reason);
+                                Vec::new()
+                            }
+                        };
+                    }
                     // Choosing a reason is the confirmation (Decision 18).
                     let target = item.clone();
                     return self.submit_content_op(OpKind::Close, target, |content| Op::Close {
@@ -1319,7 +1579,12 @@ impl App {
                 error,
                 ..
             } => match edit_line(input, &key) {
-                LineOutcome::Submit => match line_value(*kind, input, today) {
+                LineOutcome::Submit => match line_value(
+                    *kind,
+                    input,
+                    today,
+                    self.is_linear() && field.as_str() == crate::linear::ids::ESTIMATE,
+                ) {
                     Ok(value) => {
                         let (item, field) = (item.clone(), field.clone());
                         return self.submit_value(item, field, value);
@@ -1347,8 +1612,37 @@ impl App {
                     self.popup = Some(popup);
                     return vec![edit];
                 }
+                FormEvent::PickTeam => {
+                    let mut picker = ListPicker::new(
+                        "Team for the new issue",
+                        form.teams()
+                            .iter()
+                            .map(|t| Choice::new(t.key.clone(), t.clone()))
+                            .collect(),
+                    );
+                    picker.selected = form
+                        .team()
+                        .and_then(|t| form.teams().iter().position(|x| x == t))
+                        .unwrap_or(0);
+                    self.popup = Some(Popup::TeamPick {
+                        form: Box::new((purpose.clone(), form.clone())),
+                        picker,
+                    });
+                    return Vec::new();
+                }
                 FormEvent::Submit => {
-                    let cmds = self.on_text(purpose.clone(), submitted_text(form), false);
+                    // A Team line's choice is the new issue's team.
+                    let purpose = match purpose.clone() {
+                        EditPurpose::NewLinearIssue {
+                            team: None,
+                            presets,
+                        } => EditPurpose::NewLinearIssue {
+                            team: form.team().cloned(),
+                            presets,
+                        },
+                        other => other,
+                    };
+                    let cmds = self.on_text(purpose, submitted_text(form), false);
                     if cmds.iter().any(|c| matches!(c, Command::Send(_))) {
                         self.close_popup();
                         return cmds;
@@ -1358,6 +1652,25 @@ impl App {
                     form.set_message(self.status.flash.take());
                 }
             },
+            Popup::TeamPick { form, picker } => {
+                let chosen = match picker.handle(&key) {
+                    ListOutcome::Chosen(team) => Some(team),
+                    ListOutcome::Cancel => None,
+                    ListOutcome::None | ListOutcome::Key(_) => {
+                        self.popup = Some(popup);
+                        return Vec::new();
+                    }
+                };
+                let (purpose, mut form) = (**form).clone();
+                if let Some(team) = chosen
+                    && let Some(at) = form.teams().iter().position(|t| *t == team)
+                {
+                    form.set_team(at);
+                    form.set_heading(edit::new_issue_heading(&team));
+                }
+                self.popup = Some(Popup::Text { purpose, form });
+                return Vec::new();
+            }
         }
         self.popup = Some(popup);
         Vec::new()
@@ -1942,17 +2255,34 @@ mod tests {
     }
 
     #[test]
-    fn the_action_menu_on_linear_offers_browser_and_archived_only() {
-        let mut a = test_app();
+    fn the_action_menu_on_a_linear_project_board_lists_its_operations() {
+        let mut a = crate::ui::app::edit::tests::linear_app();
+        assert!(a.handle_key(key(' ')).is_empty());
+        assert_eq!(
+            menu(&a),
+            [
+                ("Move to the previous column".to_string(), "<".to_string()),
+                ("Move to the next column".to_string(), ">".to_string()),
+                ("Move up".to_string(), "K".to_string()),
+                ("Move down".to_string(), "J".to_string()),
+                ("Assignees".to_string(), "a".to_string()),
+                ("Labels".to_string(), "t".to_string()),
+                ("Edit a field".to_string(), "e".to_string()),
+                ("Comment".to_string(), "c".to_string()),
+                ("Close".to_string(), "X".to_string()),
+                ("Archive".to_string(), "A".to_string()),
+                ("Edit title".to_string(), String::new()),
+                ("Edit body".to_string(), String::new()),
+                ("Remove from project".to_string(), String::new()),
+                ("Open in the browser".to_string(), "o".to_string()),
+                ("New item".to_string(), "n".to_string()),
+                ("Show archived items".to_string(), String::new()),
+            ]
+        );
+        a.handle_key(code(KeyCode::Esc));
+        // A board the viewer cannot edit offers only the browser and archived items.
         let mut snap = a.snapshot().unwrap().clone();
-        snap.project.board = "linear:team:t1".parse().unwrap();
         snap.project.viewer_can_update = false;
-        snap.project.linear = Some(crate::model::LinearMeta {
-            url_key: "acme".into(),
-            viewer_id: "U_tviles".into(),
-            team_keys: vec!["TBA".into()],
-            ..Default::default()
-        });
         a.store.apply(crate::store::StoreUpdate::Replace(snap));
         assert!(a.handle_key(key(' ')).is_empty());
         assert_eq!(
@@ -1967,7 +2297,7 @@ mod tests {
         assert!(a.handle_key(key('>')).is_empty());
         assert_eq!(
             a.status.flash.as_deref(),
-            Some("Editing Linear boards arrives in 0.5")
+            Some("This board is read-only for you")
         );
     }
 
@@ -3450,5 +3780,64 @@ mod tests {
         a.handle_key(code(KeyCode::Esc));
         assert!(a.popup.is_none(), "no earlier step: Esc closes");
         assert!(a.store.pending().is_empty());
+    }
+
+    /// GitHub keeps its behaviour when a reload removed the field or item while the
+    /// popover was open: a set is still sent, a clear only when the item holds a value.
+    #[test]
+    fn a_github_edit_whose_field_or_item_has_gone_behaves_as_before() {
+        let mut a = test_app();
+        let gone = FieldId::new("F_gone");
+        let value = FieldValue::Text("x".into());
+        let cmds = a.submit_value(ItemId::new("a"), gone.clone(), Some(value.clone()));
+        assert_eq!(cmds, vec![Command::Send(1)]);
+        assert_eq!(
+            a.store.pending()[0].op,
+            Op::SetField {
+                item: ItemId::new("a"),
+                field: gone.clone(),
+                value,
+            }
+        );
+        // The item holds no value for the gone field: a clear sends nothing, silently.
+        a.status.flash = None;
+        assert!(
+            a.submit_value(ItemId::new("a"), gone.clone(), None)
+                .is_empty()
+        );
+        assert_eq!(a.status.flash, None);
+        // A value stored for a field the project no longer has is still cleared.
+        let mut snap = a.store.confirmed().unwrap().clone();
+        snap.project.fields.retain(|f| f.id.as_str() != "F_notes");
+        snap.items
+            .get_mut(&ItemId::new("a"))
+            .unwrap()
+            .values
+            .insert(FieldId::new("F_notes"), FieldValue::Text("old".into()));
+        a.store.apply(crate::store::StoreUpdate::Replace(snap));
+        let cmds = a.submit_value(ItemId::new("a"), FieldId::new("F_notes"), None);
+        assert_eq!(cmds, vec![Command::Send(2)]);
+        assert_eq!(
+            a.store.pending()[1].op,
+            Op::ClearField {
+                item: ItemId::new("a"),
+                field: FieldId::new("F_notes"),
+            }
+        );
+        // A clear for an item that has gone is a silent no-op; a set says why.
+        assert!(
+            a.submit_value(ItemId::new("zz"), gone.clone(), None)
+                .is_empty()
+        );
+        assert_eq!(a.status.flash, None);
+        assert!(
+            a.submit_value(ItemId::new("zz"), gone, Some(FieldValue::Text("x".into())))
+                .is_empty()
+        );
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some(crate::ui::app::edit::NO_LONGER_ON_BOARD)
+        );
+        assert_eq!(a.pending_count(), 2);
     }
 }

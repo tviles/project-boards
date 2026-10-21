@@ -7,7 +7,7 @@ use crate::error::BackendError;
 use crate::github::transport::RateInfo;
 use crate::model::{
     ContentHit, Item, ItemDetail, ItemId, ListQuery, Project, ProjectSummary, PushableRepos,
-    RepoCandidates, RepoRef, RepoSlug, ViewId,
+    RepoCandidates, RepoRef, RepoSlug, TeamCandidates, ViewId,
 };
 use crate::ops::{Confirmed, OpId};
 use crate::store::{StoreUpdate, ViewList};
@@ -43,6 +43,10 @@ pub enum SyncTask {
     Detail(ItemId),
     Projects,
     Candidates(RepoSlug),
+    /// A Linear team's members and labels, by team id.
+    TeamCandidates(String),
+    /// A Linear issue looked up by its key (`TBA-12`).
+    IssueByKey(String),
     Repos,
     RepoLookup(RepoSlug),
     Search(String),
@@ -61,6 +65,8 @@ impl SyncTask {
             SyncTask::Detail(_) => "Detail",
             SyncTask::Projects => "Projects",
             SyncTask::Candidates(_) => "Candidates",
+            SyncTask::TeamCandidates(_) => "TeamCandidates",
+            SyncTask::IssueByKey(_) => "IssueByKey",
             SyncTask::Repos => "Repos",
             SyncTask::RepoLookup(_) => "RepoLookup",
             SyncTask::Search(_) => "Search",
@@ -131,6 +137,16 @@ pub enum SyncEvent {
         repo: RepoSlug,
         candidates: RepoCandidates,
     },
+    /// A Linear team's members and labels, by team id.
+    TeamCandidates {
+        team: String,
+        candidates: TeamCandidates,
+    },
+    /// The Linear issue `key` names, or `None` when there is no such issue.
+    IssueFound {
+        key: String,
+        item: Option<Item>,
+    },
     Repos(PushableRepos),
     RepoFound {
         slug: RepoSlug,
@@ -166,6 +182,8 @@ pub fn store_update(event: &SyncEvent) -> Option<StoreUpdate> {
         | SyncEvent::Access { .. }
         | SyncEvent::Failed { .. }
         | SyncEvent::Candidates { .. }
+        | SyncEvent::TeamCandidates { .. }
+        | SyncEvent::IssueFound { .. }
         | SyncEvent::Repos(_)
         | SyncEvent::RepoFound { .. }
         | SyncEvent::SearchResults { .. } => None,
@@ -294,6 +312,7 @@ mod tests {
             "RepoLookup"
         );
         assert_eq!(SyncTask::ViewIds(ViewId::new("V")).kind(), "ViewIds");
+        assert_eq!(SyncTask::IssueByKey("TBA-12".into()).kind(), "IssueByKey");
     }
 
     fn scope() -> Vec<RepoSlug> {

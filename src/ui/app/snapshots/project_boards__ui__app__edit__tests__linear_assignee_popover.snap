@@ -1,0 +1,24 @@
+---
+source: src/ui/app/edit.rs
+expression: screen
+---
+Launch · Linear
+ Board   All issues  ▥ board
+Todo 2                                            In Progress 1 ‹ 1–2 of 6 ›
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ╭───────────────────────────────────────────────╮
+┃● TBA-1                            Ada Lovelace┃ │● TBA-2                                        │
+┃Issue TBA-1                                    ┃ │Issue TBA-2                                    │
+┃                                               ┃ ╰───────────────────────────────────────────────╯
+┃Docs             ┌ Assignee · TBA-1 ────────────────────────────────────────────┐
+┗━━━━━━━━━━━━━━━━━│>                                                             │
+╭─────────────────│[x] Ada Lovelace                                              │
+│● TBB-1          │[ ] Grace Hopper                                              │
+│Issue TBB-1      │space toggles · enter applies · esc cancels                   │
+╰─────────────────└──────────────────────────────────────────────────────────────┘
+
+
+
+
+
+
+a assignees · t labels · e field · < > move · X close · c comment · space actions · ? help

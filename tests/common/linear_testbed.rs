@@ -73,7 +73,6 @@ pub fn resolve_key() -> Result<String, String> {
     }
 }
 
-/// tests/linear-testbed.toml: invented names only.
 /// Every probe name `PB_PROBES` may select; the first nine run when it is unset.
 pub const ALL_PROBES: [&str; 12] = [
     "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l11", "l12", "l13",
@@ -123,6 +122,7 @@ pub fn readonly_key() -> Option<String> {
         .filter(|k| !k.is_empty())
 }
 
+/// tests/linear-testbed.toml: invented names only.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Testbed {
     /// The workspace's URL key (linear.app/<url_key>).
