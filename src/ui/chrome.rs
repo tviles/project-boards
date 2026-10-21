@@ -44,12 +44,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_tabs(frame, tabs, app);
     if app.mode == Mode::Setup {
         let text = app.setup.clone().unwrap_or_default();
+        let title = if app.setup_offers_boards {
+            " setup · r retry · B boards · q quit "
+        } else {
+            " setup · r retry · q quit "
+        };
         frame.render_widget(
-            Paragraph::new(text).wrap(Wrap { trim: false }).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" setup · r retry · q quit "),
-            ),
+            Paragraph::new(text)
+                .wrap(Wrap { trim: false })
+                .block(Block::default().borders(Borders::ALL).title(title)),
             body,
         );
     } else if app.detail.is_some() {
@@ -867,6 +870,22 @@ mod tests {
         let screen = render_to_string(80, 12, |f| draw(f, &mut b));
         assert!(screen.contains("Run gh auth login first.") && screen.contains("setup"));
         render_to_string(40, 8, |f| draw(f, &mut b));
+    }
+
+    #[test]
+    fn the_setup_title_offers_boards_only_for_a_failing_board() {
+        let mut a = app();
+        a.mode = Mode::Setup;
+        a.setup = Some("Run gh auth login first.".into());
+        let screen = render_to_string(80, 12, |f| draw(f, &mut a));
+        assert!(screen.contains(" setup · r retry · q quit "), "{screen}");
+        assert!(!screen.contains("B boards"), "{screen}");
+        a.setup_offers_boards = true;
+        let screen = render_to_string(80, 12, |f| draw(f, &mut a));
+        assert!(
+            screen.contains(" setup · r retry · B boards · q quit "),
+            "{screen}"
+        );
     }
 
     #[test]

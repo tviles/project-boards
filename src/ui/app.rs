@@ -1252,7 +1252,11 @@ impl App {
                             .push_str(&format!("\nOr press {} to open another board.", k.label()));
                     }
                     self.setup = Some(message);
-                    self.mode = Mode::Setup;
+                    // The dead board is still polled: its next failure leaves a picker opened
+                    // from the setup screen open, and Esc goes back to the fresh message.
+                    if !(self.mode == Mode::Picker && self.setup_offers_boards) {
+                        self.mode = Mode::Setup;
+                    }
                 } else if let (SyncTask::Detail(id), Some(state)) = (&task, self.detail.as_mut()) {
                     if &state.item == id {
                         state.loading_older = false;

@@ -2731,6 +2731,48 @@ mod tests {
         assert_eq!(c.app.setup, None);
     }
 
+    /// The dead board is still polled; its next failure must not close the picker the user
+    /// opened from the setup screen, only refresh the message Esc goes back to.
+    #[test]
+    fn a_failed_poll_of_the_dead_board_leaves_the_picker_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, t0) = controller(dir.path(), Some(LINEAR_TEAM));
+        c.start(Ok(vec![Provider::Github]), t0);
+        let no_key = || SyncEvent::Failed {
+            task: SyncTask::Resolve,
+            error: BackendError::NoCredentials {
+                provider: Provider::Linear,
+            },
+        };
+        let e = at(&c, no_key());
+        c.handle(e, t0);
+        let message = c.app.setup.clone().unwrap();
+        c.handle(Input::Key(key('B')), t0);
+        let list = at(
+            &c,
+            SyncEvent::Projects {
+                boards: vec![summary("tviles/4")],
+                notes: vec![],
+            },
+        );
+        c.handle(list, t0);
+        assert_eq!(c.app.mode, Mode::Picker);
+        let picker = c.app.picker.clone();
+        let linear: BoardKey = LINEAR_TEAM.parse().unwrap();
+        assert!(
+            c.handle(Input::Tick, t0 + Duration::from_secs(31))
+                .contains(&sp(&c, SyncJob::Resolve(linear))),
+            "the dead board is polled again"
+        );
+        let e = at(&c, no_key());
+        c.handle(e, t0 + Duration::from_secs(31));
+        assert_eq!(c.app.mode, Mode::Picker, "the picker stays open");
+        assert_eq!(c.app.picker, picker);
+        c.handle(Input::Key(code(crossterm::event::KeyCode::Esc)), t0);
+        assert_eq!(c.app.mode, Mode::Setup);
+        assert_eq!(c.app.setup, Some(message));
+    }
+
     #[test]
     fn a_rejected_github_token_can_switch_from_setup() {
         let dir = tempfile::tempdir().unwrap();
