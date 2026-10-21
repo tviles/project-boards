@@ -21,7 +21,6 @@ Linear boards are now editable, with the same keys as GitHub boards. Saving view
 
 - On a board's setup screen (a missing, rejected or under-scoped token or key for that board's provider), `B` opens the board picker and `Esc` returns to the setup screen. The screen says "Or press B to open another board." and its title reads `setup · r retry · B boards · q quit`. Since 0.4 a board whose credentials stopped working left you stuck on it. The start-time screen with no credentials at all is unchanged.
 - A board picker that is open when the shown board's credentials fail now stays open; `Esc` then shows the setup screen.
-- An edit key Linear cannot do says "This board can't do that" (milestones and drafts) instead of "Editing Linear boards arrives in 0.5".
 
 ### Fixed
 
