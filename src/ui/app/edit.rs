@@ -52,8 +52,22 @@ pub struct Confirm {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfirmAction {
     Quit,
-    Submit { kind: OpKind, op: Op },
+    Submit {
+        kind: OpKind,
+        op: Op,
+    },
+    /// A new item (`submit_new`): an existing Linear issue that moves here from another
+    /// project (T5). `note` names the presets left out of it, said once it is sent
+    /// (Decision 9).
+    SubmitNew {
+        op: Op,
+        note: Option<String>,
+    },
 }
+
+/// "Add existing" on a Linear board, for text that is neither a key nor an issue link.
+pub(crate) const NOT_AN_ISSUE_REF: &str =
+    "Type an issue key like TBA-12, or paste a linear.app issue link";
 
 /// The byte range of the `is:archived` word in `text`, if it is there as a word of its own.
 pub(crate) fn archived_token(text: &str) -> Option<(usize, usize)> {
@@ -203,6 +217,43 @@ fn presets_for_team(
             None => Ok((id.clone(), value.clone())),
         })
         .collect()
+}
+
+/// `presets` for adding the existing Linear `issue` (spec section 9, D9): each resolved for
+/// the issue's own team (`for_issue`), and the reasons for those it cannot take, which are
+/// left out. A preset whose field has left the board goes as it is.
+fn presets_for_issue(
+    project: &Project,
+    issue: &Item,
+    presets: &[(FieldId, FieldValue)],
+) -> (Vec<(FieldId, FieldValue)>, Vec<TeamRefusal>) {
+    let (mut kept, mut refused) = (Vec::new(), Vec::new());
+    for (id, value) in presets {
+        match project.field(id) {
+            Some(field) => {
+                match crate::model::teams::for_issue(project, issue, field, value.clone()) {
+                    Ok(v) => kept.push((id.clone(), v)),
+                    Err(r) => refused.push(r),
+                }
+            }
+            None => kept.push((id.clone(), value.clone())),
+        }
+    }
+    (kept, refused)
+}
+
+/// What the status line says when presets were left out of adding `key` (Decision 9):
+/// `TBA has no "In Review" state; adding TBA-12 without it`.
+fn left_out_note(refused: &[TeamRefusal], key: &str) -> Option<String> {
+    if refused.is_empty() {
+        return None;
+    }
+    let reasons: Vec<String> = refused.iter().map(TeamRefusal::message).collect();
+    let them = if refused.len() == 1 { "it" } else { "them" };
+    Some(format!(
+        "{}; adding {key} without {them}",
+        reasons.join("; ")
+    ))
 }
 
 /// `text` with CRLF line endings as LF.
@@ -432,6 +483,21 @@ impl App {
             SyncTask::TeamCandidates(team) => {
                 self.team_candidates
                     .insert(team.clone(), Lookup::Failed(message));
+            }
+            // An answer for a key the popup no longer waits on is dropped.
+            SyncTask::IssueByKey(key) => {
+                if let Some(Popup::IssueKey {
+                    input,
+                    loading,
+                    error,
+                    ..
+                }) = &mut self.popup
+                    && *loading
+                    && crate::model::parse_linear_issue_ref(input).as_deref() == Some(key)
+                {
+                    *loading = false;
+                    *error = Some(message);
+                }
             }
             SyncTask::Repos => self.repos = Some(Lookup::Failed(message)),
             SyncTask::RepoLookup(slug) => {
@@ -788,6 +854,87 @@ impl App {
         self.highlight = Some(temp);
         self.restore_selection();
         vec![Command::Send(id)]
+    }
+
+    /// `submit_new`, then `note` on the status line once the add is sent.
+    fn submit_new_noting(&mut self, op: Op, note: Option<String>) -> Vec<Command> {
+        let cmds = self.submit_new(op, false);
+        if !cmds.is_empty()
+            && let Some(note) = note
+        {
+            self.status.flash = Some(note);
+        }
+        cmds
+    }
+
+    /// The answer to "add existing" on a Linear board: the issue `key` names, or `None`. An
+    /// answer the open popup does not wait on is dropped. No issue says so in the popup; one
+    /// on the board is selected; one in another project asks first (T5); any other is added
+    /// at once, with the presets its team can take (spec section 9).
+    pub(crate) fn issue_found(&mut self, key: &str, item: Option<Item>) -> Vec<Command> {
+        let Some(Popup::IssueKey {
+            presets,
+            input,
+            loading: true,
+            error,
+        }) = &mut self.popup
+        else {
+            return Vec::new();
+        };
+        if crate::model::parse_linear_issue_ref(input).as_deref() != Some(key) {
+            return Vec::new();
+        }
+        let Some(issue) = item else {
+            *error = Some(format!("No issue {key}"));
+            if let Some(Popup::IssueKey { loading, .. }) = &mut self.popup {
+                *loading = false;
+            }
+            return Vec::new();
+        };
+        let presets = std::mem::take(presets);
+        self.close_popup();
+        let label = issue.ref_label();
+        if self.item(&issue.id).is_some() {
+            self.status.flash = Some(format!("{label} is already on the board"));
+            self.selected_id = Some(issue.id);
+            self.restore_selection();
+            return Vec::new();
+        }
+        let Some(project) = self.project() else {
+            return Vec::new();
+        };
+        let (presets, refused) = presets_for_issue(project, &issue, &presets);
+        let note = left_out_note(&refused, &label);
+        // An issue has at most one project, so adding it here moves it from its own.
+        let elsewhere = match (
+            &project.board,
+            issue.value(&FieldId::new(crate::linear::ids::PROJECT)),
+        ) {
+            (
+                BoardKey::LinearProject { id },
+                Some(FieldValue::SingleSelect { option_id, name }),
+            ) if option_id.as_str() != id => Some(name.clone()),
+            _ => None,
+        };
+        let temp = self.next_temp();
+        let op = Op::Create {
+            temp,
+            new: NewItem::LinearExisting {
+                issue: Box::new(issue),
+            },
+            presets,
+        };
+        match elsewhere {
+            Some(other) => {
+                self.confirm = Some(Confirm {
+                    question: format!("{label} is in \"{other}\"; move it here? (y/n)"),
+                    action: ConfirmAction::SubmitNew { op, note },
+                });
+                self.mode = Mode::Confirm;
+                Vec::new()
+            }
+            None => self.submit_new_noting(op, note),
+        }
     }
 
     /// A placeholder became a real item: follow it, in the detail too (the caller loads the
@@ -1940,6 +2087,7 @@ impl App {
                 vec![Command::Quit]
             }
             ConfirmAction::Submit { kind, op } => self.submit(kind, op),
+            ConfirmAction::SubmitNew { op, note } => self.submit_new_noting(op, note),
         }
     }
 
@@ -6889,5 +7037,285 @@ pub(crate) mod tests {
             crate::ui::fixtures::render_to_string(100, 24, |f| crate::ui::chrome::draw(f, &mut a));
         assert!(screen.contains("New issue in TBA"), "{screen}");
         insta::assert_snapshot!(screen);
+    }
+
+    // Task 15: adding an existing Linear issue by key or URL.
+
+    /// `linear_project`'s Linear project id.
+    const BOARD_PROJECT: &str = "6f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f";
+
+    /// The issue `TBA-12`, Todo, not on the board, in the project `project` (id, name).
+    fn found_issue(project: Option<(&str, &str)>) -> crate::model::Item {
+        let mut issue = linear_issue("TBA", 12, ("s-a-todo", "Todo"));
+        if let Some((id, name)) = project {
+            issue.values.insert(
+                FieldId::new(crate::linear::ids::PROJECT),
+                select_value(id, name),
+            );
+        }
+        issue
+    }
+
+    /// `n`, "Add existing issue (key or URL)", then `text` and Enter.
+    fn add_existing_linear(a: &mut App, text: &str) -> Vec<Command> {
+        assert!(a.handle_key(key('n')).is_empty());
+        assert_eq!(new_kind_labels(a)[1], "Add existing issue (key or URL)");
+        a.handle_key(code(KeyCode::Down));
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        assert!(
+            matches!(&a.popup, Some(Popup::IssueKey { input, loading: false, error: None, .. }) if input.is_empty()),
+            "{:?}",
+            a.popup
+        );
+        assert!(type_in(a, text).is_empty());
+        a.handle_key(code(KeyCode::Enter))
+    }
+
+    fn issue_key_error(a: &App) -> Option<String> {
+        match &a.popup {
+            Some(Popup::IssueKey { error, .. }) => error.clone(),
+            other => panic!("expected the issue key popup, got {other:?}"),
+        }
+    }
+
+    fn issue_key_loading(a: &App) -> bool {
+        matches!(&a.popup, Some(Popup::IssueKey { loading: true, .. }))
+    }
+
+    #[test]
+    fn an_unknown_key_says_so() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        // Nothing to look up in text that is no key or link.
+        assert!(add_existing_linear(&mut a, "crash on start").is_empty());
+        assert_eq!(issue_key_error(&a).as_deref(), Some(NOT_AN_ISSUE_REF));
+        assert!(!issue_key_loading(&a));
+        // Typing clears the error.
+        for _ in 0.."crash on start".len() {
+            a.handle_key(code(KeyCode::Backspace));
+        }
+        assert_eq!(issue_key_error(&a), None);
+        type_in(&mut a, "tba-99");
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::LookupIssue("TBA-99".into())]
+        );
+        assert!(issue_key_loading(&a));
+        // Enter again while it looks up asks nothing more.
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        let screen =
+            crate::ui::fixtures::render_to_string(100, 24, |f| crate::ui::chrome::draw(f, &mut a));
+        assert!(screen.contains("Add existing issue"), "{screen}");
+        assert!(screen.contains("Looking up…"), "{screen}");
+        // An answer for another key is not this popup's.
+        assert!(
+            a.on_sync(SyncEvent::IssueFound {
+                key: "TBA-98".into(),
+                item: None,
+            })
+            .is_empty()
+        );
+        assert!(issue_key_loading(&a));
+        assert!(
+            a.on_sync(SyncEvent::IssueFound {
+                key: "TBA-99".into(),
+                item: None,
+            })
+            .is_empty()
+        );
+        assert_eq!(issue_key_error(&a).as_deref(), Some("No issue TBA-99"));
+        assert!(!issue_key_loading(&a));
+        assert!(pending_ops(&a).is_empty());
+        let screen =
+            crate::ui::fixtures::render_to_string(100, 24, |f| crate::ui::chrome::draw(f, &mut a));
+        assert!(screen.contains("No issue TBA-99"), "{screen}");
+        assert!(screen.contains("TBA-12 or a linear.app link"), "{screen}");
+        // A lookup that fails says why, in the popup.
+        assert_eq!(
+            a.handle_key(code(KeyCode::Enter)),
+            vec![Command::LookupIssue("TBA-99".into())]
+        );
+        a.on_sync(SyncEvent::Failed {
+            task: SyncTask::IssueByKey("TBA-99".into()),
+            error: BackendError::Network("offline".into()),
+        });
+        let error = issue_key_error(&a).unwrap();
+        assert!(
+            error.starts_with("could not look up the issue: "),
+            "{error}"
+        );
+        assert_eq!(
+            a.status.error, None,
+            "said in the popup, not the status line"
+        );
+        // Esc goes back to the new-item menu, with the same presets.
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!(
+            new_kind_labels(&a),
+            ["New issue", "Add existing issue (key or URL)"]
+        );
+    }
+
+    #[test]
+    fn an_issue_on_the_board_is_selected_not_added() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        assert_eq!(
+            add_existing_linear(&mut a, "https://linear.app/acme/issue/TBB-2/review-it"),
+            vec![Command::LookupIssue("TBB-2".into())]
+        );
+        let on_board = a.item(&ItemId::new("i-tbb-2")).unwrap().clone();
+        assert!(
+            a.on_sync(SyncEvent::IssueFound {
+                key: "TBB-2".into(),
+                item: Some(on_board),
+            })
+            .is_empty()
+        );
+        assert_eq!(a.popup, None);
+        assert_eq!(a.mode, Mode::Normal);
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("TBB-2 is already on the board")
+        );
+        assert_eq!(
+            a.selected_item().map(|i| i.ref_label()),
+            Some("TBB-2".to_string())
+        );
+        assert!(pending_ops(&a).is_empty());
+    }
+
+    #[test]
+    fn an_issue_in_another_project_asks_first() {
+        let mut a = linear_app();
+        // Todo: the merged column, whose canonical option is TBB's.
+        pick(&mut a, "TBB-1");
+        add_existing_linear(&mut a, "TBA-12");
+        let found = found_issue(Some(("p-billing", "Billing")));
+        assert!(
+            a.on_sync(SyncEvent::IssueFound {
+                key: "TBA-12".into(),
+                item: Some(found.clone()),
+            })
+            .is_empty()
+        );
+        assert_eq!(a.popup, None);
+        assert_eq!(a.mode, Mode::Confirm);
+        assert_eq!(
+            a.confirm.as_ref().map(|c| c.question.as_str()),
+            Some("TBA-12 is in \"Billing\"; move it here? (y/n)")
+        );
+        assert!(pending_ops(&a).is_empty(), "nothing is sent before a yes");
+        // `n` sends nothing.
+        assert!(a.handle_key(key('n')).is_empty());
+        assert_eq!(a.mode, Mode::Normal);
+        assert!(pending_ops(&a).is_empty());
+        // `y` adds it, with the column's status for TBA.
+        let mut a = linear_app();
+        pick(&mut a, "TBB-1");
+        add_existing_linear(&mut a, "TBA-12");
+        a.on_sync(SyncEvent::IssueFound {
+            key: "TBA-12".into(),
+            item: Some(found.clone()),
+        });
+        assert_eq!(a.handle_key(key('y')), vec![Command::Send(1)]);
+        assert_eq!(a.mode, Mode::Normal);
+        assert_eq!(
+            pending_ops(&a),
+            [Op::Create {
+                temp: ItemId::new("local:1"),
+                new: NewItem::LinearExisting {
+                    issue: Box::new(found)
+                },
+                presets: vec![(
+                    FieldId::new(crate::linear::ids::STATUS),
+                    select_value("s-a-todo", "Todo")
+                )],
+            }]
+        );
+        // The placeholder shows at once, selected.
+        assert_eq!(
+            a.selected_item().map(|i| i.id.clone()),
+            Some(ItemId::new("local:1"))
+        );
+        // An issue in this board's project, or in none, is added without a question.
+        for project in [Some((BOARD_PROJECT, "Launch")), None] {
+            let mut a = linear_app();
+            pick(&mut a, "TBA-2");
+            add_existing_linear(&mut a, "TBA-12");
+            assert_eq!(
+                a.on_sync(SyncEvent::IssueFound {
+                    key: "TBA-12".into(),
+                    item: Some(found_issue(project)),
+                }),
+                vec![Command::Send(1)],
+                "{project:?}"
+            );
+            assert_eq!(a.mode, Mode::Normal);
+            assert_eq!(a.popup, None);
+            assert_eq!(a.status.flash, None, "no preset was left out");
+        }
+    }
+
+    #[test]
+    fn presets_the_team_lacks_are_left_out_and_named() {
+        let mut a = linear_app();
+        // In Review is TBB's only.
+        pick(&mut a, "TBB-2");
+        add_existing_linear(&mut a, "TBA-12");
+        let found = found_issue(None);
+        assert_eq!(
+            a.on_sync(SyncEvent::IssueFound {
+                key: "TBA-12".into(),
+                item: Some(found.clone()),
+            }),
+            vec![Command::Send(1)],
+            "the add still happens"
+        );
+        assert_eq!(
+            pending_ops(&a),
+            [Op::Create {
+                temp: ItemId::new("local:1"),
+                new: NewItem::LinearExisting {
+                    issue: Box::new(found.clone())
+                },
+                presets: vec![],
+            }]
+        );
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("TBA has no \"In Review\" state; adding TBA-12 without it")
+        );
+        // After a yes, too.
+        let mut a = linear_app();
+        pick(&mut a, "TBB-2");
+        add_existing_linear(&mut a, "TBA-12");
+        a.on_sync(SyncEvent::IssueFound {
+            key: "TBA-12".into(),
+            item: Some(found_issue(Some(("p-billing", "Billing")))),
+        });
+        assert_eq!(a.mode, Mode::Confirm);
+        assert_eq!(a.handle_key(key('y')), vec![Command::Send(1)]);
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("TBA has no \"In Review\" state; adding TBA-12 without it")
+        );
+    }
+
+    #[test]
+    fn team_boards_have_no_add_existing() {
+        let mut t = linear_team_app();
+        pick(&mut t, "TBA-1");
+        t.handle_key(key('n'));
+        assert_eq!(new_kind_labels(&t), ["New issue"]);
+        assert!(
+            !new_kind_labels(&t).iter().any(|l| l.contains("existing")),
+            "a team board holds every issue of its team already"
+        );
+        // A project board offers it.
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        a.handle_key(key('n'));
+        assert!(new_kind_labels(&a).contains(&"Add existing issue (key or URL)".to_string()));
     }
 }

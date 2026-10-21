@@ -531,6 +531,23 @@ impl Syncer {
         }
     }
 
+    /// The Linear issue `key` names (`issue(id:)`), from the Linear backend whatever board
+    /// is open; no such issue is an answer, `item: None`.
+    pub async fn issue_by_key(&self, key: &str) {
+        let result = match self.backends.get(Provider::Linear).as_deref() {
+            Ok(Backend::Linear(linear)) => linear.issue_by_key(key).await,
+            Ok(Backend::Github(_)) => Err(disagree()),
+            Err(e) => Err(e.clone()),
+        };
+        match result {
+            Ok(item) => self.send(SyncEvent::IssueFound {
+                key: key.to_string(),
+                item,
+            }),
+            Err(e) => self.fail(SyncTask::IssueByKey(key.to_string()), e),
+        }
+    }
+
     pub async fn repos(&self) {
         let result = match self.github().as_deref() {
             Ok(Backend::Github(gh)) => gh.pushable_repos().await,
@@ -1433,6 +1450,52 @@ mod tests {
             &drain(&mut rx)[..],
             [SyncEvent::Failed {
                 task: SyncTask::TeamCandidates(_),
+                error: BackendError::NoCredentials {
+                    provider: Provider::Linear
+                }
+            }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn issue_lookups_go_to_linear() {
+        let (gh, lin, s, mut rx) = setup_both(Provider::Github);
+        let mut issue = crate::linear::convert::tests::issue_json();
+        issue["id"] = json!("i-12");
+        lin.push("IssueByKey", json!({"issue": issue}));
+        s.issue_by_key("TBA-12").await;
+        let events = drain(&mut rx);
+        assert!(
+            matches!(&events[..], [SyncEvent::IssueFound { key, item: Some(item) }]
+                if key == "TBA-12" && item.id.as_str() == "i-12"),
+            "{events:?}"
+        );
+        assert_eq!(lin.requests()[0].operation_name, "IssueByKey");
+        assert!(gh.requests().is_empty(), "Linear's, whatever board is open");
+        // No such issue is an answer, not a failure.
+        lin.push("IssueByKey", json!({"issue": null}));
+        s.issue_by_key("TBA-99").await;
+        assert_eq!(
+            drain(&mut rx),
+            [SyncEvent::IssueFound {
+                key: "TBA-99".into(),
+                item: None
+            }]
+        );
+        // A failure names the key, for the popup that waits on it.
+        lin.push_error("IssueByKey", BackendError::Network("offline".into()));
+        s.issue_by_key("TBA-12").await;
+        assert!(matches!(
+            &drain(&mut rx)[..],
+            [SyncEvent::Failed { task: SyncTask::IssueByKey(key), .. }] if key == "TBA-12"
+        ));
+        // Without a Linear backend there is nothing to ask.
+        let (_, s, mut rx) = setup(2000);
+        s.issue_by_key("TBA-12").await;
+        assert!(matches!(
+            &drain(&mut rx)[..],
+            [SyncEvent::Failed {
+                task: SyncTask::IssueByKey(_),
                 error: BackendError::NoCredentials {
                     provider: Provider::Linear
                 }

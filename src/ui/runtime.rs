@@ -390,6 +390,7 @@ impl Runner {
                 SyncJob::Projects(repo) => s.projects(repo.as_ref()).await,
                 SyncJob::Candidates(repo) => s.candidates(&repo).await,
                 SyncJob::TeamCandidates(team) => s.team_candidates(&team).await,
+                SyncJob::IssueByKey(key) => s.issue_by_key(&key).await,
                 SyncJob::Repos => s.repos().await,
                 SyncJob::LookupRepo(slug) => s.lookup_repo(&slug).await,
                 SyncJob::Search { query, scope } => s.search(&query, &scope).await,
@@ -418,6 +419,13 @@ fn unanswered_edit(job: &SyncJob, provider: Option<Provider>) -> Option<crate::s
         // Only a Linear board asks for a team's candidates, whatever the job's tag.
         SyncJob::TeamCandidates(team) => Some(SyncEvent::Failed {
             task: SyncTask::TeamCandidates(team.clone()),
+            error: BackendError::NoCredentials {
+                provider: Provider::Linear,
+            },
+        }),
+        // So does a Linear issue lookup.
+        SyncJob::IssueByKey(key) => Some(SyncEvent::Failed {
+            task: SyncTask::IssueByKey(key.clone()),
             error: BackendError::NoCredentials {
                 provider: Provider::Linear,
             },
@@ -596,6 +604,22 @@ mod tests {
             unanswered_edit(&SyncJob::TeamCandidates("team-a".into()), None),
             Some(SyncEvent::Failed {
                 task: crate::sync::SyncTask::TeamCandidates("team-a".into()),
+                error: BackendError::NoCredentials {
+                    provider: Provider::Linear
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn issue_lookups_nobody_could_run_name_linear() {
+        assert_eq!(
+            unanswered_edit(
+                &SyncJob::IssueByKey("TBA-12".into()),
+                Some(Provider::Github)
+            ),
+            Some(SyncEvent::Failed {
+                task: crate::sync::SyncTask::IssueByKey("TBA-12".into()),
                 error: BackendError::NoCredentials {
                     provider: Provider::Linear
                 },

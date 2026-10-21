@@ -45,6 +45,8 @@ pub enum SyncTask {
     Candidates(RepoSlug),
     /// A Linear team's members and labels, by team id.
     TeamCandidates(String),
+    /// A Linear issue looked up by its key (`TBA-12`).
+    IssueByKey(String),
     Repos,
     RepoLookup(RepoSlug),
     Search(String),
@@ -64,6 +66,7 @@ impl SyncTask {
             SyncTask::Projects => "Projects",
             SyncTask::Candidates(_) => "Candidates",
             SyncTask::TeamCandidates(_) => "TeamCandidates",
+            SyncTask::IssueByKey(_) => "IssueByKey",
             SyncTask::Repos => "Repos",
             SyncTask::RepoLookup(_) => "RepoLookup",
             SyncTask::Search(_) => "Search",
@@ -139,6 +142,11 @@ pub enum SyncEvent {
         team: String,
         candidates: TeamCandidates,
     },
+    /// The Linear issue `key` names, or `None` when there is no such issue.
+    IssueFound {
+        key: String,
+        item: Option<Item>,
+    },
     Repos(PushableRepos),
     RepoFound {
         slug: RepoSlug,
@@ -175,6 +183,7 @@ pub fn store_update(event: &SyncEvent) -> Option<StoreUpdate> {
         | SyncEvent::Failed { .. }
         | SyncEvent::Candidates { .. }
         | SyncEvent::TeamCandidates { .. }
+        | SyncEvent::IssueFound { .. }
         | SyncEvent::Repos(_)
         | SyncEvent::RepoFound { .. }
         | SyncEvent::SearchResults { .. } => None,
@@ -303,6 +312,7 @@ mod tests {
             "RepoLookup"
         );
         assert_eq!(SyncTask::ViewIds(ViewId::new("V")).kind(), "ViewIds");
+        assert_eq!(SyncTask::IssueByKey("TBA-12".into()).kind(), "IssueByKey");
     }
 
     fn scope() -> Vec<RepoSlug> {

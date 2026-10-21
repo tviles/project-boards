@@ -131,6 +131,33 @@ pub fn parse_content_url(text: &str) -> Option<(RepoSlug, u32)> {
     Some((slug_of(owner, name)?, number.parse().ok()?))
 }
 
+/// A Linear issue key, upper-cased: a team key (a letter, then letters and digits) and a
+/// number, joined by `-`.
+fn linear_issue_key(text: &str) -> Option<String> {
+    let (team, number) = text.split_once('-')?;
+    let team_ok = team.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && team.chars().all(|c| c.is_ascii_alphanumeric());
+    let number_ok = !number.is_empty() && number.chars().all(|c| c.is_ascii_digit());
+    (team_ok && number_ok).then(|| text.to_ascii_uppercase())
+}
+
+/// The Linear issue key in `text`: a key (`tba-12` gives `TBA-12`), or a
+/// `https://linear.app/<workspace>/issue/TBA-12/<slug>` link (the slug, query and fragment
+/// optional). Anything else is `None`.
+pub fn parse_linear_issue_ref(text: &str) -> Option<String> {
+    let t = text.trim();
+    let Some(rest) = t.strip_prefix("https://linear.app/") else {
+        return linear_issue_key(t);
+    };
+    let path = rest.split(['?', '#']).next().unwrap_or("");
+    let mut parts = path.split('/');
+    let (workspace, kind, key) = (parts.next()?, parts.next()?, parts.next()?);
+    if workspace.is_empty() || kind != "issue" {
+        return None;
+    }
+    linear_issue_key(key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +193,59 @@ mod tests {
         assert_eq!(r("https://github.com/acme/app/discussions/1"), None);
         assert_eq!(r("fix the a/b#1 bug"), None);
         assert_eq!(r("a/b/c#1"), None);
+    }
+
+    #[test]
+    fn issue_refs_parse_keys_and_urls() {
+        let r = |s: &str| parse_linear_issue_ref(s);
+        assert_eq!(r("TBA-12").as_deref(), Some("TBA-12"));
+        assert_eq!(r("tba-12").as_deref(), Some("TBA-12"));
+        assert_eq!(r("  Tba-12 ").as_deref(), Some("TBA-12"));
+        assert_eq!(r("ENG2-7").as_deref(), Some("ENG2-7"));
+        assert_eq!(
+            r("https://linear.app/acme/issue/TBA-12/fix-the-crash").as_deref(),
+            Some("TBA-12")
+        );
+        assert_eq!(
+            r("https://linear.app/acme/issue/tba-12").as_deref(),
+            Some("TBA-12")
+        );
+        assert_eq!(
+            r("https://linear.app/acme/issue/TBA-12/").as_deref(),
+            Some("TBA-12")
+        );
+        assert_eq!(
+            r("https://linear.app/acme/issue/TBA-12/slug?x=1#comment-3").as_deref(),
+            Some("TBA-12")
+        );
+        assert_eq!(
+            r("https://linear.app/acme/issue/TBA-12#c").as_deref(),
+            Some("TBA-12")
+        );
+        for not in [
+            "",
+            "TBA",
+            "TBA-",
+            "-12",
+            "12",
+            "TBA-0x1",
+            "TBA-12a",
+            "TBA 12",
+            "1BA-12",
+            "TB_A-12",
+            "TBA-12-3",
+            "fix TBA-12",
+            "acme/app#12",
+            "https://github.com/acme/app/issues/12",
+            "http://linear.app/acme/issue/TBA-12",
+            "https://linear.app.evil.io/acme/issue/TBA-12",
+            "https://linear.app/acme/project/launch-1",
+            "https://linear.app/acme/issue/",
+            "https://linear.app/issue/TBA-12",
+            "https://linear.app//issue/TBA-12",
+            "https://linear.app/acme/issue/not-a-key/slug",
+        ] {
+            assert_eq!(r(not), None, "{not:?}");
+        }
     }
 }

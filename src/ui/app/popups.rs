@@ -90,6 +90,15 @@ pub enum Popup {
         loading: bool,
         error: Option<String>,
     },
+    /// `n`, "add existing" on a Linear project board: an issue key (`TBA-12`) or a
+    /// `linear.app` issue link, looked up on Enter (spec section 9). `loading` while the key
+    /// the input names is being looked up; `error` is why nothing was added.
+    IssueKey {
+        presets: Vec<(FieldId, FieldValue)>,
+        input: String,
+        loading: bool,
+        error: Option<String>,
+    },
     /// Which repository a new issue goes to. `wanted` is a typed `owner/name` being looked up.
     Repo {
         purpose: RepoPurpose,
@@ -1174,9 +1183,14 @@ impl App {
                     self.close_popup();
                     return match kind {
                         NewKind::Issue if self.is_linear() => self.new_linear_issue_form(presets),
-                        // Task 15 asks for the key or URL here.
                         NewKind::Existing if self.is_linear() => {
-                            self.say("Adding an existing Linear issue is not available yet")
+                            self.open_popup(Popup::IssueKey {
+                                presets,
+                                input: String::new(),
+                                loading: false,
+                                error: None,
+                            });
+                            Vec::new()
                         }
                         NewKind::Draft => self.new_draft_form(presets),
                         NewKind::Existing => {
@@ -1298,6 +1312,39 @@ impl App {
                     *error = None;
                 }
             },
+            Popup::IssueKey {
+                presets,
+                input,
+                loading,
+                error,
+            } => {
+                let before = input.clone();
+                match edit_line(input, &key) {
+                    // Nothing typed, or this key is being looked up already.
+                    LineOutcome::Submit if input.trim().is_empty() || *loading => {}
+                    LineOutcome::Submit => match crate::model::parse_linear_issue_ref(input) {
+                        Some(issue) => {
+                            *loading = true;
+                            *error = None;
+                            self.popup = Some(popup);
+                            return vec![Command::LookupIssue(issue)];
+                        }
+                        None => *error = Some(edit::NOT_AN_ISSUE_REF.into()),
+                    },
+                    LineOutcome::Cancel => {
+                        // One level back: the kind picker, same presets.
+                        let presets = presets.clone();
+                        self.open_new_kind(presets);
+                        return Vec::new();
+                    }
+                    // A changed key drops the answer for the one before.
+                    LineOutcome::Typing if *input != before => {
+                        *loading = false;
+                        *error = None;
+                    }
+                    LineOutcome::Typing => {}
+                }
+            }
             Popup::Actions { picker, .. } => match picker.handle(&key) {
                 ListOutcome::Chosen(MenuEntry::Key(action)) => {
                     self.close_popup();

@@ -207,6 +207,27 @@ fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
             };
             render_line_popup(frame, area, title, input, hint, error.as_deref(), theme)
         }
+        Popup::IssueKey {
+            input,
+            loading,
+            error,
+            ..
+        } => {
+            let hint = if *loading {
+                "Looking up…"
+            } else {
+                "TBA-12 or a linear.app link"
+            };
+            render_line_popup(
+                frame,
+                area,
+                "Add existing issue",
+                input,
+                hint,
+                error.as_deref(),
+                theme,
+            )
+        }
         // Drawn by `draw`, which has the form mutably.
         Popup::Text { .. } | Popup::TeamPick { .. } => {}
     }

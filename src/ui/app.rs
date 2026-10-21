@@ -77,6 +77,8 @@ pub enum Command {
     LoadCandidates(RepoSlug),
     /// A Linear team's members and labels, by team id.
     LoadTeamCandidates(String),
+    /// Look up a Linear issue by its key (`TBA-12`), for "add existing".
+    LookupIssue(String),
     LoadRepos,
     LookupRepo(RepoSlug),
     Search {
@@ -205,6 +207,7 @@ pub(crate) fn task_words(task: &SyncTask) -> &'static str {
         SyncTask::Projects => "could not list boards",
         SyncTask::Candidates(_) => "could not load the repository's users and labels",
         SyncTask::TeamCandidates(_) => "could not load the team's members and labels",
+        SyncTask::IssueByKey(_) => "could not look up the issue",
         SyncTask::Repos | SyncTask::RepoLookup(_) => "could not list repositories",
         SyncTask::Search(_) => "search failed",
     }
@@ -1236,6 +1239,7 @@ impl App {
                 self.team_candidates.insert(team, Lookup::Ready(candidates));
                 self.refresh_popup();
             }
+            SyncEvent::IssueFound { key, item } => cmds.extend(self.issue_found(&key, item)),
             SyncEvent::Repos(list) => {
                 self.repos = Some(Lookup::Ready(list));
                 self.refresh_popup();
