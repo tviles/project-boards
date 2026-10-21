@@ -86,7 +86,7 @@ Setup: as for "Linear (0.4)", on the testbed project board (`linear:project:…`
 - [ ] Archive an issue (it disappears; "Show archived items" lists it), then unarchive it.
 - [ ] `n` in a TBA column creates a TBA issue with that column's state; `n` in a merged column asks for the team (the team line) and creates it in the chosen team.
 - [ ] `n` → Add existing with `TBB-2` by key adds it to the project; a pasted linear.app URL works too.
-- [ ] `Space` → Remove takes `TBB-2` off the project and leaves the issue in Linear; on a team board (`linear:team:TBA`) Remove is refused and says to archive.
-- [ ] `C` (convert) and the milestone action in the `Space` menu on a Linear board say "Linear issues have no milestones" and "Linear has no drafts".
+- [ ] `Space` → Remove from project takes `TBB-2` off the project and leaves the issue in Linear; on a team board (`linear:team:TBA`) the `Space` menu has no "Remove from project" entry.
+- [ ] `C` says "Linear has no drafts"; the `Space` menu offers no Milestone entry.
 - [ ] A GitHub board behaves exactly as in 0.4 (the testbed GitHub board: move, edit, comment).
 - [ ] On a board whose key stopped working (set `LINEAR_API_KEY` to a revoked key), the setup screen says "Or press B to open another board."; `B` opens the picker and `Esc` returns to the setup screen.

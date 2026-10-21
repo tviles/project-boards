@@ -15,12 +15,12 @@ Linear boards are now editable, with the same keys as GitHub boards. Saving view
 - Editing Linear boards. Move a card between columns (a column shared by several teams moves the issue to its own team's state of that name), close and reopen (`X`), reorder with `J` and `K`, set priority, estimate, cycle and the other fields with `e`, assign one person (`a`), set labels (`t`, including a team's single-choice label groups such as Type), retitle, edit the description, comment, archive and unarchive, remove an issue from a project board, create issues with `n` (in the team of the column you are in, or the team you pick), and add an existing issue by its key or its linear.app URL. Edits show at once and are sent in the background; a failed one is undone and listed in the error log, as on GitHub boards.
 - States, cycles and label groups belong to a team in Linear. A move or edit the issue's team cannot take (a card into a column its team lacks) is refused with a reason instead of being sent. Without a team to put a new issue in, the new-issue form asks for one.
 - Linear's own limits are said plainly: one assignee per issue, no drafts or milestones, estimates are whole numbers, and remove only on project boards (it clears the issue's project; on a team board, archive instead).
+- Linear rewrites Markdown list markers in descriptions (`- ` becomes `* `) when it stores them.
 
 ### Changed
 
 - On a board's setup screen (a missing, rejected or under-scoped token or key for that board's provider), `B` opens the board picker and `Esc` returns to the setup screen. The screen says "Or press B to open another board." and its title reads `setup · r retry · B boards · q quit`. Since 0.4 a board whose credentials stopped working left you stuck on it. The start-time screen with no credentials at all is unchanged.
 - A board picker that is open when the shown board's credentials fail now stays open; `Esc` then shows the setup screen.
-- Linear rewrites Markdown list markers in descriptions (`- ` becomes `* `) when it stores them.
 - An edit key Linear cannot do says "This board can't do that" (milestones and drafts) instead of "Editing Linear boards arrives in 0.5".
 
 ### Fixed
@@ -124,7 +124,8 @@ The first release: a read-only viewer for GitHub Projects boards in herdr.
 - `config.toml` sets poll intervals, `max_items`, the placement, `gh_user` and key bindings; no default key uses Ctrl apart from the fixed `Ctrl+C` quit. `NO_COLOR` is honoured.
 - Releases install a checksum-verified prebuilt binary for macOS and Linux; installing from `main` builds from source.
 
-[Unreleased]: https://github.com/tviles/project-boards/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/tviles/project-boards/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/tviles/project-boards/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/tviles/project-boards/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/tviles/project-boards/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/tviles/project-boards/compare/v0.2.0...v0.3.0
