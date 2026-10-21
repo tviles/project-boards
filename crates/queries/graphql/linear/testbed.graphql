@@ -462,3 +462,42 @@ query ProbeSearch($term: String!) {
     }
   }
 }
+
+# L11-L13 (PR A of the 0.5 plan): client-chosen ids, sortOrder, a refused write.
+mutation ProbeCreateIssueWithId($id: String!, $teamId: String!, $title: String!) {
+  issueCreate(input: { id: $id, teamId: $teamId, title: $title }) {
+    issue {
+      id
+    }
+  }
+}
+
+mutation ProbeCreateCommentWithId($id: String!, $issueId: String!, $body: String!) {
+  commentCreate(input: { id: $id, issueId: $issueId, body: $body }) {
+    comment {
+      id
+    }
+  }
+}
+
+mutation ProbeSetSortOrder($id: String!, $sortOrder: Float!) {
+  issueUpdate(id: $id, input: { sortOrder: $sortOrder }) {
+    issue {
+      sortOrder
+    }
+  }
+}
+
+query ProbeIssueOrder($id: String!) {
+  issue(id: $id) {
+    id
+    sortOrder
+    prioritySortOrder
+  }
+}
+
+query ProbeCommentById($id: String!) {
+  comment(id: $id) {
+    id
+  }
+}

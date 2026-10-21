@@ -3,7 +3,7 @@
 use crate::backend::{Backend, Backends, SyncProfile, profile_for};
 use crate::error::{BackendError, GraphqlErrorEntry};
 use crate::linear::client::board_of;
-use crate::linear::convert::Polled;
+use crate::linear::convert::PolledIssue;
 use crate::model::*;
 use crate::store::ViewList;
 use crate::sync::{SyncEvent, SyncTask, incremental_query, search_query};
@@ -283,7 +283,7 @@ impl Syncer {
                     .fetch_items_page(project, &query, self.profile.poll_page, after.take())
                     .await
                     .map(|page| Page {
-                        nodes: page.nodes.into_iter().map(Polled::Item).collect(),
+                        nodes: page.nodes.into_iter().map(PolledIssue::Item).collect(),
                         total: page.total,
                         next: page.next,
                     }),
@@ -300,8 +300,8 @@ impl Syncer {
                 Ok(page) => {
                     for polled in page.nodes {
                         match polled {
-                            Polled::Item(item) => items.push(item),
-                            Polled::Trashed(id) => removed.push(id),
+                            PolledIssue::Item(item) => items.push(item),
+                            PolledIssue::Trashed(id) => removed.push(id),
                         }
                     }
                     match page.next {

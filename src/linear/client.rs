@@ -2,7 +2,7 @@
 
 use crate::error::{BackendError, GraphqlErrorEntry};
 use crate::github::convert::{nodes, str_of};
-use crate::linear::convert::{self, Polled, TeamInfo};
+use crate::linear::convert::{self, PolledIssue, TeamInfo};
 use crate::linear::ids::board_filter;
 use crate::linear::views::{builtin_views, custom_view, hide_closed_filter};
 use crate::model::*;
@@ -290,7 +290,7 @@ impl Linear {
         since: &str,
         first: u32,
         after: Option<String>,
-    ) -> Result<Page<Polled>, BackendError> {
+    ) -> Result<Page<PolledIssue>, BackendError> {
         let filter = json!({"and": [linear_filter(board)?, {"updatedAt": {"gt": since}}]});
         let request = GraphqlRequest::raw(
             ops::poll_issues::OPERATION_NAME,
@@ -801,8 +801,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page.nodes.len(), 2);
-        assert!(matches!(&page.nodes[0], Polled::Item(i) if i.id == ItemId::new("i-7")));
-        assert_eq!(page.nodes[1], Polled::Trashed(ItemId::new("i-9")));
+        assert!(matches!(&page.nodes[0], PolledIssue::Item(i) if i.id == ItemId::new("i-7")));
+        assert_eq!(page.nodes[1], PolledIssue::Trashed(ItemId::new("i-9")));
         assert_eq!((page.total, page.next), (0, None));
         let req = &t.requests()[0];
         assert_eq!(req.operation_name, "PollIssues");

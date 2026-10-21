@@ -16,7 +16,7 @@ use linear_testbed::{Raw, check_workspace, resolve_key, testbed};
 use project_boards::error::BackendError;
 use project_boards::linear::Linear;
 use project_boards::linear::client::MAX_PAGE;
-use project_boards::linear::convert::Polled;
+use project_boards::linear::convert::PolledIssue;
 use project_boards::linear::ids;
 use project_boards::linear::record::scrubbing_recorder;
 use project_boards::model::*;
@@ -453,7 +453,7 @@ async fn all_view_ids(app: &Linear, board: &BoardKey, query: &ListQuery) -> Vec<
 }
 
 /// Every issue on `board` updated after `since`, page by page.
-async fn all_polled(app: &Linear, board: &BoardKey, since: &str) -> Vec<Polled> {
+async fn all_polled(app: &Linear, board: &BoardKey, since: &str) -> Vec<PolledIssue> {
     let mut polled = Vec::new();
     let mut after = None;
     loop {
@@ -801,7 +801,7 @@ async fn a_poll_sees_an_edit_an_archive_and_a_trash() {
         let polled = all_polled(&app, &project.board, &since).await;
         let item = |id: &str| {
             polled.iter().find_map(|p| match p {
-                Polled::Item(item) if item.id.as_str() == id => Some(item),
+                PolledIssue::Item(item) if item.id.as_str() == id => Some(item),
                 _ => None,
             })
         };
@@ -821,7 +821,7 @@ async fn a_poll_sees_an_edit_an_archive_and_a_trash() {
         assert!(
             polled
                 .iter()
-                .any(|p| matches!(p, Polled::Trashed(id) if id.as_str() == trashed)),
+                .any(|p| matches!(p, PolledIssue::Trashed(id) if id.as_str() == trashed)),
             "the poll lists the trashed issue as trashed"
         );
     })

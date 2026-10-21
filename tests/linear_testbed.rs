@@ -116,3 +116,25 @@ fn the_viewer_check_passes_the_viewer_operation() {
     let body = TestbedViewer::build_query(testbed_viewer::Variables {});
     assert_eq!(viewer_only_check(&body), Ok(()));
 }
+
+#[test]
+fn probes_are_selected_by_pb_probes() {
+    let all = ["l2", "l3", "l4", "l5", "l6", "l1", "l7", "l8", "l9"];
+    assert_eq!(select_probes(None), Ok(all.map(String::from).to_vec()));
+    assert_eq!(
+        select_probes(Some("  ")),
+        Ok(all.map(String::from).to_vec())
+    );
+    assert_eq!(
+        select_probes(Some("l11,l13")),
+        Ok(vec!["l11".to_string(), "l13".to_string()])
+    );
+    assert_eq!(
+        select_probes(Some(" L12 , l12,l11 ")),
+        Ok(vec!["l12".to_string(), "l11".to_string()])
+    );
+    let err = select_probes(Some("l11,l99,nope")).unwrap_err();
+    assert!(err.contains("l99") && err.contains("nope"), "{err}");
+    let named = err.split("; known").next().unwrap();
+    assert!(!named.contains("l11"), "{err}");
+}

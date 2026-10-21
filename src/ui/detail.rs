@@ -281,7 +281,10 @@ pub fn build_doc(
     let Some(detail) = &state.detail else {
         let msg = state.error.clone().unwrap_or_else(|| {
             if crate::model::is_placeholder(&state.item) {
-                "Creating on GitHub…".into()
+                match project.board.provider() {
+                    Provider::Github => "Creating on GitHub…".into(),
+                    Provider::Linear => "Creating in Linear…".into(),
+                }
             } else {
                 "Loading…".into()
             }
@@ -851,6 +854,21 @@ mod tests {
         });
         assert!(screen.contains("Creating on GitHub"), "{screen}");
         assert!(!screen.contains("Loading"));
+    }
+
+    #[test]
+    fn a_linear_placeholder_says_creating_in_linear() {
+        let (mut p, all) = (project(), items());
+        p.board = "linear:team:t1".parse().unwrap();
+        let mut placeholder = all[0].clone();
+        placeholder.id = ItemId::new("local:1");
+        let state = DetailState::new(ItemId::new("local:1"));
+        let doc = build_doc(&placeholder, &p, &state, 60, &Theme::plain());
+        let screen = render_to_string(60, 12, |f| {
+            render_detail(f, f.area(), &doc, &state, &Theme::plain())
+        });
+        assert!(screen.contains("Creating in Linear"), "{screen}");
+        assert!(!screen.contains("on GitHub"), "{screen}");
     }
 
     #[test]

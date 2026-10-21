@@ -98,6 +98,8 @@ pub trait Store: Send {
     fn settle_ok(&mut self, id: OpId, confirmed: Confirmed) -> Option<(ItemId, ItemId)>;
     /// Edit `id` failed: it leaves the pending list and the view is rebuilt without it.
     fn settle_failed(&mut self, id: OpId) -> Option<Op>;
+    /// How long confirmed edits outrank polls.
+    fn window(&self) -> Duration;
 }
 
 /// An edit GitHub confirmed, kept for `RECENT_WINDOW`.
@@ -119,6 +121,7 @@ pub struct MemoryStore {
     recent: Vec<(Instant, Recent)>,
     next_id: OpId,
     clock: Clock,
+    window: Duration,
 }
 
 impl MemoryStore {
@@ -134,7 +137,18 @@ impl MemoryStore {
             recent: Vec::new(),
             next_id: 0,
             clock,
+            window: RECENT_WINDOW,
         }
+    }
+
+    /// Keeps confirmed edits for `window` instead of `RECENT_WINDOW`.
+    pub fn with_window(mut self, window: Duration) -> Self {
+        self.window = window;
+        self
+    }
+
+    pub fn window(&self) -> Duration {
+        self.window
     }
 
     fn rebuild(&mut self) {
@@ -156,7 +170,7 @@ impl MemoryStore {
     fn reapply_recent(&mut self) {
         let now = (self.clock)();
         self.recent
-            .retain(|(at, _)| now.saturating_duration_since(*at) < RECENT_WINDOW);
+            .retain(|(at, _)| now.saturating_duration_since(*at) < self.window);
         let Some(c) = self.confirmed.as_mut() else {
             return;
         };
@@ -181,6 +195,10 @@ impl MemoryStore {
 }
 
 impl Store for MemoryStore {
+    fn window(&self) -> Duration {
+        MemoryStore::window(self)
+    }
+
     fn snapshot(&self) -> Option<&BoardSnapshot> {
         self.derived.as_ref().or(self.confirmed.as_ref())
     }
@@ -574,6 +592,20 @@ mod tests {
         assert_ne!(s.snapshot(), s.confirmed(), "the pending edit shows");
         s.settle_ok(id, Confirmed::Applied);
         assert_eq!(s.snapshot(), s.confirmed(), "settled: one board again");
+    }
+
+    #[test]
+    fn a_shorter_window_lets_polls_win_sooner() {
+        let (s, now) = layered();
+        let mut s = s.with_window(Duration::from_secs(30));
+        let id = s.begin(set("a", "o_done"));
+        s.settle_ok(id, Confirmed::Applied);
+        *now.lock().unwrap() += Duration::from_secs(29);
+        s.apply(StoreUpdate::UpsertItems(vec![stale_a()]));
+        assert_eq!(status_of(s.confirmed(), "a"), "o_done", "inside 30 s");
+        *now.lock().unwrap() += Duration::from_secs(2);
+        s.apply(StoreUpdate::UpsertItems(vec![stale_a()]));
+        assert_eq!(status_of(s.confirmed(), "a"), "Todo", "past 30 s");
     }
 
     #[test]

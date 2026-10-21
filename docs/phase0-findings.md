@@ -123,6 +123,9 @@ Schema: `crates/queries/graphql/linear/schema.graphql`, fetched 2026-10-16 from 
 | L8 | Where do a project board's teams come from? | `Project.teams` (TBA, TBB) matched the team keys found on the project's issues (TBA, TBB) | A project board's teams come from `Project.teams` (one query), no scan of issues needed (observed only for the matching case: the project was created with both teams) |
 | L9 | Can `KEY-123` be looked up directly, and what limits search? | `issue(id: "TBA-1")` works with the identifier. `searchIssues` answered HTTP 200 with one result; no `X-RateLimit-Endpoint-*` header came back, so the documented 30 requests a minute limit is unconfirmed | Reference jumps look up `KEY-123` directly with `issue(id:)`. For 0.5, the documented limit of 30 a minute applies; no header confirms it |
 | L10 | Can `graphql_client` 0.16 build an operation with an `IssueFilter` variable from Linear's schema? | Yes, once the module declares the extra custom-scalar aliases the filter types reach: `TimelessDateOrDuration`, `Duration` and `JSONObject` (plus `JSON`) as `String`. Without them the first error is ``error[E0425]: cannot find type `Duration` in module `super` ``. No measurable build cost: `project-boards-queries` with `--features live` built in 6.9 s without the probe and 6.0 s with it (single timed builds, warm dependencies) | Plan 2 can send built-in tab filters as `IssueFilter` variables; it must add those scalar aliases to the `linear` module when it does. No need for raw requests with a validated twin |
+| L11 | What does a second create with the same client id return, for issues and comments? | The second `issueCreate` with the same client `id` returned HTTP 200 with `INPUT_ERROR` "conflict on insert of Issue" and no issue (the returned id was null); exactly one issue carries the id. The same for `commentCreate`: HTTP 200, `INPUT_ERROR` "conflict on insert of Comment", no comment, one comment carries the id. One run each | A resent create or comment is safe. 0.5's client looks the id up (`issue(id:)` / `comment(id:)`) after any create or comment error and treats a hit as done (spec section 12's fallback, which this measurement confirms). The duplicate answer can be told apart by that message if 0.5's broad fallback is ever narrowed |
+| L12 | Is a written `sortOrder` kept, do neighbours change, does `prioritySortOrder` move? | Setting a third issue's `sortOrder` to the midpoint of two others (-3349.0 between -2895.0 and -3803.0) was kept exactly. The two neighbours' `sortOrder` and the moved issue's `prioritySortOrder` did not change. Measured once, on a small team | Reorder writes midpoints as designed (spec section 8) and never renumbers. `prioritySortOrder` is independent of `sortOrder`, so the priority-sorted-view refusal stays |
+| L13 | What does a refused write look like? | Not run: `PB_LINEAR_READONLY_KEY` was not set | `FORBIDDEN` stays mapped from Linear's documentation (`MissingPermission { Linear, [] }`), unconfirmed, as in L6 |
 
 ### Seed observations
 
@@ -214,3 +217,45 @@ issueDelete: HTTP 200, success: true, codes: none
 - **Tab counts:**
   - The team board has 11 tabs (3 built-in, 8 views).
   - The project board has 14 tabs (3 built-in, the project's view, then 10 team and workspace views).
+
+### 0.5 recording (2026-10-21)
+
+- Linear normalises Markdown list markers when it stores an issue description: a description written with `- one` reads back as `* one` (observed by the live editing suite on 2026-10-21). Consequence: a description edit can read back different from what was typed, so the live suite writes Markdown without lists. The app compares a body edit with the loaded body, so an unchanged re-save after normalisation is a no-op only if the loaded text is the normalised one.
+
+### Probe report (0.5, 2026-10-21)
+
+#### L11: duplicate client-chosen ids
+
+- chosen issue id: dd712e5c-8bd1-40dc-b5f5-512d4bf37dd0
+- issue create, first: HTTP 200; codes: none; first message: -
+- issue create, second: HTTP 200; codes: INPUT_ERROR; first message: conflict on insert of Issue
+- ids returned: first "dd712e5c-8bd1-40dc-b5f5-512d4bf37dd0", second null
+- issues carrying that id (ProbeIssueOrder): 1 (HTTP 200; codes: none; first message: -)
+- chosen comment id: ee3706b8-bd45-4fc1-ae9f-aa58f015afa4
+- comment create, first: HTTP 200; codes: none; first message: -
+- comment create, second: HTTP 200; codes: INPUT_ERROR; first message: conflict on insert of Comment
+- ids returned: first "ee3706b8-bd45-4fc1-ae9f-aa58f015afa4", second null
+- comments carrying that id (ProbeCommentById): 1 (HTTP 200; codes: none; first message: -)
+- trashed throwaway dd712e5c-8bd1-40dc-b5f5-512d4bf37dd0: HTTP 200
+
+#### L12: sortOrder
+
+- before, issue 1: sortOrder Some(-2895.0), prioritySortOrder Some(-8672.0) (HTTP 200; codes: none; first message: -)
+- before, issue 2: sortOrder Some(-3803.0), prioritySortOrder Some(-8844.0) (HTTP 200; codes: none; first message: -)
+- before, issue 3: sortOrder Some(-4892.0), prioritySortOrder Some(-8811.0) (HTTP 200; codes: none; first message: -)
+- midpoint of issues 1 and 2: -3349.0
+- ProbeSetSortOrder on issue 3: HTTP 200; codes: none; first message: -; sortOrder returned: -3349
+- after, issue 1: sortOrder Some(-2895.0), prioritySortOrder Some(-8672.0)
+- after, issue 2: sortOrder Some(-3803.0), prioritySortOrder Some(-8844.0)
+- after, issue 3: sortOrder Some(-3349.0), prioritySortOrder Some(-8811.0)
+- issue 3 kept the midpoint exactly: true
+- issue 1 changed: false; issue 2 changed: false
+- issue 3 prioritySortOrder changed: false
+- pausing 20 s before the clean-up
+- trashed throwaway 524005ed-72c8-42cb-91ef-373cf1fe0a35: HTTP 200
+- trashed throwaway 04e124bb-5a1e-4bcb-84f1-ec939fc69d26: HTTP 200
+- trashed throwaway 85e5141f-2fd3-43f8-9440-c666d3f03eea: HTTP 200
+
+#### L13: a refused write
+
+- not run (PB_LINEAR_READONLY_KEY is not set)
