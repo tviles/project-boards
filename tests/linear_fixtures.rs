@@ -12,7 +12,7 @@ use project_boards::linear::ids;
 use project_boards::linear::record::INVENTED_PEOPLE;
 use project_boards::model::*;
 use project_boards::transport::fixture::FixtureTransport;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,6 +21,42 @@ const RECORDED: &str = "tests/fixtures/recorded/linear";
 const TBA_ID: &str = "152b24bd-5efb-4bf0-8d81-021700a5a8f0";
 const TYPE_GROUP: &str = "5649c6a3-6c17-4e06-a924-e776eb41d42b";
 const COMMENTED_ISSUE: &str = "ea7a48d9-a787-45f0-83cf-ee292ba99925";
+/// The scenario `record_edit_fixtures` (tests/live_linear.rs) records.
+const EDITS: &str = "edits";
+/// The `issueUpdate`s `every_edit` sends, in order: `IssueUpdate__<n>` answers the n-th.
+const EDIT_UPDATES: [&str; 18] = [
+    "status",
+    "priority",
+    "priority cleared",
+    "estimate",
+    "due",
+    "cycle",
+    "type set",
+    "type swapped",
+    "type cleared",
+    "label added",
+    "label removed",
+    "assigned",
+    "unassigned",
+    "title",
+    "description",
+    "reorder",
+    "added to project",
+    "removed from project",
+];
+/// The other operations `every_edit` sends, once each.
+const EDIT_ONCE: [&str; 6] = [
+    "TeamCandidates",
+    "CommentCreate",
+    "IssueArchive",
+    "IssueUnarchive",
+    "IssueCreate",
+    "IssueByKey",
+];
+/// What `every_edit` sets (its `EDIT_DUE_DATE`, `EDIT_ESTIMATE` and `EDIT_PRIORITY`).
+const EDIT_DUE_DATE: &str = "2026-12-01";
+const EDIT_ESTIMATE: f64 = 3.0;
+const EDIT_PRIORITY: u8 = 2;
 
 /// The scenario's files as (operation, number, path).
 fn files(scenario: &str) -> Vec<(String, usize, PathBuf)> {
@@ -161,7 +197,12 @@ fn recorded_fixtures_hold_only_invented_people() {
     let url_key = linear_testbed::testbed().url_key;
     let mut checked = 0;
     let mut persons = 0;
-    for scenario in ["team-board", "project-board", "boards", "poll"] {
+    let mut scenarios = vec!["team-board", "project-board", "boards", "poll"];
+    // Recorded by `record_edit_fixtures`; checked once it exists.
+    if Path::new(RECORDED).join(EDITS).is_dir() {
+        scenarios.push(EDITS);
+    }
+    for scenario in scenarios {
         for (_, _, path) in files(scenario) {
             let text = std::fs::read_to_string(&path).unwrap();
             let body: Value = serde_json::from_str(&text).unwrap();
@@ -477,4 +518,139 @@ async fn poll_fixture_decodes() {
         })
         .collect();
     assert_eq!(keys, ["TBA-16", "TBA-20"]);
+}
+
+/// The option or cycle id `item` has in `field`.
+fn chosen<'a>(item: &'a Item, field: &str) -> Option<&'a str> {
+    match item.values.get(&fid(field))? {
+        FieldValue::SingleSelect { option_id, .. } => Some(option_id.as_str()),
+        FieldValue::Iteration { iteration_id, .. } => Some(iteration_id.as_str()),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn edit_fixtures_decode() {
+    let dir = Path::new(RECORDED).join(EDITS);
+    if !dir.is_dir() {
+        eprintln!(
+            "{} is not recorded yet (record_edit_fixtures); nothing to replay",
+            dir.display()
+        );
+        return;
+    }
+    // Exactly what the scenario sends, and nothing else.
+    let recorded = files(EDITS);
+    let count = |operation: &str| recorded.iter().filter(|(o, ..)| o == operation).count();
+    assert_eq!(count("IssueUpdate"), EDIT_UPDATES.len());
+    for operation in EDIT_ONCE {
+        assert_eq!(count(operation), 1, "{operation}");
+    }
+    assert_eq!(recorded.len(), EDIT_UPDATES.len() + EDIT_ONCE.len());
+
+    // The replay answers each operation in recorded order, whatever is sent.
+    let linear = replay(EDITS);
+    let mut updates = Vec::new();
+    for step in EDIT_UPDATES {
+        let item = linear
+            .update_issue("replayed", json!({}))
+            .await
+            .unwrap_or_else(|e| panic!("{step}: {e}"));
+        updates.push(item);
+    }
+    let at = |step: &str| &updates[EDIT_UPDATES.iter().position(|s| *s == step).unwrap()];
+    let throwaway = &updates[0];
+    assert!(
+        updates.iter().all(|i| i.id == throwaway.id),
+        "every update is of the one throwaway issue"
+    );
+    assert!(key(throwaway).starts_with("TBA-"), "{}", key(throwaway));
+    assert!(at("title").title().starts_with("pb-live throwaway"));
+
+    let high = ids::priority_option(EDIT_PRIORITY);
+    assert!(chosen(at("status"), ids::STATUS).is_some());
+    assert_eq!(chosen(at("priority"), ids::PRIORITY), Some(high.as_str()));
+    assert_eq!(at("priority cleared").value(&fid(ids::PRIORITY)), None);
+    assert_eq!(
+        at("estimate").value(&fid(ids::ESTIMATE)),
+        Some(&FieldValue::Number(EDIT_ESTIMATE))
+    );
+    assert_eq!(
+        at("due").value(&fid(ids::DUE)),
+        Some(&FieldValue::Date(EDIT_DUE_DATE.into()))
+    );
+    assert!(matches!(
+        at("cycle").value(&fid(ids::CYCLE)),
+        Some(FieldValue::Iteration { .. })
+    ));
+
+    // The Type group: a label, another in its place, then none.
+    let group = ids::group(TYPE_GROUP);
+    let set = chosen(at("type set"), group.as_str()).expect("a Type label");
+    let swapped = chosen(at("type swapped"), group.as_str()).expect("a Type label");
+    assert_ne!(set, swapped);
+    assert_eq!(at("type cleared").value(&group), None);
+
+    let labels = |step: &str| at(step).content_fields.label_ids.len();
+    assert_eq!(labels("label added"), labels("type cleared") + 1);
+    assert_eq!(labels("label removed"), labels("type cleared"));
+
+    let assigned = &at("assigned").content_fields.assignee_ids;
+    assert_eq!(assigned.len(), 1);
+    assert!(assigned.keys().all(|name| is_invented(name)));
+    assert!(at("unassigned").content_fields.assignee_ids.is_empty());
+    assert_eq!(at("unassigned").value(&fid(ids::ASSIGNEES)), None);
+
+    let order = |step: &str| at(step).content_fields.sort_order;
+    assert!(order("reorder").is_some());
+    assert_ne!(order("reorder"), order("description"));
+
+    let project = |step: &str| match at(step).value(&fid(ids::PROJECT)) {
+        Some(FieldValue::SingleSelect { name, .. }) => Some(name.as_str()),
+        _ => None,
+    };
+    assert_eq!(project("removed from project"), None);
+    assert_eq!(project("added to project"), Some("Testbed project"));
+
+    // The candidates: members (invented) and labels, without the Type group or its labels.
+    let candidates = linear.team_candidates(TBA_ID).await.unwrap();
+    assert!(!candidates.users.is_empty());
+    assert!(candidates.users.iter().all(|u| is_invented(&u.login)));
+    assert!(!candidates.labels.is_empty());
+    for name in ["Type", "Bug", "Feature", "Chore"] {
+        assert!(
+            candidates.labels.iter().all(|l| l.name != name),
+            "{name} is offered as a loose label"
+        );
+    }
+
+    linear
+        .create_comment("replayed", "replayed", "replayed")
+        .await
+        .unwrap();
+    // A payload without its issue confirms as applied (plan Decision 7).
+    if let Some(item) = linear.archive("replayed").await.unwrap() {
+        assert!(item.archived);
+    }
+    if let Some(item) = linear.unarchive("replayed").await.unwrap() {
+        assert!(!item.archived);
+    }
+
+    // The new issue, created with its presets; no client id, so no fallback lookup.
+    let created = linear.create_issue(json!({})).await.unwrap();
+    assert_ne!(created.id, throwaway.id);
+    assert!(key(&created).starts_with("TBA-"), "{}", key(&created));
+    assert_eq!(
+        chosen(&created, ids::STATUS),
+        chosen(at("status"), ids::STATUS)
+    );
+    assert_eq!(chosen(&created, ids::PRIORITY), Some(high.as_str()));
+    assert_eq!(chosen(&created, group.as_str()), Some(set));
+
+    let by_key = linear
+        .issue_by_key("TBA-1")
+        .await
+        .unwrap()
+        .expect("the issue");
+    assert_eq!(by_key.id, throwaway.id);
 }
