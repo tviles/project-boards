@@ -954,7 +954,9 @@ async fn a_missing_board_is_not_found() {
 const EDIT_DUE_DATE: &str = "2026-12-01";
 const EDIT_ESTIMATE: f64 = 3.0;
 const EDIT_PRIORITY: u8 = 2;
-const EDIT_BODY: &str = "Edited by the **live suite**.\n\n- one\n- two";
+/// No list: Linear normalises list markers on write (`- ` becomes `* `, observed 2026-10-21),
+/// so a list would not read back byte for byte. A paragraph and bold text are kept as sent.
+const EDIT_BODY: &str = "Edited by the **live suite**.\n\nSecond paragraph.";
 /// The testbed's workspace-level single-select label group (no team owns it).
 const TYPE_GROUP_NAME: &str = "Type";
 
