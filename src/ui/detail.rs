@@ -880,6 +880,7 @@ mod tests {
             url_key: "testbed-workspace".into(),
             viewer_id: "u-1".into(),
             team_keys: vec!["TBA".into()],
+            ..Default::default()
         });
         let field = |id: &str, name: &str, kind: FieldKind| Field {
             id: FieldId::new(id),

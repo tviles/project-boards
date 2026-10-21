@@ -1,14 +1,16 @@
 //! One `Op` per user action. `apply` is what the edit does to a board snapshot; the store
 //! replays pending ops with it on top of the confirmed board. `send` (ops::send) carries
-//! an op to GitHub. Generated GraphQL types never appear here.
+//! an op to GitHub or Linear (`ops::linear` builds Linear's inputs). Generated GraphQL
+//! types never appear here.
 
+pub mod linear;
 pub mod queue;
 pub mod send;
 
 use crate::model::{
-    CloseReason, ContentFields, ContentHit, ContentId, ContentRef, ContentState, FieldId,
-    FieldKind, FieldValue, Item, ItemContent, ItemId, Label, LabelRef, MilestoneRef, RepoRef,
-    StateReason, UserRef,
+    CloseReason, ContentFields, ContentHit, ContentId, ContentRef, ContentState, Field, FieldId,
+    FieldKind, FieldValue, Item, ItemContent, ItemId, Label, LabelRef, MilestoneRef, OptionKind,
+    RepoRef, StateReason, TeamMeta, UserRef,
 };
 use crate::store::BoardSnapshot;
 use std::collections::HashMap;
@@ -31,6 +33,18 @@ pub enum NewItem {
     Existing {
         hit: ContentHit,
     },
+    /// A new Linear issue in `team`. `id` is the client UUID made with the op, so a resend
+    /// names the same issue (spec section 9).
+    LinearIssue {
+        id: String,
+        team: TeamMeta,
+        title: String,
+        body: String,
+    },
+    /// An existing Linear issue, found by key or URL, added to a project board.
+    LinearExisting {
+        issue: Box<Item>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,9 +61,11 @@ pub enum Op {
         field: FieldId,
     },
     /// Puts `item` right after `after` in the project's order; `None` puts it first.
+    /// `sort_order`: the item's new Linear `sortOrder`; `None` on GitHub.
     Reorder {
         item: ItemId,
         after: Option<ItemId>,
+        sort_order: Option<f64>,
     },
     /// Adds and removes assignees; `all` is the whole new list, which a draft sends.
     Assignees {
@@ -81,10 +97,13 @@ pub enum Op {
         content: ContentId,
         body: String,
     },
+    /// `client_id`: the Linear comment's client UUID, made with the op, so a resend names
+    /// the same comment; `None` on GitHub.
     Comment {
         item: ItemId,
         content: ContentId,
         body: String,
+        client_id: Option<String>,
     },
     /// Closes an issue (with a reason) or a pull request (`reason: None`).
     Close {
@@ -109,6 +128,14 @@ pub enum Op {
     /// Removes the item from the project (a draft is deleted with it).
     Remove {
         item: ItemId,
+    },
+    /// Sets (`Some`) or clears (`None`) a Linear single-select label group field.
+    /// `replaces`: the group's label the issue has now, which Linear is told to remove.
+    GroupLabel {
+        item: ItemId,
+        field: FieldId,
+        value: Option<FieldValue>,
+        replaces: Option<String>,
     },
     /// A new item, shown at once as the placeholder `temp`; `presets` are the column and
     /// swimlane values it was created in.
@@ -221,7 +248,30 @@ fn set_state(content: &mut ItemContent, to: ContentState) {
     }
 }
 
-/// What a new item looks like until GitHub has created it.
+/// The kind of the single-select option `value` names in `field`; `None` for GitHub
+/// options, other values, and an option the field no longer has.
+fn option_kind(field: &Field, value: &FieldValue) -> Option<OptionKind> {
+    let (FieldKind::SingleSelect { options }, FieldValue::SingleSelect { option_id, .. }) =
+        (&field.kind, value)
+    else {
+        return None;
+    };
+    options.iter().find(|o| &o.id == option_id)?.kind
+}
+
+/// An issue's state and reason in a workflow state of `kind` (the Linear spec's section 4).
+fn state_of_kind(kind: OptionKind) -> (ContentState, Option<StateReason>) {
+    match kind {
+        OptionKind::Completed => (ContentState::Closed, Some(StateReason::Completed)),
+        OptionKind::Canceled => (ContentState::Closed, Some(StateReason::NotPlanned)),
+        OptionKind::Duplicate => (ContentState::Closed, Some(StateReason::Duplicate)),
+        OptionKind::Triage | OptionKind::Backlog | OptionKind::Unstarted | OptionKind::Started => {
+            (ContentState::Open, None)
+        }
+    }
+}
+
+/// What a new item looks like until GitHub or Linear has created it.
 fn placeholder(temp: &ItemId, new: &NewItem, presets: &[(FieldId, FieldValue)]) -> Item {
     let content = match new {
         NewItem::Draft { title, .. } => ItemContent::Draft {
@@ -264,6 +314,24 @@ fn placeholder(temp: &ItemId, new: &NewItem, presets: &[(FieldId, FieldValue)]) 
                 }
             }
         }
+        // No number or key until Linear has created it, so it shows as `new`.
+        NewItem::LinearIssue { team, title, .. } => ItemContent::Issue {
+            reference: ContentRef {
+                container: team.key.clone(),
+                number: 0,
+                key: None,
+                url: String::new(),
+            },
+            title: title.clone(),
+            state: ContentState::Open,
+        },
+        // The issue as found, under the temp id, with the presets it is added with.
+        NewItem::LinearExisting { issue } => {
+            let mut item = (**issue).clone();
+            item.id = temp.clone();
+            item.values.extend(presets.iter().cloned());
+            return item;
+        }
     };
     Item {
         id: temp.clone(),
@@ -275,8 +343,19 @@ fn placeholder(temp: &ItemId, new: &NewItem, presets: &[(FieldId, FieldValue)]) 
     }
 }
 
-fn reorder(snap: &mut BoardSnapshot, item: &ItemId, after: Option<&ItemId>) {
-    if !snap.items.contains_key(item) || !move_after(&mut snap.order, item, after) {
+fn reorder(
+    snap: &mut BoardSnapshot,
+    item: &ItemId,
+    after: Option<&ItemId>,
+    sort_order: Option<f64>,
+) {
+    let Some(i) = snap.items.get_mut(item) else {
+        return;
+    };
+    if sort_order.is_some() {
+        i.content_fields.sort_order = sort_order;
+    }
+    if !move_after(&mut snap.order, item, after) {
         return;
     }
     let rank: HashMap<ItemId, usize> = snap
@@ -307,7 +386,8 @@ impl Op {
             | Op::Convert { item, .. }
             | Op::Archive { item }
             | Op::Unarchive { item }
-            | Op::Remove { item } => item,
+            | Op::Remove { item }
+            | Op::GroupLabel { item, .. } => item,
             Op::Create { temp, .. } => temp,
         }
     }
@@ -359,6 +439,7 @@ impl Op {
             Op::Archive { .. } => "Archive",
             Op::Unarchive { .. } => "Unarchive",
             Op::Remove { .. } => "Remove",
+            Op::GroupLabel { .. } => "GroupLabel",
             Op::Create { .. } => "Create",
         }
     }
@@ -369,11 +450,19 @@ impl Op {
         match self {
             Op::SetField { item, field, value } => {
                 // A field the project does not have cannot be set.
-                if snap.project.field(field).is_none() {
+                let Some(f) = snap.project.field(field) else {
                     return;
-                }
+                };
+                // A Linear state's kind opens or closes the issue (plan Decision 5); GitHub
+                // options have none.
+                let kind = option_kind(f, value);
                 if let Some(i) = snap.items.get_mut(item) {
                     i.values.insert(field.clone(), value.clone());
+                    if let Some(kind) = kind {
+                        let (state, reason) = state_of_kind(kind);
+                        set_state(&mut i.content, state);
+                        i.content_fields.state_reason = reason;
+                    }
                 }
             }
             Op::ClearField { item, field } => {
@@ -381,7 +470,28 @@ impl Op {
                     i.values.remove(field);
                 }
             }
-            Op::Reorder { item, after } => reorder(snap, item, after.as_ref()),
+            Op::Reorder {
+                item,
+                after,
+                sort_order,
+            } => reorder(snap, item, after.as_ref(), *sort_order),
+            Op::GroupLabel {
+                item, field, value, ..
+            } => match value {
+                Some(value) => {
+                    if snap.project.field(field).is_none() {
+                        return;
+                    }
+                    if let Some(i) = snap.items.get_mut(item) {
+                        i.values.insert(field.clone(), value.clone());
+                    }
+                }
+                None => {
+                    if let Some(i) = snap.items.get_mut(item) {
+                        i.values.remove(field);
+                    }
+                }
+            },
             Op::Assignees {
                 item, add, remove, ..
             } => {
@@ -532,7 +642,19 @@ impl Op {
                     value.display()
                 )
             }
-            Op::ClearField { field, .. } => format!("clear {} on '{title}'", field_name(field)),
+            Op::ClearField { field, .. }
+            | Op::GroupLabel {
+                field, value: None, ..
+            } => format!("clear {} on '{title}'", field_name(field)),
+            Op::GroupLabel {
+                field,
+                value: Some(value),
+                ..
+            } => format!(
+                "set {} to {} on '{title}'",
+                field_name(field),
+                value.display()
+            ),
             Op::Reorder { .. } => format!("reorder '{title}'"),
             Op::Assignees { .. } => format!("change assignees on '{title}'"),
             Op::Labels { .. } => format!("change labels on '{title}'"),
@@ -565,6 +687,10 @@ impl Op {
                     hit.repo
                 ),
                 NewItem::Existing { hit } => format!("add {}#{}", hit.repo, hit.number),
+                NewItem::LinearIssue { team, title, .. } => {
+                    format!("create '{}' in {}", short(title), team.key)
+                }
+                NewItem::LinearExisting { issue } => format!("add {}", issue.ref_label()),
             },
         }
     }
@@ -631,6 +757,7 @@ mod tests {
         Op::Reorder {
             item: ItemId::new("gone"),
             after: None,
+            sort_order: None,
         }
         .apply(&mut s);
         assert_eq!(s, before);
@@ -650,6 +777,7 @@ mod tests {
         let op = Op::Reorder {
             item: ItemId::new("e"),
             after: Some(ItemId::new("a")),
+            sort_order: None,
         };
         op.apply(&mut s);
         op.apply(&mut s);
@@ -658,6 +786,7 @@ mod tests {
         Op::Reorder {
             item: ItemId::new("c"),
             after: None,
+            sort_order: None,
         }
         .apply(&mut s);
         assert_eq!(ids(&s.order), ["c", "a", "e", "b", "d"]);
@@ -665,6 +794,7 @@ mod tests {
         Op::Reorder {
             item: ItemId::new("a"),
             after: Some(ItemId::new("d")),
+            sort_order: None,
         }
         .apply(&mut s);
         assert_eq!(ids(&s.order), ["c", "e", "b", "d", "a"]);
@@ -702,22 +832,26 @@ mod tests {
         Op::Reorder {
             item: ItemId::new("b"),
             after: Some(ItemId::new("gone")),
+            sort_order: None,
         }
         .apply(&mut s);
         Op::Reorder {
             item: ItemId::new("b"),
             after: Some(ItemId::new("b")),
+            sort_order: None,
         }
         .apply(&mut s);
         Op::Reorder {
             item: ItemId::new("b"),
             after: Some(ItemId::new("a")),
+            sort_order: None,
         }
         .apply(&mut s);
         assert_eq!(s, before, "missing after, after == item, already in place");
         let first = Op::Reorder {
             item: ItemId::new("c"),
             after: None,
+            sort_order: None,
         };
         first.apply(&mut s);
         first.apply(&mut s);
@@ -737,6 +871,7 @@ mod tests {
         Op::Reorder {
             item: ItemId::new("d"),
             after: None,
+            sort_order: None,
         }
         .apply(&mut s);
         assert_eq!(
@@ -748,6 +883,7 @@ mod tests {
         Op::Reorder {
             item: ItemId::new("a"),
             after: Some(ItemId::new("b")),
+            sort_order: None,
         }
         .apply(&mut s);
         assert_eq!(ids(&s.views[&ViewId::new("V_board")].ids), ["d", "a", "zz"]);
@@ -807,7 +943,8 @@ mod tests {
         assert_eq!(
             Op::Reorder {
                 item: ItemId::new("zz"),
-                after: None
+                after: None,
+                sort_order: None,
             }
             .describe(Some(&s)),
             "reorder 'an item'"
@@ -960,6 +1097,7 @@ mod tests {
             item: a(),
             content: content(),
             body: "x".into(),
+            client_id: None,
         }
         .apply(&mut s);
         assert_eq!(
@@ -992,7 +1130,8 @@ mod tests {
             Op::Comment {
                 item: a(),
                 content: content(),
-                body: "x".into()
+                body: "x".into(),
+                client_id: None,
             }
             .describe(Some(&s)),
             "comment on 'Fix crash'"
@@ -1314,6 +1453,287 @@ mod tests {
             assert_eq!((op.name(), op.describe(Some(&s)).as_str()), (name, text));
         }
         assert_eq!(create("local:4", new_issue()).item().as_str(), "local:4");
+    }
+
+    /// Gives `F_status` Linear's state kinds, with a canceled and a duplicate state.
+    fn with_state_kinds(s: &mut BoardSnapshot) {
+        use crate::model::{OptionColor, OptionKind, SelectOption};
+        let field = s
+            .project
+            .fields
+            .iter_mut()
+            .find(|f| f.id.as_str() == "F_status")
+            .unwrap();
+        let FieldKind::SingleSelect { options } = &mut field.kind else {
+            panic!("Status is single-select")
+        };
+        for o in options.iter_mut() {
+            o.kind = match o.id.as_str() {
+                "o_todo" => Some(OptionKind::Unstarted),
+                "o_prog" => Some(OptionKind::Started),
+                "o_done" => Some(OptionKind::Completed),
+                _ => None,
+            };
+        }
+        for (id, name, kind) in [
+            ("o_cancel", "Canceled", OptionKind::Canceled),
+            ("o_dup", "Duplicate", OptionKind::Duplicate),
+        ] {
+            options.push(SelectOption {
+                id: OptionId::new(id),
+                name: name.into(),
+                color: OptionColor::Gray,
+                kind: Some(kind),
+            });
+        }
+    }
+
+    fn state_of(s: &BoardSnapshot, item: &str) -> (ContentState, Option<StateReason>) {
+        let i = &s.items[&ItemId::new(item)];
+        let ItemContent::Issue { state, .. } = i.content else {
+            panic!("{item} is an issue")
+        };
+        (state, i.content_fields.state_reason)
+    }
+
+    fn set_status(item: &str, option: &str, name: &str) -> Op {
+        Op::SetField {
+            item: ItemId::new(item),
+            field: FieldId::new("F_status"),
+            value: FieldValue::SingleSelect {
+                option_id: OptionId::new(option),
+                name: name.into(),
+            },
+        }
+    }
+
+    /// Plan Decision 5: a card moved to a completed or canceled state shows closed at once.
+    #[test]
+    fn a_state_option_with_a_kind_closes_or_opens_the_item() {
+        let mut s = snapshot();
+        with_state_kinds(&mut s);
+        for (option, name, state) in [
+            (
+                "o_done",
+                "Done",
+                (ContentState::Closed, Some(StateReason::Completed)),
+            ),
+            (
+                "o_cancel",
+                "Canceled",
+                (ContentState::Closed, Some(StateReason::NotPlanned)),
+            ),
+            (
+                "o_dup",
+                "Duplicate",
+                (ContentState::Closed, Some(StateReason::Duplicate)),
+            ),
+            ("o_prog", "In Progress", (ContentState::Open, None)),
+            ("o_todo", "Todo", (ContentState::Open, None)),
+        ] {
+            let op = set_status("a", option, name);
+            op.apply(&mut s);
+            let once = s.clone();
+            op.apply(&mut s);
+            assert_eq!(s, once, "{name}");
+            assert_eq!(state_of(&s, "a"), state, "{name}");
+            assert_eq!(status(&s, "a").as_deref(), Some(name));
+        }
+        // An option the field no longer has sets the value and leaves the state.
+        set_status("a", "o_done", "Done").apply(&mut s);
+        set_status("a", "o_deleted", "Blocked").apply(&mut s);
+        assert_eq!(
+            state_of(&s, "a"),
+            (ContentState::Closed, Some(StateReason::Completed))
+        );
+    }
+
+    #[test]
+    fn github_options_leave_the_state_alone() {
+        let mut s = snapshot();
+        set_status("a", "o_done", "Done").apply(&mut s);
+        assert_eq!(state_of(&s, "a"), (ContentState::Open, None));
+        Op::Close {
+            item: ItemId::new("a"),
+            content: content(),
+            reason: Some(CloseReason::NotPlanned),
+        }
+        .apply(&mut s);
+        set_status("a", "o_todo", "Todo").apply(&mut s);
+        assert_eq!(
+            state_of(&s, "a"),
+            (ContentState::Closed, Some(StateReason::NotPlanned))
+        );
+        assert_eq!(status(&s, "a").as_deref(), Some("Todo"));
+    }
+
+    #[test]
+    fn a_reorder_with_a_sort_order_sets_it() {
+        let mut s = snapshot();
+        let sort_order =
+            |s: &BoardSnapshot, item: &str| s.items[&ItemId::new(item)].content_fields.sort_order;
+        let op = Op::Reorder {
+            item: ItemId::new("e"),
+            after: Some(ItemId::new("a")),
+            sort_order: Some(1.5),
+        };
+        op.apply(&mut s);
+        let once = s.clone();
+        op.apply(&mut s);
+        assert_eq!(s, once);
+        assert_eq!(ids(&s.order), ["a", "e", "b", "c", "d"]);
+        assert_eq!(sort_order(&s, "e"), Some(1.5));
+        assert_eq!(sort_order(&s, "a"), None, "only the moved item changes");
+        // Without one (GitHub), the item keeps the sort order it has.
+        Op::Reorder {
+            item: ItemId::new("e"),
+            after: None,
+            sort_order: None,
+        }
+        .apply(&mut s);
+        assert_eq!(ids(&s.order), ["e", "a", "b", "c", "d"]);
+        assert_eq!(sort_order(&s, "e"), Some(1.5));
+        let before = s.clone();
+        Op::Reorder {
+            item: ItemId::new("gone"),
+            after: None,
+            sort_order: Some(9.0),
+        }
+        .apply(&mut s);
+        assert_eq!(s, before);
+    }
+
+    #[test]
+    fn group_label_sets_and_clears() {
+        use crate::model::{Field, OptionColor, SelectOption};
+        let mut s = snapshot();
+        let field = FieldId::new("linear:group:lg-type");
+        let option = |id: &str, name: &str| SelectOption {
+            id: OptionId::new(id),
+            name: name.into(),
+            color: OptionColor::Hex(0xeb5757),
+            kind: None,
+        };
+        s.project.fields.push(Field {
+            id: field.clone(),
+            name: "Type".into(),
+            kind: FieldKind::SingleSelect {
+                options: vec![option("l-bug", "Bug"), option("l-feat", "Feature")],
+            },
+        });
+        let feature = FieldValue::SingleSelect {
+            option_id: OptionId::new("l-feat"),
+            name: "Feature".into(),
+        };
+        let set = Op::GroupLabel {
+            item: ItemId::new("a"),
+            field: field.clone(),
+            value: Some(feature.clone()),
+            replaces: Some("l-bug".into()),
+        };
+        set.apply(&mut s);
+        let once = s.clone();
+        set.apply(&mut s);
+        assert_eq!(s, once);
+        assert_eq!(item_a(&s).value(&field), Some(&feature));
+        assert_eq!(set.name(), "GroupLabel");
+        assert_eq!(set.item().as_str(), "a");
+        assert_eq!(set.describe(Some(&s)), "set Type to Feature on 'Fix crash'");
+        let clear = Op::GroupLabel {
+            item: ItemId::new("a"),
+            field: field.clone(),
+            value: None,
+            replaces: Some("l-feat".into()),
+        };
+        clear.apply(&mut s);
+        let once = s.clone();
+        clear.apply(&mut s);
+        assert_eq!(s, once);
+        assert_eq!(item_a(&s).value(&field), None);
+        assert_eq!(clear.describe(Some(&s)), "clear Type on 'Fix crash'");
+        // A group the project does not have cannot be set.
+        let before = s.clone();
+        Op::GroupLabel {
+            item: ItemId::new("a"),
+            field: FieldId::new("linear:group:lg-gone"),
+            value: Some(feature),
+            replaces: None,
+        }
+        .apply(&mut s);
+        assert_eq!(s, before);
+    }
+
+    #[test]
+    fn linear_creates_show_the_new_issue_or_the_found_one() {
+        use crate::model::TeamMeta;
+        let mut s = snapshot();
+        let presets = vec![(FieldId::new("F_status"), done())];
+        let create = Op::Create {
+            temp: ItemId::new("local:1"),
+            new: NewItem::LinearIssue {
+                id: "0f8e7d6c-5b4a-4938-8271-605f4e3d2c1b".into(),
+                team: TeamMeta {
+                    id: "team-a".into(),
+                    key: "TBA".into(),
+                },
+                title: "Write the docs".into(),
+                body: "b".into(),
+            },
+            presets: presets.clone(),
+        };
+        create.apply(&mut s);
+        create.apply(&mut s);
+        let p = &s.items[&ItemId::new("local:1")];
+        assert_eq!(
+            (p.title(), p.ref_label().as_str()),
+            ("Write the docs", "new")
+        );
+        assert_eq!(p.reference().unwrap().container, "TBA");
+        assert!(matches!(
+            p.content,
+            ItemContent::Issue {
+                state: ContentState::Open,
+                ..
+            }
+        ));
+        assert_eq!(status(&s, "local:1").as_deref(), Some("Done"));
+        assert_eq!(create.describe(None), "create 'Write the docs' in TBA");
+        assert_eq!(
+            create.add_created("i-9"),
+            None,
+            "Linear never splits a create"
+        );
+
+        let mut found = s.items[&ItemId::new("b")].clone();
+        found.id = ItemId::new("i-12");
+        if let ItemContent::Issue { reference, .. } = &mut found.content {
+            reference.key = Some("TBA-12".into());
+        }
+        let add = Op::Create {
+            temp: ItemId::new("local:2"),
+            new: NewItem::LinearExisting {
+                issue: Box::new(found.clone()),
+            },
+            presets,
+        };
+        add.apply(&mut s);
+        let p = &s.items[&ItemId::new("local:2")];
+        assert_eq!(p.id.as_str(), "local:2", "the placeholder has the temp id");
+        assert_eq!(
+            (p.title(), p.ref_label().as_str()),
+            (found.title(), "TBA-12")
+        );
+        assert_eq!(
+            status(&s, "local:2").as_deref(),
+            Some("Done"),
+            "presets show"
+        );
+        assert_eq!(
+            p.value(&FieldId::new("F_prio")),
+            found.value(&FieldId::new("F_prio")),
+            "its own values stay"
+        );
+        assert_eq!(add.describe(None), "add TBA-12");
     }
 
     /// Controller ruling E15: a retry after "created but not added" only adds.

@@ -176,6 +176,21 @@ fn label_groups(schema: &Value) -> Vec<Field> {
     groups
 }
 
+/// The team id owning each workflow state, cycle and team-level single-select label group
+/// of `schema` (the `BoardSchema` response), by its id. Workspace-level groups, multi-select
+/// groups and plain labels are absent.
+pub fn owners_from_wire(schema: &Value) -> BTreeMap<String, String> {
+    let groups = nodes(schema, "issueLabels").into_iter().filter(|l| {
+        l["isGroup"].as_bool() == Some(true) && is_single_select_group(l["groupType"].as_str())
+    });
+    nodes(schema, "workflowStates")
+        .into_iter()
+        .chain(nodes(schema, "cycles"))
+        .chain(groups)
+        .filter_map(|n| Some((n["id"].as_str()?.into(), n["team"]["id"].as_str()?.into())))
+        .collect()
+}
+
 /// The board's cycles: those not past by start, and the past ones as `completed`.
 fn cycles(schema: &Value, teams: &[TeamInfo]) -> FieldKind {
     let mut cycles: Vec<(bool, Iteration)> = nodes(schema, "cycles")
@@ -225,7 +240,8 @@ fn days_between(start: &str, end: &str) -> u32 {
 }
 
 /// A Linear board's `Project`. Its id is the board key's string (Decision 7); Linear boards
-/// are read-only in 0.4 and link no repositories.
+/// link no repositories. The viewer can update it: what Linear allows is decided by the
+/// provider's capabilities (`model::caps`) and by Linear itself.
 pub fn project_from_wire(
     board: &BoardKey,
     title: &str,
@@ -240,7 +256,7 @@ pub fn project_from_wire(
         owner_kind: OwnerKind::Organization,
         title: title.to_string(),
         url: url.to_string(),
-        viewer_can_update: false,
+        viewer_can_update: true,
         fields,
         views,
         linked_repos: Vec::new(),
@@ -570,7 +586,14 @@ pub(crate) mod tests {
                "groupType": group, "parent": parent.map(|p| json!({"id": p}))})
     }
 
-    /// A `BoardSchema` response for TBA (cycles on) and TBB (cycles off).
+    /// `node` with the team `team`; a label without one is the workspace's.
+    fn of_team(mut node: Value, team: &str) -> Value {
+        node["team"] = json!({"id": team});
+        node
+    }
+
+    /// A `BoardSchema` response for TBA (cycles on) and TBB (cycles off). The Type group is
+    /// TBA's; the Size group the workspace's.
     pub(crate) fn schema_json() -> Value {
         json!({
             "workflowStates": {"nodes": [
@@ -585,10 +608,10 @@ pub(crate) mod tests {
                 state("s-b-paused", "Paused", "paused", 4.0, "team-b"),
             ]},
             "issueLabels": {"nodes": [
-                label(TYPE_GROUP, "Type", Some("singleSelect"), None),
-                label("l-bug", "Bug", None, Some(TYPE_GROUP)),
+                of_team(label(TYPE_GROUP, "Type", Some("singleSelect"), None), "team-a"),
+                of_team(label("l-bug", "Bug", None, Some(TYPE_GROUP)), "team-a"),
                 label("l-feature", "Feature", None, Some(TYPE_GROUP)),
-                label("lg-area", "Area", Some("multiSelect"), None),
+                of_team(label("lg-area", "Area", Some("multiSelect"), None), "team-b"),
                 label("l-ui", "UI", None, Some("lg-area")),
                 label("l-docs", "docs", None, None),
                 // A group with no type behaves as single-select.
@@ -806,7 +829,46 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_linear_project_is_keyed_by_its_board_and_read_only() {
+    fn owners_cover_states_cycles_and_team_groups() {
+        let owners = owners_from_wire(&schema_json());
+        let expected: BTreeMap<String, String> = [
+            ("s-a-todo", "team-a"),
+            ("s-a-done", "team-a"),
+            ("s-a-triage", "team-a"),
+            ("s-a-prog", "team-a"),
+            ("s-b-todo", "team-b"),
+            ("s-b-review", "team-b"),
+            ("s-b-done", "team-b"),
+            ("s-b-paused", "team-b"),
+            ("c-now", "team-a"),
+            ("c-past", "team-a"),
+            (TYPE_GROUP, "team-a"),
+        ]
+        .into_iter()
+        .map(|(id, team)| (id.to_string(), team.to_string()))
+        .collect();
+        // Not the workspace's Size group, the multi-select Area group, or a plain label.
+        assert_eq!(owners, expected);
+        assert!(owners_from_wire(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn linear_boards_are_editable() {
+        let p = project_from_wire(
+            &BoardKey::LinearTeam {
+                id: "team-a".into(),
+            },
+            "Team A",
+            "https://linear.app/acme/team/TBA",
+            LinearMeta::default(),
+            vec![],
+            vec![],
+        );
+        assert!(p.viewer_can_update);
+    }
+
+    #[test]
+    fn a_linear_project_is_keyed_by_its_board() {
         let board = BoardKey::LinearTeam {
             id: "team-a".into(),
         };
@@ -814,6 +876,11 @@ pub(crate) mod tests {
             url_key: "acme".into(),
             viewer_id: "u1".into(),
             team_keys: vec!["TBA".into()],
+            teams: vec![TeamMeta {
+                id: "team-a".into(),
+                key: "TBA".into(),
+            }],
+            owners: owners_from_wire(&schema_json()),
         };
         let fields = team_board_fields();
         let p = project_from_wire(
@@ -829,7 +896,6 @@ pub(crate) mod tests {
         assert_eq!(p.owner_kind, OwnerKind::Organization);
         assert_eq!(p.title, "Team A");
         assert_eq!(p.url, "https://linear.app/acme/team/TBA");
-        assert!(!p.viewer_can_update);
         assert_eq!(p.fields, fields);
         assert!(p.linked_repos.is_empty() && p.issue_repos.is_empty());
         assert_eq!(p.linear, Some(meta));

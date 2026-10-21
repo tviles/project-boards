@@ -43,7 +43,7 @@ query BoardSchema($teamIds: [ID!]!) {
     nodes { id name type color position team { id } }
   }
   issueLabels(filter: { or: [{ team: { id: { in: $teamIds } } }, { team: { null: true } }] }, first: 250) {
-    nodes { id name color isGroup groupType parent { id } }
+    nodes { id name color isGroup groupType parent { id } team { id } }
   }
   cycles(filter: { team: { id: { in: $teamIds } }, endsAt: { gt: "-P26W" } }, first: 100) {
     nodes { id number name startsAt endsAt isPast team { id } }
@@ -119,4 +119,43 @@ query LinearViewer {
   viewer { id }
   organization { urlKey }
   rateLimitStatus { limits { type remainingAmount allowedAmount reset } }
+}
+
+mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+  issueUpdate(id: $id, input: $input) { success issue { ...IssueFields } }
+}
+
+mutation IssueCreate($input: IssueCreateInput!) {
+  issueCreate(input: $input) { success issue { ...IssueFields } }
+}
+
+mutation IssueArchive($id: String!) {
+  issueArchive(id: $id) { success entity { ...IssueFields } }
+}
+
+mutation IssueUnarchive($id: String!) {
+  issueUnarchive(id: $id) { success entity { ...IssueFields } }
+}
+
+mutation CommentCreate($input: CommentCreateInput!) {
+  commentCreate(input: $input) { success comment { id } }
+}
+
+query IssueByKey($id: String!) {
+  issue(id: $id) { ...IssueFields }
+}
+
+query CommentById($id: String!) {
+  comment(id: $id) { id }
+}
+
+query TeamCandidates($teamId: String!) {
+  team(id: $teamId) {
+    members(first: 250) { nodes { id displayName } pageInfo { hasNextPage } }
+    labels(first: 250) { nodes { id name color isGroup parent { id groupType } } pageInfo { hasNextPage } }
+  }
+  issueLabels(first: 250, filter: { team: { null: true } }) {
+    nodes { id name color isGroup parent { id groupType } }
+    pageInfo { hasNextPage }
+  }
 }

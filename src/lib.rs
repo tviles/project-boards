@@ -18,3 +18,4 @@ pub mod store;
 pub mod sync;
 pub mod transport;
 pub mod ui;
+pub mod uuid;

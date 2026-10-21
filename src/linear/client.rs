@@ -40,7 +40,7 @@ fn not_found(board: &BoardKey) -> BackendError {
 }
 
 /// Linear's answer to `project(id:)` or `team(id:)` for an id it does not know.
-fn is_entity_not_found(e: &BackendError) -> bool {
+pub(super) fn is_entity_not_found(e: &BackendError) -> bool {
     matches!(e, BackendError::Api(entries) if entries.iter().any(|e| {
         e.kind.as_deref() == Some("INPUT_ERROR") && e.message.starts_with("Entity not found")
     }))
@@ -121,7 +121,7 @@ impl Linear {
     }
 
     /// Sends `request`, remembers the rate it reports, and returns its data.
-    async fn data(&self, request: GraphqlRequest) -> Result<Value, BackendError> {
+    pub(super) async fn data(&self, request: GraphqlRequest) -> Result<Value, BackendError> {
         let response = self.transport.execute(request).await?;
         *self.rate.lock().unwrap() = response.rate;
         Ok(response.data)
@@ -192,7 +192,7 @@ impl Linear {
             &BoardKey::LinearProject { id: uuid.into() },
             &str_of(&project["name"]),
             &str_of(&project["url"]),
-            meta(&data, &teams),
+            meta(&data, &teams, &schema),
             fields,
             views,
         ))
@@ -237,7 +237,7 @@ impl Linear {
             &BoardKey::LinearTeam { id: uuid.into() },
             &str_of(&team["name"]),
             &url,
-            meta(&data, &teams),
+            meta(&data, &teams, &schema),
             fields,
             views,
         ))
@@ -441,12 +441,21 @@ impl Linear {
     }
 }
 
-/// The resolve response's workspace, viewer and team keys.
-fn meta(data: &Value, teams: &[TeamInfo]) -> LinearMeta {
+/// The resolve response's workspace, viewer and teams, and from `schema` (the
+/// `BoardSchema` response) which team owns each state, cycle and label group.
+fn meta(data: &Value, teams: &[TeamInfo], schema: &Value) -> LinearMeta {
     LinearMeta {
         url_key: str_of(&data["organization"]["urlKey"]),
         viewer_id: str_of(&data["viewer"]["id"]),
         team_keys: teams.iter().map(|t| t.key.clone()).collect(),
+        teams: teams
+            .iter()
+            .map(|t| TeamMeta {
+                id: t.id.clone(),
+                key: t.key.clone(),
+            })
+            .collect(),
+        owners: convert::owners_from_wire(schema),
     }
 }
 
@@ -472,7 +481,7 @@ fn tabs(project_views: &[&Value], schema: &Value, fields: &[Field]) -> Vec<View>
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::error::GraphqlErrorEntry;
     use crate::linear::convert::tests::{issue_json, schema_json, team_projects_json};
@@ -579,12 +588,19 @@ mod tests {
         assert_eq!(p.id, ProjectId::new(format!("linear:team:{TEAM_A}")));
         assert_eq!(p.title, "Testbed A");
         assert_eq!(p.url, "https://linear.app/acme/team/TBA/all");
+        let owners = convert::owners_from_wire(&schema_with(vec![]));
+        assert_eq!(owners.get("s-a-todo").map(String::as_str), Some(TEAM_A));
         assert_eq!(
             p.linear,
             Some(LinearMeta {
                 url_key: "acme".into(),
                 viewer_id: "u-1".into(),
                 team_keys: vec!["TBA".into()],
+                teams: vec![TeamMeta {
+                    id: TEAM_A.into(),
+                    key: "TBA".into(),
+                }],
+                owners,
             })
         );
         assert!(has_field(&p, ids::PROJECT) && has_field(&p, ids::CYCLE));
@@ -655,6 +671,17 @@ mod tests {
         assert_eq!(
             p.linear.as_ref().map(|m| m.team_keys.clone()),
             Some(vec!["TBA".to_string(), "TBB".into()])
+        );
+        let meta = p.linear.as_ref().unwrap();
+        let teams: Vec<_> = meta
+            .teams
+            .iter()
+            .map(|t| (t.id.as_str(), t.key.as_str()))
+            .collect();
+        assert_eq!(teams, [(TEAM_A, "TBA"), (TEAM_B, "TBB")]);
+        assert_eq!(
+            meta.owners.get("s-b-todo").map(String::as_str),
+            Some(TEAM_B)
         );
         assert!(
             !has_field(&p, ids::PROJECT),
@@ -1078,7 +1105,7 @@ mod tests {
     }
 
     /// Every literal `first: N` in a query's text.
-    fn literal_firsts(query: &str) -> Vec<u64> {
+    pub(crate) fn literal_firsts(query: &str) -> Vec<u64> {
         query
             .match_indices("first:")
             .filter_map(|(at, _)| {

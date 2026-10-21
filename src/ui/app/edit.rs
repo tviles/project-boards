@@ -102,14 +102,18 @@ pub const MAYBE_POSTED: &str = "may have been posted; check the issue before ret
 
 /// An op whose retry could make a second copy on GitHub when its answer was lost: a new
 /// draft, a new issue, or a comment. Adding an existing issue twice returns the same item,
-/// and every other edit sets a value, so those are safe to send again.
+/// and every other edit sets a value, so those are safe to send again. A new Linear issue,
+/// and a comment with a client id, name the same issue or comment on a resend.
 fn not_safe_to_resend(op: &Op) -> bool {
     matches!(
         op,
         Op::Create {
             new: NewItem::Draft { .. } | NewItem::Issue { .. },
             ..
-        } | Op::Comment { .. }
+        } | Op::Comment {
+            client_id: None,
+            ..
+        }
     )
 }
 
@@ -1019,6 +1023,7 @@ impl App {
                     item,
                     content,
                     body,
+                    client_id: None,
                 })
             }
             EditPurpose::NewDraft { presets } => match title_and_body(&text) {
@@ -1220,6 +1225,7 @@ impl App {
             Op::Reorder {
                 item: item.id,
                 after,
+                sort_order: None,
             },
         )
     }
@@ -2450,7 +2456,8 @@ mod tests {
             a.store.pending()[0].op,
             Op::Reorder {
                 item: ItemId::new("a"),
-                after: Some(ItemId::new("b"))
+                after: Some(ItemId::new("b")),
+                sort_order: None,
             }
         );
         let mut b = test_app();
@@ -2461,7 +2468,8 @@ mod tests {
             b.store.pending()[0].op,
             Op::Reorder {
                 item: ItemId::new("c"),
-                after: Some(ItemId::new("a"))
+                after: Some(ItemId::new("a")),
+                sort_order: None,
             }
         );
         let mut c = test_app();
@@ -2471,7 +2479,8 @@ mod tests {
             c.store.pending()[0].op,
             Op::Reorder {
                 item: ItemId::new("b"),
-                after: None
+                after: None,
+                sort_order: None,
             }
         );
         assert_eq!(selected(&c), "b", "the cursor stays on the moved item");
@@ -2621,7 +2630,8 @@ mod tests {
             a.store.pending()[0].op,
             Op::Reorder {
                 item: ItemId::new("c"),
-                after: Some(ItemId::new("a"))
+                after: Some(ItemId::new("a")),
+                sort_order: None,
             }
         );
         a.board_sel = crate::ui::board::BoardSelection {
@@ -2634,7 +2644,8 @@ mod tests {
             a.store.pending()[1].op,
             Op::Reorder {
                 item: ItemId::new("a"),
-                after: Some(ItemId::new("c"))
+                after: Some(ItemId::new("c")),
+                sort_order: None,
             }
         );
     }
@@ -2679,7 +2690,8 @@ mod tests {
             a.store.pending()[0].op,
             Op::Reorder {
                 item: ItemId::new("c"),
-                after: Some(ItemId::new("b"))
+                after: Some(ItemId::new("b")),
+                sort_order: None,
             }
         );
     }
@@ -2795,7 +2807,8 @@ mod tests {
             a.store.pending()[0].op,
             Op::Reorder {
                 item: ItemId::new("a"),
-                after: Some(ItemId::new("b"))
+                after: Some(ItemId::new("b")),
+                sort_order: None,
             }
         );
         assert_eq!(a.mode, Mode::Detail);
@@ -3801,6 +3814,38 @@ mod tests {
         );
         b.handle_key(key('E'));
         assert_eq!(b.handle_key(key('R')), vec![Command::Send(2)]);
+    }
+
+    /// A Linear create and comment carry a client id, so a resend names the same issue or
+    /// comment (spec section 9, T6); Linear's answer, or the lookup after it, settles it.
+    #[test]
+    fn linear_creates_and_comments_with_ids_are_safe_to_resend() {
+        let id = "0f8e7d6c-5b4a-4938-8271-605f4e3d2c1b";
+        let linear_issue = Op::Create {
+            temp: ItemId::new("local:1"),
+            new: NewItem::LinearIssue {
+                id: id.into(),
+                team: crate::model::TeamMeta {
+                    id: "team-a".into(),
+                    key: "TBA".into(),
+                },
+                title: "Write the docs".into(),
+                body: String::new(),
+            },
+            presets: vec![],
+        };
+        let comment = |client_id: Option<&str>| Op::Comment {
+            item: ItemId::new("a"),
+            content: ContentId::Issue("I_a".into()),
+            body: "LGTM".into(),
+            client_id: client_id.map(String::from),
+        };
+        assert!(!not_safe_to_resend(&linear_issue));
+        assert!(!not_safe_to_resend(&comment(Some(id))));
+        // GitHub's comments have none, and stay unsafe.
+        assert!(not_safe_to_resend(&comment(None)));
+        assert!(not_safe_to_resend(&new_issue("local:1")));
+        assert!(not_safe_to_resend(&new_draft("local:1")));
     }
 
     #[test]

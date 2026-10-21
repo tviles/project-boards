@@ -2,6 +2,7 @@ use crate::model::field::{Field, FieldKind, find_field};
 use crate::model::ids::{BoardKey, FieldId, ProjectId, ViewId};
 use crate::model::view::View;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OwnerKind {
@@ -31,13 +32,29 @@ pub struct Project {
 }
 
 /// What a Linear board needs from its workspace beyond the common project fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct LinearMeta {
     /// The workspace's URL key.
     pub url_key: String,
     /// The viewer's user id, for the `me` filter.
     pub viewer_id: String,
     pub team_keys: Vec<String>,
+    /// The board's teams. Empty on a board cached by 0.4: team-owned edits then need a
+    /// refresh (spec section 6).
+    #[serde(default)]
+    pub teams: Vec<TeamMeta>,
+    /// The team id owning each workflow state, cycle and team-level single-select label
+    /// group, by its id. Workspace-level groups are absent.
+    #[serde(default)]
+    pub owners: BTreeMap<String, String>,
+}
+
+/// One of a Linear board's teams.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamMeta {
+    pub id: String,
+    /// The team key, as in `TBA-12`; an issue's `ContentRef.container`.
+    pub key: String,
 }
 
 impl Project {
@@ -129,5 +146,24 @@ mod tests {
         json.as_object_mut().unwrap().remove("linear");
         let back: Project = serde_json::from_value(json).unwrap();
         assert_eq!(back.linear, None);
+    }
+
+    #[test]
+    fn a_04_linear_meta_loads_with_no_teams() {
+        let old = r#"{"url_key": "acme", "viewer_id": "u1", "team_keys": ["TBA"]}"#;
+        let meta: LinearMeta = serde_json::from_str(old).unwrap();
+        assert_eq!(meta.team_keys, ["TBA"]);
+        assert!(meta.teams.is_empty() && meta.owners.is_empty());
+
+        let new = LinearMeta {
+            teams: vec![TeamMeta {
+                id: "team-a".into(),
+                key: "TBA".into(),
+            }],
+            owners: BTreeMap::from([("s-todo".to_string(), "team-a".to_string())]),
+            ..meta
+        };
+        let back: LinearMeta = serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
+        assert_eq!(back, new);
     }
 }

@@ -1,10 +1,21 @@
-//! Carries an op to GitHub: which mutation, with which ids, and what came back.
+//! Carries an op to the board's provider: which mutation, with which ids, and what came
+//! back.
 
 use crate::backend::Backend;
 use crate::error::{BackendError, GraphqlErrorEntry};
 use crate::github::Github;
+use crate::linear::Linear;
 use crate::model::{ContentId, FieldId, FieldValue, ItemId, ProjectId};
+use crate::ops::linear::{add_input, create_input, input_for};
 use crate::ops::{Confirmed, NewItem, Op};
+
+/// The answer for an op the provider has no mutation for; nothing is sent.
+fn not_supported(provider: &str) -> BackendError {
+    BackendError::Api(vec![GraphqlErrorEntry {
+        message: format!("not supported on {provider}"),
+        kind: None,
+    }])
+}
 
 fn ids<T>(list: &[T], id: impl Fn(&T) -> &str) -> Vec<String> {
     list.iter().map(|x| id(x).to_string()).collect()
@@ -33,6 +44,9 @@ async fn create(
             }
         }
         NewItem::Existing { hit } => gh.add_item_by_id(project, &hit.id).await?,
+        NewItem::LinearIssue { .. } | NewItem::LinearExisting { .. } => {
+            return Err(not_supported("GitHub"));
+        }
     };
     let mut refused = Vec::new();
     for (field, value) in presets {
@@ -57,12 +71,84 @@ pub async fn send(
 ) -> Result<Confirmed, BackendError> {
     match backend {
         Backend::Github(gh) => send_github(gh, project, op).await,
-        // The controller refuses every edit on a Linear board before it gets here (spec
-        // section 5); this keeps any that slips through from being sent.
-        Backend::Linear(_) => Err(BackendError::Api(vec![GraphqlErrorEntry {
-            message: "not supported".into(),
-            kind: None,
-        }])),
+        Backend::Linear(linear) => send_linear(linear, project, op).await,
+    }
+}
+
+/// The issue Linear answered with, or `Applied` when its payload had none (plan
+/// Decision 7).
+fn item_or_applied(item: Option<crate::model::Item>) -> Confirmed {
+    item.map_or(Confirmed::Applied, Confirmed::Item)
+}
+
+/// Sends `op` to Linear (spec section 5). Every edit but comments, archiving and creating is
+/// one `issueUpdate`, confirmed with the issue it returns. An op Linear has no mutation for,
+/// or a value it cannot take, is refused without a request.
+pub(crate) async fn send_linear(
+    linear: &Linear,
+    project: &ProjectId,
+    op: &Op,
+) -> Result<Confirmed, BackendError> {
+    match op {
+        Op::SetField { .. }
+        | Op::ClearField { .. }
+        | Op::GroupLabel { .. }
+        | Op::Reorder { .. }
+        | Op::Assignees { .. }
+        | Op::Labels { .. }
+        | Op::Title { .. }
+        | Op::Body { .. }
+        | Op::Remove { .. } => {
+            let (id, input) = input_for(op).ok_or_else(|| not_supported("Linear"))?;
+            linear.update_issue(&id, input).await.map(Confirmed::Item)
+        }
+        Op::Comment {
+            content,
+            body,
+            client_id,
+            ..
+        } => {
+            // Without its client id a resend could post the comment twice.
+            let Some(id) = client_id else {
+                return Err(BackendError::Decode(
+                    "a Linear comment has no client id".into(),
+                ));
+            };
+            linear
+                .create_comment(id, content.node_id(), body)
+                .await
+                .map(|()| Confirmed::Applied)
+        }
+        Op::Archive { item } => linear.archive(item.as_str()).await.map(item_or_applied),
+        Op::Unarchive { item } => linear.unarchive(item.as_str()).await.map(item_or_applied),
+        // One call carrying every preset, so nothing is ever refused separately.
+        Op::Create { temp, new, presets } => {
+            let item = match new {
+                NewItem::LinearIssue { .. } => {
+                    let input = create_input(project, new, presets)
+                        .ok_or_else(|| not_supported("Linear"))?;
+                    linear.create_issue(input).await?
+                }
+                NewItem::LinearExisting { issue } => {
+                    let input = add_input(project, issue, presets)
+                        .ok_or_else(|| not_supported("Linear"))?;
+                    linear.update_issue(issue.id.as_str(), input).await?
+                }
+                NewItem::Draft { .. } | NewItem::Issue { .. } | NewItem::Existing { .. } => {
+                    return Err(not_supported("Linear"));
+                }
+            };
+            Ok(Confirmed::Created {
+                temp: temp.clone(),
+                item,
+                refused: vec![],
+            })
+        }
+        // Linear has no milestones or drafts; close and reopen are sent as status changes
+        // (spec section 7).
+        Op::Milestone { .. } | Op::Convert { .. } | Op::Close { .. } | Op::Reopen { .. } => {
+            Err(not_supported("Linear"))
+        }
     }
 }
 
@@ -80,7 +166,7 @@ pub(crate) async fn send_github(
             .clear_field_value(project, item, field)
             .await
             .map(Confirmed::Item),
-        Op::Reorder { item, after } => gh
+        Op::Reorder { item, after, .. } => gh
             .update_item_position(project, item, after.as_ref())
             .await
             .map(|_order| Confirmed::Applied),
@@ -158,6 +244,8 @@ pub(crate) async fn send_github(
             .await
             .map(|()| Confirmed::Applied),
         Op::Create { temp, new, presets } => create(gh, project, temp, new, presets).await,
+        // Linear's label groups; GitHub never builds one.
+        Op::GroupLabel { .. } => Err(not_supported("GitHub")),
     }
 }
 
@@ -204,7 +292,11 @@ mod tests {
             send_github(&gh, &p, &clear).await,
             Ok(Confirmed::Item(_))
         ));
-        let reorder = Op::Reorder { item, after: None };
+        let reorder = Op::Reorder {
+            item,
+            after: None,
+            sort_order: None,
+        };
         assert_eq!(send_github(&gh, &p, &reorder).await, Ok(Confirmed::Applied));
         let names: Vec<String> = t
             .requests()
@@ -273,6 +365,7 @@ mod tests {
                 item,
                 content: issue,
                 body: "LGTM".into(),
+                client_id: None,
             },
         ];
         for op in &ops {
@@ -730,6 +823,7 @@ mod tests {
         let op = Op::Reorder {
             item: ItemId::new("PVTI_1"),
             after: None,
+            sort_order: None,
         };
         assert_eq!(
             send(&backend, &ProjectId::new("P"), &op).await,
@@ -738,21 +832,361 @@ mod tests {
         assert_eq!(t.requests()[0].operation_name, "UpdateItemPosition");
     }
 
-    #[tokio::test]
-    async fn nothing_is_sent_to_linear() {
-        let t = Arc::new(FixtureTransport::new());
-        let backend = crate::backend::Backend::Linear(crate::linear::Linear::new(t.clone()));
-        let op = Op::Reorder {
-            item: ItemId::new("i-1"),
-            after: None,
+    mod linear {
+        use super::*;
+        use crate::backend::Backend;
+        use crate::linear::Linear;
+        use crate::linear::convert::item_from_wire;
+        use crate::linear::convert::tests::issue_json;
+        use crate::linear::ids;
+        use crate::model::{
+            CloseReason, ContentHit, ContentId, Item, MilestoneRef, OptionId, RepoRef, TeamMeta,
         };
-        assert_eq!(
-            send(&backend, &ProjectId::new("linear:team:t1"), &op).await,
-            Err(BackendError::Api(vec![GraphqlErrorEntry {
-                message: "not supported".into(),
+        use serde_json::Value;
+
+        const ISSUE_UUID: &str = "0f8e7d6c-5b4a-4938-8271-605f4e3d2c1b";
+        const COMMENT_UUID: &str = "7a6b5c4d-3e2f-4a1b-9c8d-7e6f5a4b3c2d";
+
+        fn board() -> ProjectId {
+            ProjectId::new("linear:project:p-1")
+        }
+
+        fn backend(t: &Arc<FixtureTransport>) -> Backend {
+            Backend::Linear(Linear::new(t.clone()))
+        }
+
+        fn operations(t: &FixtureTransport) -> Vec<String> {
+            t.requests().into_iter().map(|r| r.operation_name).collect()
+        }
+
+        fn the_issue() -> Item {
+            item_from_wire(&issue_json()).unwrap()
+        }
+
+        fn issue() -> ItemId {
+            ItemId::new("i-7")
+        }
+
+        fn content() -> ContentId {
+            ContentId::Issue("i-7".into())
+        }
+
+        fn updated() -> Value {
+            json!({"issueUpdate": {"success": true, "issue": issue_json()}})
+        }
+
+        fn new_issue() -> Op {
+            Op::Create {
+                temp: ItemId::new("local:1"),
+                new: NewItem::LinearIssue {
+                    id: ISSUE_UUID.into(),
+                    team: TeamMeta {
+                        id: "team-a".into(),
+                        key: "TBA".into(),
+                    },
+                    title: "Write the docs".into(),
+                    body: String::new(),
+                },
+                presets: vec![(
+                    FieldId::new(ids::STATUS),
+                    FieldValue::SingleSelect {
+                        option_id: OptionId::new("s-a-todo"),
+                        name: "Todo".into(),
+                    },
+                )],
+            }
+        }
+
+        fn created(temp: &str) -> Confirmed {
+            Confirmed::Created {
+                temp: ItemId::new(temp),
+                item: the_issue(),
+                refused: vec![],
+            }
+        }
+
+        // Hand-written, in the shape `execute_linear` hands the client, until Task 16
+        // records a real one.
+        fn input_error(message: &str) -> BackendError {
+            BackendError::Api(vec![GraphqlErrorEntry {
+                message: message.into(),
+                kind: Some("INPUT_ERROR".into()),
+            }])
+        }
+
+        #[tokio::test]
+        async fn linear_ops_reach_the_linear_client() {
+            let t = Arc::new(FixtureTransport::new());
+            t.push("IssueUpdate", updated());
+            t.push("IssueUpdate", updated());
+            t.push(
+                "CommentCreate",
+                json!({"commentCreate": {"success": true, "comment": {"id": COMMENT_UUID}}}),
+            );
+            t.push(
+                "IssueArchive",
+                json!({"issueArchive": {"success": true, "entity": issue_json()}}),
+            );
+            t.push(
+                "IssueUnarchive",
+                json!({"issueUnarchive": {"success": true, "entity": null}}),
+            );
+            t.push(
+                "IssueCreate",
+                json!({"issueCreate": {"success": true, "issue": issue_json()}}),
+            );
+            t.push("IssueUpdate", updated());
+            let b = backend(&t);
+            let cases = [
+                (
+                    Op::SetField {
+                        item: issue(),
+                        field: FieldId::new(ids::STATUS),
+                        value: FieldValue::SingleSelect {
+                            option_id: OptionId::new("s-a-done"),
+                            name: "Done".into(),
+                        },
+                    },
+                    Confirmed::Item(the_issue()),
+                ),
+                (
+                    Op::Reorder {
+                        item: issue(),
+                        after: None,
+                        sort_order: Some(-20.0),
+                    },
+                    Confirmed::Item(the_issue()),
+                ),
+                (
+                    Op::Comment {
+                        item: issue(),
+                        content: content(),
+                        body: "Looks good".into(),
+                        client_id: Some(COMMENT_UUID.into()),
+                    },
+                    Confirmed::Applied,
+                ),
+                (Op::Archive { item: issue() }, Confirmed::Item(the_issue())),
+                // Decision 7: no entity in the answer is still a success.
+                (Op::Unarchive { item: issue() }, Confirmed::Applied),
+                (new_issue(), created("local:1")),
+                (
+                    Op::Create {
+                        temp: ItemId::new("local:2"),
+                        new: NewItem::LinearExisting {
+                            issue: Box::new(the_issue()),
+                        },
+                        presets: vec![],
+                    },
+                    created("local:2"),
+                ),
+            ];
+            for (op, confirmed) in cases {
+                assert_eq!(
+                    send(&b, &board(), &op).await,
+                    Ok(confirmed),
+                    "{}",
+                    op.name()
+                );
+            }
+            assert_eq!(
+                operations(&t),
+                [
+                    "IssueUpdate",
+                    "IssueUpdate",
+                    "CommentCreate",
+                    "IssueArchive",
+                    "IssueUnarchive",
+                    "IssueCreate",
+                    "IssueUpdate"
+                ]
+            );
+            let vars: Vec<Value> = t.requests().into_iter().map(|r| r.variables).collect();
+            assert_eq!(
+                vars[0],
+                json!({"id": "i-7", "input": {"stateId": "s-a-done"}})
+            );
+            assert_eq!(vars[1], json!({"id": "i-7", "input": {"sortOrder": -20.0}}));
+            assert_eq!(
+                vars[2],
+                json!({"input": {"id": COMMENT_UUID, "issueId": "i-7", "body": "Looks good"}})
+            );
+            assert_eq!(vars[3], json!({"id": "i-7"}));
+            assert_eq!(
+                vars[5],
+                json!({"input": {
+                    "id": ISSUE_UUID, "teamId": "team-a", "title": "Write the docs",
+                    "description": "", "projectId": "p-1", "stateId": "s-a-todo",
+                }})
+            );
+            assert_eq!(vars[6], json!({"id": "i-7", "input": {"projectId": "p-1"}}));
+        }
+
+        /// Review Focus 2: the queue resends a rate-limited create as the same op, so the
+        /// same client id; Linear refusing it as taken means the first one made it.
+        #[tokio::test]
+        async fn a_resent_create_carries_the_same_id_and_a_duplicate_answer_is_created() {
+            let t = Arc::new(FixtureTransport::new());
+            let limited = BackendError::RateLimited {
+                retry_after_secs: 30,
+            };
+            t.push_error("IssueCreate", limited.clone());
+            t.push_error("IssueByKey", limited.clone());
+            t.push_error("IssueCreate", input_error("Argument Validation Error"));
+            t.push("IssueByKey", json!({"issue": issue_json()}));
+            let b = backend(&t);
+            let op = new_issue();
+            assert_eq!(send(&b, &board(), &op).await, Err(limited));
+            assert_eq!(send(&b, &board(), &op).await, Ok(created("local:1")));
+            assert_eq!(
+                operations(&t),
+                ["IssueCreate", "IssueByKey", "IssueCreate", "IssueByKey"]
+            );
+            let requests = t.requests();
+            let sent_id = |i: usize| requests[i].variables["input"]["id"].clone();
+            assert_eq!(sent_id(0), ISSUE_UUID);
+            assert_eq!(sent_id(2), ISSUE_UUID);
+            assert_eq!(requests[3].variables, json!({"id": ISSUE_UUID}));
+        }
+
+        #[tokio::test]
+        async fn unsupported_ops_send_nothing() {
+            let t = Arc::new(FixtureTransport::new());
+            let b = backend(&t);
+            let not_supported = BackendError::Api(vec![GraphqlErrorEntry {
+                message: "not supported on Linear".into(),
                 kind: None,
-            }]))
-        );
-        assert!(t.requests().is_empty());
+            }]);
+            let hit = ContentHit {
+                id: "I_9".into(),
+                pull: false,
+                repo: "acme/app".into(),
+                number: 9,
+                title: "Fix".into(),
+                open: true,
+            };
+            let create = |new: NewItem| Op::Create {
+                temp: ItemId::new("local:1"),
+                new,
+                presets: vec![],
+            };
+            let repo = RepoRef {
+                id: "R_1".into(),
+                slug: "acme/app".parse().unwrap(),
+            };
+            let ops = [
+                Op::Milestone {
+                    item: issue(),
+                    content: content(),
+                    milestone: Some(MilestoneRef {
+                        id: "MI_1".into(),
+                        title: "v1".into(),
+                    }),
+                },
+                Op::Convert {
+                    item: issue(),
+                    repo: repo.clone(),
+                },
+                Op::Close {
+                    item: issue(),
+                    content: content(),
+                    reason: Some(CloseReason::Completed),
+                },
+                Op::Reopen {
+                    item: issue(),
+                    content: content(),
+                },
+                create(NewItem::Draft {
+                    title: "Idea".into(),
+                    body: String::new(),
+                }),
+                create(NewItem::Issue {
+                    repo,
+                    title: "T".into(),
+                    body: String::new(),
+                }),
+                create(NewItem::Existing { hit }),
+                // An edit Linear cannot take, such as a fractional estimate.
+                Op::SetField {
+                    item: issue(),
+                    field: FieldId::new(ids::ESTIMATE),
+                    value: FieldValue::Number(0.5),
+                },
+                // A preset Linear cannot take refuses the whole create.
+                Op::Create {
+                    temp: ItemId::new("local:1"),
+                    new: NewItem::LinearIssue {
+                        id: ISSUE_UUID.into(),
+                        team: TeamMeta {
+                            id: "team-a".into(),
+                            key: "TBA".into(),
+                        },
+                        title: "T".into(),
+                        body: String::new(),
+                    },
+                    presets: vec![(
+                        FieldId::new(ids::ASSIGNEES),
+                        FieldValue::Users(vec!["Ada Lovelace".into()]),
+                    )],
+                },
+            ];
+            for op in &ops {
+                assert_eq!(
+                    send(&b, &board(), op).await,
+                    Err(not_supported.clone()),
+                    "{op:?}"
+                );
+            }
+            // Adding an existing issue needs a project board.
+            let add = create(NewItem::LinearExisting {
+                issue: Box::new(the_issue()),
+            });
+            assert_eq!(
+                send(&b, &ProjectId::new("linear:team:team-a"), &add).await,
+                Err(not_supported)
+            );
+            // A comment without its client id could post twice on a resend: never sent.
+            let comment = Op::Comment {
+                item: issue(),
+                content: content(),
+                body: "hi".into(),
+                client_id: None,
+            };
+            assert!(matches!(
+                send(&b, &board(), &comment).await,
+                Err(BackendError::Decode(_))
+            ));
+            assert!(t.requests().is_empty(), "{:?}", operations(&t));
+        }
+
+        /// GitHub never builds these; one that slips through is not sent.
+        #[tokio::test]
+        async fn linear_only_ops_are_not_sent_to_github() {
+            let t = Arc::new(FixtureTransport::new());
+            let gh = Github::new(t.clone());
+            let group = Op::GroupLabel {
+                item: issue(),
+                field: ids::group("lg-type"),
+                value: None,
+                replaces: Some("l-bug".into()),
+            };
+            let add = Op::Create {
+                temp: ItemId::new("local:2"),
+                new: NewItem::LinearExisting {
+                    issue: Box::new(the_issue()),
+                },
+                presets: vec![],
+            };
+            for op in [group, new_issue(), add] {
+                assert!(
+                    matches!(
+                        send_github(&gh, &ProjectId::new("PVT_1"), &op).await,
+                        Err(BackendError::Api(_))
+                    ),
+                    "{op:?}"
+                );
+            }
+            assert!(t.requests().is_empty());
+        }
     }
 }

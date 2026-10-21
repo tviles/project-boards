@@ -1783,6 +1783,7 @@ mod tests {
             url_key: "acme".into(),
             viewer_id: "U_tviles".into(),
             team_keys: vec!["TBA".into()],
+            ..Default::default()
         });
         let sprint = p
             .fields
