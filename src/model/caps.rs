@@ -154,6 +154,7 @@ const LINEAR_CAPS: ProviderCaps = ProviderCaps {
         OpKind::Remove,
         OpKind::Assignees,
         OpKind::Labels,
+        OpKind::Create,
     ],
     drafts: false,
     milestones: false,
@@ -612,20 +613,38 @@ mod tests {
                     .all(|k| LINEAR_CAPS.ops.contains(k))
             );
         }
-        for needs_repo in [false, true] {
-            let denial = check_new(needs_repo, &linear).unwrap_err();
-            assert_eq!(denial.message(&none), LINEAR_READ_ONLY);
-        }
         let also_no_scope = EditContext {
             viewer_can_update: false,
             scopes: Some(vec![]),
             ..linear
         };
+        let archived = items[2].clone();
         assert_eq!(
-            check_new(false, &also_no_scope).unwrap_err().message(&none),
-            LINEAR_READ_ONLY,
+            check(Milestone, &archived, &also_no_scope)
+                .unwrap_err()
+                .message(&none),
+            "Linear issues have no milestones",
             "the provider reason wins over every other"
         );
+    }
+
+    #[test]
+    fn linear_creates_issues_without_scope_checks() {
+        let linear = linear_ctx();
+        for needs_repo in [false, true] {
+            assert_eq!(check_new(needs_repo, &linear), Ok(()));
+            let no_scopes = EditContext {
+                scopes: Some(vec![]),
+                ..linear_ctx()
+            };
+            assert_eq!(check_new(needs_repo, &no_scopes), Ok(()));
+        }
+        let read_only = EditContext {
+            viewer_can_update: false,
+            ..linear_ctx()
+        };
+        assert_eq!(check_new(false, &read_only), Err(Denial::ReadOnly));
+        assert!(!provider_caps(Provider::Linear).drafts);
     }
 
     #[test]
@@ -635,7 +654,7 @@ mod tests {
             provider_caps(Provider::Linear).ops,
             [
                 Move, Reorder, SetField, Close, Reopen, Title, Body, Comment, Archive, Unarchive,
-                Remove, Assignees, Labels
+                Remove, Assignees, Labels, Create
             ]
         );
         let i = issue("i", 1, "x");

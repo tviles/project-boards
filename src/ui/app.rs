@@ -54,6 +54,13 @@ pub enum EditPurpose {
         repo: RepoRef,
         presets: Vec<(FieldId, FieldValue)>,
     },
+    /// A new Linear issue in `team`; `None` while the form's Team line chooses it. `presets`
+    /// are the column's and lane's values as the board shows them, resolved for the team on
+    /// submit (spec section 9).
+    NewLinearIssue {
+        team: Option<TeamMeta>,
+        presets: Vec<(FieldId, FieldValue)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -170,6 +177,9 @@ pub struct App {
     pub(crate) repos: Option<Lookup<PushableRepos>>,
     /// Numbers the placeholders of new items (`local:N`).
     temp_counter: u64,
+    /// The team the last new Linear issue went to this session, which the next one's Team
+    /// line starts with (T2).
+    pub(crate) last_team: Option<TeamMeta>,
     pub(crate) repo_lookups: HashMap<RepoSlug, Lookup<Option<RepoRef>>>,
     /// The latest "add existing" search and its results (`search` is the quick-search text).
     pub(crate) content_search: Option<(String, Lookup<Vec<ContentHit>>)>,
@@ -296,6 +306,7 @@ impl App {
             team_candidates: HashMap::new(),
             repos: None,
             temp_counter: 0,
+            last_team: None,
             repo_lookups: HashMap::new(),
             content_search: None,
             pane_repo: None,

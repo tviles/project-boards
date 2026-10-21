@@ -165,6 +165,12 @@ pub enum Popup {
         purpose: EditPurpose,
         form: TextForm,
     },
+    /// `Enter` on a new Linear issue's Team line: which team, of those the form offers. The
+    /// form waits here, and comes back with the choice (`Esc`: unchanged).
+    TeamPick {
+        form: Box<(EditPurpose, TextForm)>,
+        picker: ListPicker<crate::model::TeamMeta>,
+    },
 }
 
 fn editable(kind: &FieldKind) -> bool {
@@ -614,14 +620,24 @@ impl App {
     }
 
     fn open_new_kind(&mut self, presets: Vec<(FieldId, FieldValue)>) {
-        let picker = ListPicker::new(
-            "New item",
+        let choices = if self.is_linear() {
+            // Linear has no drafts, and a team board holds every issue of its team already.
+            let mut v = vec![Choice::new("New issue", NewKind::Issue)];
+            if !self.edit_context().team_board {
+                v.push(Choice::new(
+                    "Add existing issue (key or URL)",
+                    NewKind::Existing,
+                ));
+            }
+            v
+        } else {
             vec![
                 Choice::new("New issue", NewKind::Issue),
                 Choice::new("New draft", NewKind::Draft),
                 Choice::new("Add an existing issue or pull request", NewKind::Existing),
-            ],
-        );
+            ]
+        };
+        let picker = ListPicker::new("New item", choices);
         self.open_popup(Popup::NewKind { presets, picker });
     }
 
@@ -1157,6 +1173,11 @@ impl App {
                     let presets = presets.clone();
                     self.close_popup();
                     return match kind {
+                        NewKind::Issue if self.is_linear() => self.new_linear_issue_form(presets),
+                        // Task 15 asks for the key or URL here.
+                        NewKind::Existing if self.is_linear() => {
+                            self.say("Adding an existing Linear issue is not available yet")
+                        }
                         NewKind::Draft => self.new_draft_form(presets),
                         NewKind::Existing => {
                             self.open_popup(Popup::Search {
@@ -1543,8 +1564,37 @@ impl App {
                     self.popup = Some(popup);
                     return vec![edit];
                 }
+                FormEvent::PickTeam => {
+                    let mut picker = ListPicker::new(
+                        "Team for the new issue",
+                        form.teams()
+                            .iter()
+                            .map(|t| Choice::new(t.key.clone(), t.clone()))
+                            .collect(),
+                    );
+                    picker.selected = form
+                        .team()
+                        .and_then(|t| form.teams().iter().position(|x| x == t))
+                        .unwrap_or(0);
+                    self.popup = Some(Popup::TeamPick {
+                        form: Box::new((purpose.clone(), form.clone())),
+                        picker,
+                    });
+                    return Vec::new();
+                }
                 FormEvent::Submit => {
-                    let cmds = self.on_text(purpose.clone(), submitted_text(form), false);
+                    // A Team line's choice is the new issue's team.
+                    let purpose = match purpose.clone() {
+                        EditPurpose::NewLinearIssue {
+                            team: None,
+                            presets,
+                        } => EditPurpose::NewLinearIssue {
+                            team: form.team().cloned(),
+                            presets,
+                        },
+                        other => other,
+                    };
+                    let cmds = self.on_text(purpose, submitted_text(form), false);
                     if cmds.iter().any(|c| matches!(c, Command::Send(_))) {
                         self.close_popup();
                         return cmds;
@@ -1554,6 +1604,25 @@ impl App {
                     form.set_message(self.status.flash.take());
                 }
             },
+            Popup::TeamPick { form, picker } => {
+                let chosen = match picker.handle(&key) {
+                    ListOutcome::Chosen(team) => Some(team),
+                    ListOutcome::Cancel => None,
+                    ListOutcome::None | ListOutcome::Key(_) => {
+                        self.popup = Some(popup);
+                        return Vec::new();
+                    }
+                };
+                let (purpose, mut form) = (**form).clone();
+                if let Some(team) = chosen
+                    && let Some(at) = form.teams().iter().position(|t| *t == team)
+                {
+                    form.set_team(at);
+                    form.set_heading(edit::new_issue_heading(&team));
+                }
+                self.popup = Some(Popup::Text { purpose, form });
+                return Vec::new();
+            }
         }
         self.popup = Some(popup);
         Vec::new()
@@ -2158,6 +2227,7 @@ mod tests {
                 ("Edit body".to_string(), String::new()),
                 ("Remove from project".to_string(), String::new()),
                 ("Open in the browser".to_string(), "o".to_string()),
+                ("New item".to_string(), "n".to_string()),
                 ("Show archived items".to_string(), String::new()),
             ]
         );

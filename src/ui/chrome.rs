@@ -75,10 +75,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         render_picker(frame, area, p, &app.theme);
     }
     if app.mode == Mode::Popup {
-        if let Some(Popup::Text { form, .. }) = &mut app.popup {
-            crate::ui::textform::draw(frame, body, form, &app.theme);
-        } else {
-            draw_popup(frame, body, app);
+        match &mut app.popup {
+            Some(Popup::Text { form, .. }) => {
+                crate::ui::textform::draw(frame, body, form, &app.theme);
+            }
+            // The team picker over the form it chooses for.
+            Some(Popup::TeamPick { form, picker }) => {
+                crate::ui::textform::draw(frame, body, &mut form.1, &app.theme);
+                render_list_picker(frame, body, picker, &app.theme);
+            }
+            _ => draw_popup(frame, body, app),
         }
     }
     if app.mode == Mode::ErrorLog {
@@ -202,7 +208,7 @@ fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
             render_line_popup(frame, area, title, input, hint, error.as_deref(), theme)
         }
         // Drawn by `draw`, which has the form mutably.
-        Popup::Text { .. } => {}
+        Popup::Text { .. } | Popup::TeamPick { .. } => {}
     }
 }
 

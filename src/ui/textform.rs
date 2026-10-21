@@ -1,11 +1,14 @@
 //! The text form popup: a title and/or body field plus buttons in one focus ring, used for
-//! new items, comments and edited titles and bodies (Part C, decisions C1 to C7).
+//! new items, comments and edited titles and bodies (Part C, decisions C1 to C7). A new
+//! Linear issue whose team is not settled has a Team line above the title (spec section 9).
 //!
 //! Keys: `Tab`/`Shift+Tab` move between fields and buttons, `Enter` in the title moves to the
 //! body (or submits a title-only form), `Enter` in the body is a newline, `Enter` on a button
 //! runs it, `Alt+Enter` submits from anywhere, `Esc` cancels (asking first when text was
-//! typed). Every other key is text for the focused field. `Ctrl+C` is never consumed here.
+//! typed). Every other key is text for the focused field. `Enter` on the Team line asks the
+//! caller for the team picker. `Ctrl+C` is never consumed here.
 
+use crate::model::TeamMeta;
 use crate::ui::editor::{title_and_body, trim_blank_lines};
 use crate::ui::popup::centered;
 use crate::ui::text::truncate_to_width;
@@ -39,10 +42,13 @@ pub enum FormEvent {
     OpenEditor,
     /// The form should close (after the discard rule of C4).
     Cancel,
+    /// `Enter` on the Team line: the caller opens the team picker.
+    PickTeam,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
+    Team,
     Title,
     Body,
     Button(usize),
@@ -59,6 +65,9 @@ pub struct TextForm {
     focus: Focus,
     confirm_discard: bool,
     message: Option<String>,
+    /// The teams the Team line offers (none: no Team line), and the chosen one's index.
+    teams: Vec<TeamMeta>,
+    team: usize,
 }
 
 impl PartialEq for TextForm {
@@ -68,6 +77,7 @@ impl PartialEq for TextForm {
             && self.body_text() == other.body_text()
             && self.focus == other.focus
             && self.confirm_discard == other.confirm_discard
+            && self.team() == other.team()
     }
 }
 
@@ -109,7 +119,43 @@ impl TextForm {
             focus,
             confirm_discard: false,
             message: None,
+            teams: Vec::new(),
+            team: 0,
         }
+    }
+
+    /// Adds a Team line above the title, offering `teams` with `chosen` (an index into them)
+    /// prefilled. It comes first in the `Tab` order; the focus stays on the title.
+    pub fn with_team(mut self, teams: Vec<TeamMeta>, chosen: usize) -> Self {
+        self.team = chosen.min(teams.len().saturating_sub(1));
+        self.teams = teams;
+        self
+    }
+
+    fn has_team(&self) -> bool {
+        !self.teams.is_empty()
+    }
+
+    /// The chosen team; `None` without a Team line.
+    pub fn team(&self) -> Option<&TeamMeta> {
+        self.teams.get(self.team)
+    }
+
+    /// The teams the Team line offers.
+    pub fn teams(&self) -> &[TeamMeta] {
+        &self.teams
+    }
+
+    /// Chooses the team at `index` among `teams`; an index past them is ignored.
+    pub fn set_team(&mut self, index: usize) {
+        if index < self.teams.len() {
+            self.team = index;
+        }
+    }
+
+    /// Replaces the popup's heading (a new issue's names its team).
+    pub fn set_heading(&mut self, heading: impl Into<String>) {
+        self.heading = heading.into();
     }
 
     fn has_title(&self) -> bool {
@@ -135,9 +181,12 @@ impl TextForm {
         v
     }
 
-    /// The focus stops: fields, then buttons.
+    /// The focus stops: the Team line, fields, then buttons.
     fn ring(&self) -> Vec<Focus> {
         let mut r = Vec::new();
+        if self.has_team() {
+            r.push(Focus::Team);
+        }
         if self.has_title() {
             r.push(Focus::Title);
         }
@@ -256,6 +305,10 @@ impl TextForm {
             _ => {}
         }
         match self.focus {
+            Focus::Team => match key.code {
+                KeyCode::Enter => FormEvent::PickTeam,
+                _ => FormEvent::None,
+            },
             Focus::Button(i) => match key.code {
                 KeyCode::Enter => match self.buttons()[i].1 {
                     FormEvent::Cancel => self.escape(),
@@ -325,6 +378,7 @@ pub fn draw(f: &mut Frame, area: Rect, form: &mut TextForm, theme: &Theme) {
     let min_h = 2
         + 1
         + u16::from(status)
+        + if form.has_team() { 3 } else { 0 }
         + if form.has_title() { 3 } else { 0 }
         + if form.has_body() { 5 } else { 0 };
     let height = area.height.saturating_sub(4).max(min_h);
@@ -351,6 +405,9 @@ pub fn draw(f: &mut Frame, area: Rect, form: &mut TextForm, theme: &Theme) {
     }
 
     let mut rows = Vec::new();
+    if form.has_team() {
+        rows.push(Constraint::Length(3));
+    }
     if form.has_title() {
         rows.push(Constraint::Length(3));
     }
@@ -365,6 +422,23 @@ pub fn draw(f: &mut Frame, area: Rect, form: &mut TextForm, theme: &Theme) {
     rows.push(Constraint::Length(1));
     let chunks = Layout::vertical(rows).split(inner);
     let mut i = 0;
+    if let Some(team) = form.team() {
+        let focused = form.focus == Focus::Team;
+        let block = field_block("Team", focused, theme);
+        let rect = chunks[i];
+        let w = block.inner(rect).width as usize;
+        let line = Line::from(vec![
+            Span::raw(team.key.clone()),
+            Span::styled("  Enter to change", theme.dim()),
+        ]);
+        let line = if team.key.len() + 17 > w {
+            Line::raw(truncate_to_width(&team.key, w))
+        } else {
+            line
+        };
+        f.render_widget(Paragraph::new(line).block(block), rect);
+        i += 1;
+    }
     if form.has_title() {
         let focused = form.focus == Focus::Title;
         let (mut t, rect) = (std::mem::take(&mut form.title), chunks[i]);
@@ -785,6 +859,60 @@ mod tests {
             (f.title_text().as_str(), f.body_text().as_str()),
             ("ab", "cd")
         );
+    }
+
+    fn teams() -> Vec<crate::model::TeamMeta> {
+        ["TBA", "TBB"]
+            .into_iter()
+            .map(|key| crate::model::TeamMeta {
+                id: format!("team-{}", key.to_lowercase()),
+                key: key.into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_team_line_comes_first_in_the_ring_and_enter_on_it_picks_a_team() {
+        use Focus::*;
+        let form =
+            || TextForm::new(FormKind::NewItem, "New issue in TBB", "", "").with_team(teams(), 1);
+        // The title keeps the focus, so typing starts the title; the team is prefilled.
+        assert_eq!(
+            ring_of(form()),
+            [Title, Body, Button(0), Button(1), Button(2), Team, Title]
+        );
+        let mut f = form();
+        assert_eq!(f.team().map(|t| t.key.as_str()), Some("TBB"));
+        assert_eq!(f.teams(), teams());
+        press(&mut f, KeyCode::BackTab);
+        assert_eq!(f.focus, Team);
+        assert_eq!(press(&mut f, KeyCode::Enter), FormEvent::PickTeam);
+        type_str(&mut f, "x");
+        assert!(!f.is_dirty(), "the team line takes no text");
+        f.set_team(0);
+        f.set_heading("New issue in TBA");
+        assert_eq!(f.team().map(|t| t.key.as_str()), Some("TBA"));
+        assert_eq!(f.heading(), "New issue in TBA");
+        assert_eq!(f.focus, Team, "the focus stays on the team line");
+        // A form without one has no team.
+        assert_eq!(new_item().team(), None);
+    }
+
+    #[test]
+    fn the_team_line_shows_above_the_title() {
+        let mut f =
+            TextForm::new(FormKind::NewItem, "New issue in TBA", "", "").with_team(teams(), 0);
+        let shown = render_to_string(100, 30, |fr| draw(fr, fr.area(), &mut f, &Theme::plain()));
+        let row = |text: &str| shown.lines().position(|l| l.contains(text));
+        let (team, title) = (row(" Team "), row(" Title "));
+        assert!(team.is_some() && team < title, "{shown}");
+        let inside = team.and_then(|t| shown.lines().nth(t + 1)).unwrap_or("");
+        assert!(inside.contains("TBA  Enter to change"), "{shown}");
+        for w in 0..=12 {
+            for h in 0..=16 {
+                render_to_string(w, h, |fr| draw(fr, fr.area(), &mut f, &Theme::plain()));
+            }
+        }
     }
 
     #[test]

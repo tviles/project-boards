@@ -183,6 +183,28 @@ fn refill(form: &mut TextForm, edited: Edited) {
     form.set_message(message);
 }
 
+/// The heading of a new Linear issue's form, naming its team: `New issue in TBA`.
+pub(super) fn new_issue_heading(team: &TeamMeta) -> String {
+    format!("New issue in {}", team.key)
+}
+
+/// `presets` for a new issue of `team` (spec section 6), or the first that team cannot
+/// take. A preset whose field has left the board goes as it is.
+fn presets_for_team(
+    project: &Project,
+    team: &TeamMeta,
+    presets: &[(FieldId, FieldValue)],
+) -> Result<Vec<(FieldId, FieldValue)>, TeamRefusal> {
+    presets
+        .iter()
+        .map(|(id, value)| match project.field(id) {
+            Some(field) => crate::model::teams::for_team(project, team, field, value.clone())
+                .map(|v| (id.clone(), v)),
+            None => Ok((id.clone(), value.clone())),
+        })
+        .collect()
+}
+
 /// `text` with CRLF line endings as LF.
 fn lf(text: &str) -> String {
     text.replace("\r\n", "\n")
@@ -979,6 +1001,83 @@ impl App {
         self.open_text_form(EditPurpose::NewIssue { repo, presets }, form)
     }
 
+    /// `n`, "New issue", on a Linear board (spec section 9, T2): the form for a new issue of
+    /// the board's team, of the selected column's team, or of the team its Team line
+    /// chooses (prefilled with the last team chosen, else the first). Only teams for which
+    /// every preset resolves are offered; with none, the first refusal shows and nothing
+    /// opens.
+    pub(crate) fn new_linear_issue_form(
+        &mut self,
+        presets: Vec<(FieldId, FieldValue)>,
+    ) -> Vec<Command> {
+        let Some(project) = self.project() else {
+            return Vec::new();
+        };
+        let all = project
+            .linear
+            .as_ref()
+            .map_or(&[][..], |m| m.teams.as_slice());
+        // A board cached by 0.4 does not know its teams: refresh rather than guess.
+        if all.is_empty() {
+            return self.say(&TeamRefusal::NeedsRefresh.message());
+        }
+        let fixed = if self.edit_context().team_board {
+            all.first().cloned()
+        } else {
+            self.column_team()
+        };
+        let candidates = match &fixed {
+            Some(team) => vec![team.clone()],
+            None => all.to_vec(),
+        };
+        let mut refused = None;
+        let offered: Vec<TeamMeta> = candidates
+            .into_iter()
+            .filter(|team| match presets_for_team(project, team, &presets) {
+                Ok(_) => true,
+                Err(r) => {
+                    refused.get_or_insert(r);
+                    false
+                }
+            })
+            .collect();
+        if offered.is_empty() {
+            let reason = refused.unwrap_or(TeamRefusal::NeedsRefresh);
+            return self.say(&reason.message());
+        }
+        let (team, form) = match fixed {
+            Some(team) => {
+                let form = TextForm::new(FormKind::NewItem, new_issue_heading(&team), "", "");
+                (Some(team), form)
+            }
+            None => {
+                let chosen = self
+                    .last_team
+                    .as_ref()
+                    .and_then(|last| offered.iter().position(|t| t.id == last.id))
+                    .unwrap_or(0);
+                let heading = new_issue_heading(&offered[chosen]);
+                let form =
+                    TextForm::new(FormKind::NewItem, heading, "", "").with_team(offered, chosen);
+                (None, form)
+            }
+        };
+        self.open_text_form(EditPurpose::NewLinearIssue { team, presets }, form)
+    }
+
+    /// The one team owning the selected board column, on a board layout (`column_team`).
+    fn column_team(&self) -> Option<TeamMeta> {
+        if self.layout().0 != Layout::Board {
+            return None;
+        }
+        let (project, field) = (self.project()?, self.column_field()?);
+        let column = self
+            .board_columns()
+            .into_iter()
+            .nth(self.board_sel.column)?;
+        crate::model::teams::column_team(project, field, &column.bucket).cloned()
+    }
+
     /// The body the open detail has loaded for `item`.
     fn loaded_body(&self, item: &ItemId) -> Option<String> {
         let d = self.detail.as_ref().filter(|d| &d.item == item)?;
@@ -1112,7 +1211,50 @@ impl App {
                     )
                 }
             },
+            EditPurpose::NewLinearIssue { team, presets } => match title_and_body(&text) {
+                None => self.say(unchanged("Empty title; nothing was created")),
+                Some((title, body)) => self.submit_linear_issue(team, presets, title, body),
+            },
         }
+    }
+
+    /// Creates a new Linear issue in `team` with `presets` resolved for it, under a client
+    /// id made now, so a resend names the same issue (spec section 9). The team is the next
+    /// form's prefill.
+    fn submit_linear_issue(
+        &mut self,
+        team: Option<TeamMeta>,
+        presets: Vec<(FieldId, FieldValue)>,
+        title: String,
+        body: String,
+    ) -> Vec<Command> {
+        let Some(team) = team else {
+            return self.say("Choose a team for the new issue");
+        };
+        // The board may have changed since the form opened.
+        let presets = match self.project() {
+            Some(project) => match presets_for_team(project, &team, &presets) {
+                Ok(presets) => presets,
+                Err(reason) => return self.say(&reason.message()),
+            },
+            None => presets,
+        };
+        let id = match crate::uuid::new_v4() {
+            Ok(id) => id,
+            Err(e) => return self.say(&format!("Could not make an id for the issue: {e}")),
+        };
+        let temp = self.next_temp();
+        let new = NewItem::LinearIssue {
+            id,
+            team: team.clone(),
+            title,
+            body,
+        };
+        let cmds = self.submit_new(Op::Create { temp, new, presets }, false);
+        if !cmds.is_empty() {
+            self.last_team = Some(team);
+        }
+        cmds
     }
 
     /// Submits an edit of the item's issue, pull request or draft, which needs the item still
@@ -6447,6 +6589,305 @@ pub(crate) mod tests {
         let screen =
             crate::ui::fixtures::render_to_string(100, 20, |f| crate::ui::chrome::draw(f, &mut a));
         assert!(screen.contains("[x] Ada Lovelace"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    // New Linear issues (Task 14, spec section 9, T2).
+
+    fn tba() -> crate::model::TeamMeta {
+        crate::model::TeamMeta {
+            id: TBA_ID.into(),
+            key: "TBA".into(),
+        }
+    }
+
+    fn tbb() -> crate::model::TeamMeta {
+        crate::model::TeamMeta {
+            id: TBB_ID.into(),
+            key: "TBB".into(),
+        }
+    }
+
+    fn new_kind_labels(a: &App) -> Vec<String> {
+        match &a.popup {
+            Some(Popup::NewKind { picker, .. }) => {
+                picker.choices.iter().map(|c| c.label.clone()).collect()
+            }
+            other => panic!("expected the new-item menu, got {other:?}"),
+        }
+    }
+
+    /// `n`, then "New issue" (the first entry).
+    fn new_linear_issue(a: &mut App) -> Vec<Command> {
+        assert!(a.handle_key(key('n')).is_empty());
+        assert_eq!(new_kind_labels(a)[0], "New issue");
+        a.handle_key(code(KeyCode::Enter))
+    }
+
+    /// `linear_snapshot` as the team board of TBA.
+    fn linear_team_app() -> App {
+        let mut snap = linear_snapshot();
+        snap.project.board = format!("linear:team:{TBA_ID}").parse().unwrap();
+        let meta = snap.project.linear.as_mut().unwrap();
+        meta.teams = vec![tba()];
+        meta.team_keys = vec!["TBA".into()];
+        snap.items.retain(|_, i| i.ref_label().starts_with("TBA"));
+        snap.order.retain(|id| id.as_str().starts_with("i-tba"));
+        app_with(snap)
+    }
+
+    #[test]
+    fn n_on_linear_offers_new_and_on_project_boards_add_existing() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        a.handle_key(key('n'));
+        assert_eq!(
+            new_kind_labels(&a),
+            ["New issue", "Add existing issue (key or URL)"]
+        );
+        let mut t = linear_team_app();
+        pick(&mut t, "TBA-1");
+        t.handle_key(key('n'));
+        assert_eq!(new_kind_labels(&t), ["New issue"], "never a draft");
+        // A team board's issue is its team's, with no team line.
+        assert!(t.handle_key(code(KeyCode::Enter)).is_empty());
+        let (purpose, form) = text_form(&t);
+        assert!(
+            matches!(purpose, EditPurpose::NewLinearIssue { team: Some(team), .. } if *team == tba()),
+            "{purpose:?}"
+        );
+        assert_eq!(form.heading(), "New issue in TBA");
+        assert_eq!(form.team(), None, "no team line");
+    }
+
+    #[test]
+    fn a_single_team_column_needs_no_team_line() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-2");
+        assert!(new_linear_issue(&mut a).is_empty());
+        let (purpose, form) = text_form(&a);
+        assert_eq!(
+            purpose,
+            &EditPurpose::NewLinearIssue {
+                team: Some(tba()),
+                presets: vec![(
+                    FieldId::new(crate::linear::ids::STATUS),
+                    select_value("s-a-prog", "In Progress")
+                )],
+            }
+        );
+        assert_eq!(form.heading(), "New issue in TBA");
+        assert_eq!(form.team(), None);
+        // In Review is TBB's.
+        a.handle_key(code(KeyCode::Esc));
+        pick(&mut a, "TBB-2");
+        new_linear_issue(&mut a);
+        assert_eq!(text_form(&a).1.heading(), "New issue in TBB");
+    }
+
+    #[test]
+    fn a_merged_column_asks_for_the_team_prefilled_with_the_last() {
+        let mut a = linear_app();
+        pick(&mut a, "TBB-1");
+        new_linear_issue(&mut a);
+        let (purpose, form) = text_form(&a);
+        assert!(
+            matches!(purpose, EditPurpose::NewLinearIssue { team: None, .. }),
+            "{purpose:?}"
+        );
+        assert_eq!(form.teams(), [tba(), tbb()]);
+        assert_eq!(
+            form.team(),
+            Some(&tba()),
+            "the first team, before any choice"
+        );
+        assert_eq!(form.heading(), "New issue in TBA");
+        // Shift+Tab reaches the team line; Enter opens the picker of the teams.
+        a.handle_key(code(KeyCode::BackTab));
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        let Some(Popup::TeamPick { picker, .. }) = &a.popup else {
+            panic!("expected the team picker, got {:?}", a.popup)
+        };
+        let keys: Vec<&str> = picker.choices.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(keys, ["TBA", "TBB"]);
+        // Esc goes back to the form unchanged.
+        a.handle_key(code(KeyCode::Esc));
+        assert_eq!(text_form(&a).1.team(), Some(&tba()));
+        a.handle_key(code(KeyCode::Enter));
+        a.handle_key(code(KeyCode::Down));
+        assert!(a.handle_key(code(KeyCode::Enter)).is_empty());
+        let form = text_form(&a).1;
+        assert_eq!(form.team(), Some(&tbb()));
+        assert_eq!(
+            form.heading(),
+            "New issue in TBB",
+            "the heading follows the team"
+        );
+        a.handle_key(code(KeyCode::Tab));
+        type_in(&mut a, "Write the docs");
+        assert_eq!(a.handle_key(alt_enter()), vec![Command::Send(1)]);
+        assert_eq!(a.last_team, Some(tbb()));
+        // The next new issue in a merged column starts with TBB.
+        pick(&mut a, "TBA-1");
+        new_linear_issue(&mut a);
+        let form = text_form(&a).1;
+        assert_eq!(form.team(), Some(&tbb()));
+        assert_eq!(form.heading(), "New issue in TBB");
+    }
+
+    #[test]
+    fn teams_without_the_columns_state_are_not_offered() {
+        // TBC has no states at all, so no Todo.
+        let mut snap = linear_snapshot();
+        let meta = snap.project.linear.as_mut().unwrap();
+        meta.teams.push(crate::model::TeamMeta {
+            id: "team-c".into(),
+            key: "TBC".into(),
+        });
+        // Swimlanes by Type, TBA's label group; TBB-2 carries Bug too.
+        let board = crate::model::ViewId::new("V_board");
+        let view = snap
+            .project
+            .views
+            .iter_mut()
+            .find(|v| v.id == board)
+            .unwrap();
+        view.group_by = vec![crate::linear::ids::group(TYPE_GROUP)];
+        snap.items
+            .get_mut(&ItemId::new("i-tbb-2"))
+            .unwrap()
+            .values
+            .insert(
+                crate::linear::ids::group(TYPE_GROUP),
+                select_value("l-bug", "Bug"),
+            );
+        let mut a = app_with(snap.clone());
+        pick(&mut a, "TBB-1");
+        new_linear_issue(&mut a);
+        assert_eq!(text_form(&a).1.teams(), [tba(), tbb()], "not TBC");
+        a.handle_key(code(KeyCode::Esc));
+        // Todo in the Bug lane: only TBA owns the Type group.
+        pick(&mut a, "TBA-1");
+        new_linear_issue(&mut a);
+        assert_eq!(text_form(&a).1.teams(), [tba()]);
+        a.handle_key(code(KeyCode::Esc));
+        // In Review is TBB's, and TBB cannot take Bug: nothing opens.
+        pick(&mut a, "TBB-2");
+        assert!(new_linear_issue(&mut a).is_empty());
+        assert_eq!(a.popup, None);
+        assert_eq!(
+            a.status.flash.as_deref(),
+            Some("\"Type\" belongs to team TBA")
+        );
+        // A board cached by 0.4 knows no teams: refresh rather than guess.
+        let mut old = snap;
+        old.project.linear.as_mut().unwrap().teams.clear();
+        let mut a = app_with(old);
+        pick(&mut a, "TBA-2");
+        assert!(new_linear_issue(&mut a).is_empty());
+        assert_eq!(a.popup, None);
+        assert_eq!(
+            a.status.flash,
+            Some(a.denial_text(crate::model::caps::Denial::NeedsRefresh))
+        );
+    }
+
+    #[test]
+    fn a_new_linear_issue_carries_an_id_team_and_resolved_presets() {
+        let mut a = linear_app();
+        // Todo is merged; its canonical option is TBB's, and TBA is the prefilled team.
+        pick(&mut a, "TBB-1");
+        new_linear_issue(&mut a);
+        type_in(&mut a, "Write the docs");
+        a.handle_key(code(KeyCode::Enter));
+        type_in(&mut a, "Steps");
+        assert_eq!(a.handle_key(alt_enter()), vec![Command::Send(1)]);
+        assert_eq!(a.popup, None);
+        let ops = pending_ops(&a);
+        let Op::Create {
+            temp,
+            new:
+                NewItem::LinearIssue {
+                    id,
+                    team,
+                    title,
+                    body,
+                },
+            presets,
+        } = &ops[0]
+        else {
+            panic!("expected a new Linear issue, got {ops:?}")
+        };
+        assert_eq!(temp, &ItemId::new("local:1"));
+        assert_eq!(team, &tba());
+        assert_eq!((title.as_str(), body.as_str()), ("Write the docs", "Steps"));
+        assert_eq!(
+            presets,
+            &[(
+                FieldId::new(crate::linear::ids::STATUS),
+                select_value("s-a-todo", "Todo")
+            )],
+            "TBA's Todo, not the column's canonical (TBB's) option"
+        );
+        // A UUID v4.
+        assert_eq!(id.len(), 36, "{id}");
+        assert_eq!(id.chars().nth(14), Some('4'), "{id}");
+        assert_eq!(a.last_team, Some(tba()));
+        // The placeholder shows at once, selected, in Todo.
+        let placeholder = a.selected_item().unwrap();
+        assert_eq!(placeholder.id, ItemId::new("local:1"));
+        assert_eq!(linear_status(&a, &placeholder.ref_label()), "Todo");
+        // Each new issue has an id of its own.
+        pick(&mut a, "TBA-2");
+        new_linear_issue(&mut a);
+        type_in(&mut a, "Another");
+        assert_eq!(a.handle_key(alt_enter()), vec![Command::Send(2)]);
+        let ids: Vec<String> = pending_ops(&a)
+            .iter()
+            .filter_map(|op| match op {
+                Op::Create {
+                    new: NewItem::LinearIssue { id, .. },
+                    ..
+                } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    /// Review Focus 2: a Linear create whose answer was lost is safe to resend, and `R`
+    /// resends it with the same id, so Linear makes it at most once.
+    #[test]
+    fn r_resends_a_lost_linear_create() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-2");
+        new_linear_issue(&mut a);
+        type_in(&mut a, "Write the docs");
+        assert_eq!(a.handle_key(alt_enter()), vec![Command::Send(1)]);
+        let first = pending_ops(&a)[0].clone();
+        a.on_sync(SyncEvent::OpDone {
+            id: 1,
+            result: Err(BackendError::Network("reset".into())),
+        });
+        assert_eq!(a.errors.len(), 1);
+        assert!(!a.errors[0].may_exist, "safe to resend");
+        assert!(!a.errors[0].message.contains(MAYBE_CREATED));
+        a.handle_key(key('E'));
+        assert_eq!(a.handle_key(key('R')), vec![Command::Send(2)]);
+        assert_eq!(pending_ops(&a), [first], "the same op, the same id");
+        assert!(a.errors.is_empty());
+    }
+
+    #[test]
+    fn linear_new_issue_form_with_team() {
+        let mut a = linear_app();
+        pick(&mut a, "TBA-1");
+        new_linear_issue(&mut a);
+        type_in(&mut a, "Write the docs");
+        let screen =
+            crate::ui::fixtures::render_to_string(100, 24, |f| crate::ui::chrome::draw(f, &mut a));
+        assert!(screen.contains("New issue in TBA"), "{screen}");
         insta::assert_snapshot!(screen);
     }
 }
