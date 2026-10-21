@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-21
+
+Linear boards are now editable, with the same keys as GitHub boards. Saving views and bulk edits move to 0.6.
+
+### Added
+
+- Editing Linear boards. Move a card between columns (a column shared by several teams moves the issue to its own team's state of that name), close and reopen (`X`), reorder with `J` and `K`, set priority, estimate, cycle and the other fields with `e`, assign one person (`a`), set labels (`t`, including a team's single-choice label groups such as Type), retitle, edit the description, comment, archive and unarchive, remove an issue from a project board, create issues with `n` (in the team of the column you are in, or the team you pick), and add an existing issue by its key or its linear.app URL. Edits show at once and are sent in the background; a failed one is undone and listed in the error log, as on GitHub boards.
+- States, cycles and label groups belong to a team in Linear. A move or edit the issue's team cannot take (a card into a column its team lacks) is refused with a reason instead of being sent. Without a team to put a new issue in, the new-issue form asks for one.
+- Linear's own limits are said plainly: one assignee per issue, no drafts or milestones, estimates are whole numbers, and remove only on project boards (it clears the issue's project; on a team board, archive instead).
+
+### Changed
+
+- On a board's setup screen (a missing, rejected or under-scoped token or key for that board's provider), `B` opens the board picker and `Esc` returns to the setup screen. The screen says "Or press B to open another board." and its title reads `setup · r retry · B boards · q quit`. Since 0.4 a board whose credentials stopped working left you stuck on it. The start-time screen with no credentials at all is unchanged.
+- A board picker that is open when the shown board's credentials fail now stays open; `Esc` then shows the setup screen.
+- Linear rewrites Markdown list markers in descriptions (`- ` becomes `* `) when it stores them.
+- An edit key Linear cannot do says "This board can't do that" (milestones and drafts) instead of "Editing Linear boards arrives in 0.5".
+
+### Fixed
+
+- The Board tab on a Linear board no longer shows empty Canceled and Duplicate columns; a column that holds issues still shows.
+- A typo in `is:` on a Linear board (`is:closd`) flashes "unknown filter value: is:closd" and matches nothing, as an unknown filter field does.
+- Tables on Linear boards show people's names without a leading `@`; GitHub logins keep it.
+- Linear's capability limits no longer live in the GitHub-facing code, and the internal name that clashed with the store's poll update is gone.
+
 ## [0.4.0] - 2026-10-20
 
 A read-only viewer for Linear boards, next to GitHub Projects. Editing Linear boards arrives in 0.5; saving views and bulk edits move to 0.6.

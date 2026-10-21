@@ -41,7 +41,7 @@ Public from day one, listed on the herdr marketplace through the `herdr-plugin` 
 - **Item operations:** everything under `ProjectV2Item` listed in section 6.
 - **Issue and pull request operations:** assignees, labels, milestone, title, body, comments, close and reopen.
 - **View operations:** switch, change layout, filter, pick visible fields, save to GitHub, create.
-- **Linear boards:** project and team boards with a personal API key, read-only in 0.4 (built-in tabs and shared custom views, the `f` filter evaluated on the client, quick search, item detail, caching and polling), editable from 0.5. One Linear workspace at a time. The Linear spec's section 2 lists what is out of scope for Linear.
+- **Linear boards:** project and team boards with a personal API key, read-only in 0.4 (built-in tabs and shared custom views, the `f` filter evaluated on the client, quick search, item detail, caching and polling), editable from 0.5 (shipped in 0.5.0). One Linear workspace at a time. The Linear spec's section 2 lists what is out of scope for Linear.
 
 ### Out of scope for v1 (each is its own later spec)
 
@@ -459,7 +459,7 @@ Each milestone is released and usable on its own. Each gets its own section of t
 | 0.2 Item operations | The store's confirmed and pending layers, move, reorder, set and clear fields, sticky items, error log, capability matrix |
 | 0.3 Issue operations | Assignees, labels, milestone, title and body, comments, close and reopen, add existing, new issue, drafts, archive and unarchive, remove |
 | 0.4 Linear viewer | A provider seam with GitHub unchanged, and read-only Linear project and team boards: table and board layouts, built-in tabs and shared custom views, the `f` filter, quick search, item detail, caching and polling (the Linear spec) |
-| 0.5 Linear editing | Editing Linear boards, specified once 0.4 has shipped (the Linear spec, section 11) |
+| 0.5 Linear editing | Shipped in 0.5.0: editing Linear boards (`2026-10-20-linear-editing-design.md`) |
 | 0.6 Views and bulk | Save and create views, local overrides, visual select and bulk edits, mouse drag (the former 0.4, built on the provider seam) |
 | 1.0 | Live suite passing, documentation complete, `herdr-plugin` topic added so the marketplace lists it |
 

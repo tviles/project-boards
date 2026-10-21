@@ -93,9 +93,6 @@ pub struct EditContext {
     pub team_board: bool,
 }
 
-/// Why a provider's boards cannot be edited at all (the 0.4 text).
-pub const LINEAR_READ_ONLY: &str = "Editing Linear boards arrives in 0.5";
-
 /// What a provider can do, apart from what a token or an item allows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderCaps {
@@ -138,7 +135,7 @@ const GITHUB_CAPS: ProviderCaps = ProviderCaps {
     remove_on_team_boards: true,
 };
 
-/// The operations wired in so far, one by one; the rest keep the 0.4 text.
+/// Every operation but milestones and convert (Linear has neither).
 const LINEAR_CAPS: ProviderCaps = ProviderCaps {
     ops: &[
         OpKind::Move,
@@ -230,7 +227,7 @@ impl Denial {
             Denial::Unavailable { provider, kind } => match (provider, kind) {
                 (Provider::Linear, OpKind::Milestone) => "Linear issues have no milestones".into(),
                 (Provider::Linear, OpKind::Convert) => "Linear has no drafts".into(),
-                _ => LINEAR_READ_ONLY.into(),
+                _ => "This board can't do that".into(),
             },
             Denial::RemoveOnTeamBoard => format!(
                 "Every issue of a team is on its team board; archive it instead{}",
@@ -596,7 +593,7 @@ mod tests {
                 let expected = match kind {
                     Milestone => "Linear issues have no milestones",
                     Convert => "Linear has no drafts",
-                    _ => LINEAR_READ_ONLY,
+                    _ => "This board can't do that",
                 };
                 assert_eq!(
                     denial,

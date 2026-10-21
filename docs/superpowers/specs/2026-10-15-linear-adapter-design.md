@@ -322,6 +322,8 @@ Test-driven throughout, with at least 80% line coverage at the release.
 
 ## 11. 0.5 outline: Linear editing (direction only)
 
+Superseded: the 0.5 design is `2026-10-20-linear-editing-design.md`, shipped in 0.5.0. The questions below are kept as they were asked.
+
 Questions for the 0.5 spec, to be answered after 0.4 ships and with phase 0's results:
 
 - How `Op` and `ContentId` generalise: Linear needs one content id (the issue UUID) and no Issue/PR/Draft split.

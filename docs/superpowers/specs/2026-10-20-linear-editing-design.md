@@ -1,6 +1,6 @@
 # project-boards: editing Linear boards (0.5)
 
-**Status:** Design agreed in brainstorming (2026-10-20); pending Tyler's review of this document
+**Status:** Shipped in 0.5.0
 **Date:** 2026-10-20
 **Builds on:** `2026-10-15-linear-adapter-design.md` (the Linear spec) and `2026-09-30-project-boards-design.md` (the main spec). The Linear spec's sections 3–8 and 10 still hold; this document answers its section 11 and says only what changes. The main spec still governs GitHub boards, whose behaviour 0.5 leaves unchanged.
 **Facts:** `docs/phase0-findings.md`, section "Linear" (L1–L10, the seed observations, the plan 2 recording). Linear's API facts below were read from the pinned `crates/queries/graphql/linear/schema.graphql`. Anything still unmeasured is a probe in section 12.
