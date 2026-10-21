@@ -213,7 +213,6 @@ pub(crate) fn task_words(task: &SyncTask) -> &'static str {
     }
 }
 
-/// The setup screen text for errors the user has to fix outside the app.
 /// Whether every option behind `bucket` (its key and aliases) has a kind in `excluded`. A
 /// bucket with no option (No Status, an iteration) never does.
 fn all_excluded(bucket: &Bucket, field: &Field, excluded: &[OptionKind]) -> bool {
@@ -231,6 +230,7 @@ fn all_excluded(bucket: &Bucket, field: &Field, excluded: &[OptionKind]) -> bool
         })
 }
 
+/// The setup screen text for errors the user has to fix outside the app.
 pub fn setup_message(error: &BackendError) -> Option<String> {
     use crate::model::Provider::{Github, Linear};
     match error {

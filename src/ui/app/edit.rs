@@ -2189,10 +2189,9 @@ impl App {
         self.set_extra_filter(&next)
     }
 
-    /// `X`: reopen a closed item at once; close an open one after asking (a reason for an
-    /// issue, yes or no for a pull request).
-    /// The Status value that closes `item` for `reason`, or reopens it (`None`), as a
-    /// `SetField` on `linear:status`: the state of its team's, or the refusal to flash.
+    /// The Status value that moves `item` to `goal` (closed as completed or canceled, or
+    /// reopened), as a `SetField` on `linear:status`: the state of its team's, or the refusal
+    /// to flash.
     pub(crate) fn linear_close_op(&self, item: &Item, goal: StateGoal) -> Result<Op, String> {
         let refused = |r: TeamRefusal| r.message();
         let project = self
@@ -2263,6 +2262,8 @@ impl App {
         Vec::new()
     }
 
+    /// `X`: reopen a closed item at once; close an open one after asking (a reason for an
+    /// issue, yes or no for a pull request).
     pub(crate) fn close_or_reopen(&mut self) -> Vec<Command> {
         let Some(item) = self.action_item().cloned() else {
             self.status.flash = Some("Select an item first".into());

@@ -87,7 +87,7 @@ pub struct EditContext {
     /// A repo refusal must record both "repo" and "public_repo", because either grants repo
     /// access and only a refusal of every alias counts.
     pub refused: Vec<String>,
-    /// The board's provider; a provider that cannot be edited refuses everything first.
+    /// The board's provider; an op kind the provider lacks is refused first.
     pub provider: Provider,
     /// The board is a Linear team's board, where every issue of the team is present.
     pub team_board: bool,

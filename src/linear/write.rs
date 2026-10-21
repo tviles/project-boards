@@ -81,8 +81,8 @@ impl Linear {
     /// A create that fails in any way is followed by `issue_by_key(<that id>)`: if the issue
     /// exists (an earlier send of this create reached Linear), it is returned as created;
     /// otherwise, or if the lookup itself fails, the create's own error is returned. This is
-    /// the spec's L11 fallback (section 12); probe L11's findings may later narrow it to the
-    /// answer Linear gives for an id that already exists.
+    /// the spec's L11 fallback (section 12). Probe L11 (2026-10-21) measured the answer to an
+    /// id that already exists: HTTP 200 with `INPUT_ERROR`, "conflict on insert of Issue".
     pub async fn create_issue(&self, input: Value) -> Result<Item, BackendError> {
         let id = input["id"].as_str().map(String::from);
         let request = GraphqlRequest::raw(
@@ -138,8 +138,9 @@ impl Linear {
     ///
     /// A comment that fails in any way is followed by `CommentById(id)`: a hit means an
     /// earlier send reached Linear, and is success; a miss, or a lookup that fails itself,
-    /// returns the comment's own error. This is the spec's L11 fallback (section 12); probe
-    /// L11's findings may later narrow it.
+    /// returns the comment's own error. This is the spec's L11 fallback (section 12). Probe
+    /// L11 (2026-10-21) measured the answer to an id that already exists: HTTP 200 with
+    /// `INPUT_ERROR`, "conflict on insert of Comment".
     pub async fn create_comment(
         &self,
         id: &str,
