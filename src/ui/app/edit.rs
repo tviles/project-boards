@@ -6045,34 +6045,40 @@ pub(crate) mod tests {
     /// Review Focus 1.
     #[test]
     fn a_cached_04_board_refuses_team_owned_edits_until_resolved() {
+        // 0.4 cached every Linear board read-only, and knew no teams.
         let mut snap = linear_snapshot();
+        snap.project.viewer_can_update = false;
         let meta = snap.project.linear.as_mut().unwrap();
         meta.teams.clear();
         meta.owners.clear();
         let mut a = app_with(snap);
+        let read_only = a.denial_text(crate::model::caps::Denial::ReadOnly);
         pick(&mut a, "TBA-2");
         assert!(a.handle_key(key('<')).is_empty());
-        assert_eq!(
-            a.status.flash.as_deref(),
-            Some("This item was loaded by an older version; refresh with r to edit it")
-        );
+        assert_eq!(a.status.flash.as_deref(), Some(read_only.as_str()));
+        // A field no team owns, too.
+        a.status.flash = None;
+        assert!(a.handle_key(key('e')).is_empty());
+        assert_eq!(a.popup, None);
+        assert_eq!(a.status.flash.as_deref(), Some(read_only.as_str()));
         assert!(a.store.pending().is_empty());
-        // A field no team owns is fine.
-        open_field(&mut a, "priority");
-        type_in(&mut a, "urgent");
-        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(1)]);
-        // The board resolves: the teams are known now.
-        a.on_sync(SyncEvent::Project(linear_project()));
+        // The board resolves: it is editable, and the teams are known now.
+        let resolved = linear_project();
+        assert!(resolved.viewer_can_update);
+        a.on_sync(SyncEvent::Project(resolved));
         pick(&mut a, "TBA-2");
-        assert_eq!(a.handle_key(key('<')), vec![Command::Send(2)]);
+        assert_eq!(a.handle_key(key('<')), vec![Command::Send(1)]);
         assert_eq!(
-            pending_ops(&a)[1],
+            pending_ops(&a)[0],
             set_linear(
                 "i-tba-2",
                 crate::linear::ids::STATUS,
                 select_value("s-a-todo", "Todo")
             )
         );
+        open_field(&mut a, "priority");
+        type_in(&mut a, "urgent");
+        assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Command::Send(2)]);
     }
 
     /// Review Focus 5.
