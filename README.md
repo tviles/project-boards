@@ -2,7 +2,7 @@
 
 A [herdr](https://herdr.dev) plugin for GitHub Projects and Linear: see your project board as a table or a kanban board, switch between its saved views, filter and search it, and read any item, without leaving the terminal.
 
-Edit a GitHub board without leaving herdr: move cards, reorder them, set any field, assign people, label, set milestones, retitle, edit bodies, comment, close and reopen, add new issues, drafts or existing items, convert drafts, archive and remove. Edits show at once and are sent in the background; a failed one is undone and listed in the error log. Linear boards are read-only for now (see [Linear](#linear)); editing them arrives in 0.5, and saving views and bulk edits in 0.6.
+Edit a GitHub board without leaving herdr: move cards, reorder them, set any field, assign people, label, set milestones, retitle, edit bodies, comment, close and reopen, add new issues, drafts or existing items, convert drafts, archive and remove. Edits show at once and are sent in the background; a failed one is undone and listed in the error log. Linear boards are editable too, with the same keys (see [Linear](#linear)); saving views and bulk edits arrive in 0.6.
 
 ## Install
 
@@ -126,7 +126,9 @@ The key is never logged, cached or written to a file. One key reaches one worksp
 
 A Linear board is a project (its issues, across its teams) or a team (all its issues), opened from the picker or with `open --project` (see [Use](#use)). Its tabs are Board, All issues and My issues, then the project's views (on a project board), then the shared views of its teams and of the workspace. The detail shows the description, threaded comments, parent and sub-issues, project, cycle, priority, estimate, due date and links; a reference such as `ENG-123` jumps to that issue. Other people's changes show within one poll interval.
 
-Linear boards are read-only until 0.5: the edit keys say "Editing Linear boards arrives in 0.5". `f` takes the same syntax as on GitHub (`priority:high`, `cycle:@current`, `assignee:@me`, `-label:x`, `no:assignee`, free text), but the plugin evaluates it over the view's loaded issues instead of sending it to the server. A field it does not know, such as a typo like `stauts:Todo`, flashes "unknown filter field" and matches nothing, rather than being ignored. `/` and "Show archived items" work as on GitHub.
+Linear boards are editable with the same keys as GitHub boards. What differs: an issue has one assignee; states, cycles and team label groups belong to a team, so a move into a column the issue's team lacks is refused with a reason; remove works only on project boards (it clears the issue's project; on a team board, archive instead); there are no drafts or milestones; estimates are whole numbers; and on a project board, `n` → Add existing takes an issue key such as `ENG-123` or a linear.app URL. Linear rewrites Markdown list markers in descriptions when it stores them (`- ` becomes `* `).
+
+`f` takes the same syntax as on GitHub (`priority:high`, `cycle:@current`, `assignee:@me`, `-label:x`, `no:assignee`, free text), but the plugin evaluates it over the view's loaded issues instead of sending it to the server. A field it does not know, such as a typo like `stauts:Todo`, flashes "unknown filter field" and matches nothing, rather than being ignored. `/` and "Show archived items" work as on GitHub.
 
 ## Troubleshooting
 

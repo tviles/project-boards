@@ -67,7 +67,26 @@ Setup: the testbed workspace's key in `LINEAR_API_KEY` (or `linear_api_key_comma
 - [ ] `f` + `stauts:Todo` flashes "unknown filter field: stauts" and the view is empty.
 - [ ] `Enter` on an issue with sub-issues shows its description, threaded comments (a reply indented under its comment), the parent (on a sub-issue), the sub-issues with their states, and its links; a `TBA-…` reference in the text jumps to that issue.
 - [ ] Change an issue's status in Linear's web app: the board shows it within one poll interval (30 seconds while focused).
-- [ ] `e`, `<`, `>`, `a`, `t`, `c`, `X`, `n` and `A` each say "Editing Linear boards arrives in 0.5"; `Space` offers only "Open in the browser" and "Show archived items"; `o` opens the issue on linear.app.
+- [ ] `o` opens the issue on linear.app. (The edit keys work from 0.5: see "Linear editing (0.5)".)
 - [ ] `doctor` prints `linear key: from LINEAR_API_KEY` and `linear: workspace project-boards-linear-testbed; … requests left`.
 - [ ] Without `LINEAR_API_KEY` (and no `linear_api_key_command`): the picker shows one dim line "Linear boards: set LINEAR_API_KEY or linear_api_key_command" and no Linear sections, `doctor` prints `linear: not configured (optional)`, and the testbed GitHub board works as in 0.3 (open, move a card, `f` help reads "add a filter on top of the view's own filter").
 - [ ] With no credentials at all (`GH_TOKEN`, `GITHUB_TOKEN` and `LINEAR_API_KEY` unset, no `linear_api_key_command`, and `gh_user = "no-such-account"` in `config.toml` so `gh auth token` gives nothing): the setup screen lists the GitHub fix, "— or —", then the Linear fix.
+
+## Linear editing (0.5)
+
+Setup: as for "Linear (0.4)", on the testbed project board (`linear:project:…` from the picker), which has TBA and TBB issues and merged columns. Never point this at a real workspace. After each change, look at the issue in Linear's app.
+
+- [ ] `>` (or `<`) moves a TBA card across a merged column (a state TBA and TBB share by name): it shows in the new column at once, and Linear shows the TBA state of that name.
+- [ ] `>` on a TBB card into `In Review` (a state only TBA has) is refused with a reason naming the team, and the card stays.
+- [ ] `X` closes a card as canceled (it shows closed, in Canceled); reopening it puts it back in an unstarted state.
+- [ ] In All issues, `J` and `K` reorder an issue; Linear's own order follows.
+- [ ] `e` sets priority, estimate (a whole number; `2.5` is refused), cycle and the Type label group; a TBB issue offered a TBA-only cycle is refused with a reason.
+- [ ] `a` assigns one person (picking a second replaces the first); `t` sets and clears labels.
+- [ ] Retitle, edit the description (a `- ` list comes back as `* `), and add a comment; each shows in Linear.
+- [ ] Archive an issue (it disappears; "Show archived items" lists it), then unarchive it.
+- [ ] `n` in a TBA column creates a TBA issue with that column's state; `n` in a merged column asks for the team (the team line) and creates it in the chosen team.
+- [ ] `n` → Add existing with `TBB-2` by key adds it to the project; a pasted linear.app URL works too.
+- [ ] `Space` → Remove from project takes `TBB-2` off the project and leaves the issue in Linear; on a team board (`linear:team:TBA`) the `Space` menu has no "Remove from project" entry.
+- [ ] `C` says "Linear has no drafts"; the `Space` menu offers no Milestone entry.
+- [ ] A GitHub board behaves exactly as in 0.4 (the testbed GitHub board: move, edit, comment).
+- [ ] On a board whose key stopped working (set `LINEAR_API_KEY` to a revoked key), the setup screen says "Or press B to open another board."; `B` opens the picker and `Esc` returns to the setup screen.
